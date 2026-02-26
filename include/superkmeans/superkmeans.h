@@ -226,10 +226,9 @@ class SuperKMeans {
 
         std::vector<vector_value_t> data_samples_buffer;
         data_samples_buffer.reserve(n_samples * d);
-        SampleAndRotateVectors(
+        auto data_to_cluster = SampleAndRotateVectors(
             data_p, data_samples_buffer.data(), n, n_samples, !config.data_already_rotated
         );
-        auto data_to_cluster = data_samples_buffer.data();
 
         RotateOrCopy(
             horizontal_centroids.get(),
@@ -427,12 +426,15 @@ class SuperKMeans {
         not_pruned_counts.reserve(n_vectors);
         std::fill(not_pruned_counts.data(), not_pruned_counts.data() + n_vectors, 0);
         std::vector<vector_value_t> data_buffer;
-        data_buffer.reserve(n_vectors * d);
-
-        // TODO(@lkuffo, med): Double rotating the data seems wasteful, especially if
-        // sample_fraction is 1.0
-        RotateOrCopy(vectors, data_buffer.data(), n_vectors, !config.data_already_rotated);
-        auto data_p = data_buffer.data();
+        const vector_value_t* data_p;
+        if (config.data_already_rotated) {
+            // Data is already rotated: use original pointer directly (avoid redundant memcpy)
+            data_p = vectors;
+        } else {
+            data_buffer.reserve(n_vectors * d);
+            RotateOrCopy(vectors, data_buffer.data(), n_vectors, true);
+            data_p = data_buffer.data();
+        }
         GetPartialL2NormsRowMajor(
             horizontal_centroids.get(), n_centroids, centroid_norms.get(), partial_d
         );
@@ -1372,7 +1374,7 @@ class SuperKMeans {
      * @param n Total number of input vectors
      * @param n_samples Number of vectors to sample
      */
-    void SampleAndRotateVectors(
+    const vector_value_t* SampleAndRotateVectors(
         const vector_value_t* SKM_RESTRICT data,
         vector_value_t* SKM_RESTRICT out,
         const size_t n,
@@ -1417,13 +1419,19 @@ class SuperKMeans {
                         sizeof(vector_value_t) * d
                     );
                 }
-                return;
+                return out;
             }
         }
         if (config.verbose)
             std::cout << "Using " << n_samples << " vectors" << std::endl;
 
+        // No rotation and no sampling: use the original data directly (avoid redundant memcpy)
+        if (!rotate) {
+            return data;
+        }
+
         RotateOrCopy(src_data, out, n_samples, rotate);
+        return out;
     }
 
     const size_t d;
