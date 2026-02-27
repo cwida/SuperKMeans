@@ -65,7 +65,7 @@ int main(int argc, char* argv[]) {
     file_queries.read(reinterpret_cast<char*>(queries.data()), n_queries * d * sizeof(float));
     file_queries.close();
 
-    skmeans::SuperKMeansConfig config;
+    skmeans::HierarchicalSuperKMeansConfig config;
     config.iters = n_iters;
     config.verbose = false;
     config.n_threads = THREADS;
@@ -75,6 +75,10 @@ int main(int argc, char* argv[]) {
     config.early_termination = false;
     config.sampling_fraction = sampling_fraction;
     config.use_blas_only = false;
+    config.iters_mesoclustering = 3;
+    config.iters_fineclustering = 5;
+    config.iters_refinement = 0;
+    config.tol = 1e-3f;
 
     auto is_angular = std::find(
         bench_utils::ANGULAR_DATASETS.begin(), bench_utils::ANGULAR_DATASETS.end(), dataset
@@ -85,7 +89,7 @@ int main(int argc, char* argv[]) {
     }
 
     auto kmeans_state =
-        skmeans::SuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>(
+        skmeans::HierarchicalSuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>(
             n_clusters, d, config
         );
 

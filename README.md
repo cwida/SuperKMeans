@@ -85,6 +85,9 @@ int main(int argc, char* argv[]) {
 
 Check our [examples](./examples/) for fully working examples in Python and C++.
 
+## Documentation
+Check [our wiki](https://github.com/lkuffo/SuperKMeans/wiki/Documentation) for advanced usage.
+
 ## Installation
 We provide Python bindings for ease of use. Soon we will be available in PyPI.
 

@@ -33,7 +33,6 @@ class SIMDComputer<DistanceFunction::l2, Quantization::u8> {
         size_t i = 0;
         for (; i + 16 <= num_dimensions; i += 16) {
             uint8x16_t a_vec = vld1q_u8(vector1 + i);
-            __builtin_prefetch(vector2 + i, 0, 0);
             uint8x16_t b_vec = vld1q_u8(vector2 + i);
             uint8x16_t d_vec = vabdq_u8(a_vec, b_vec);
             sum_vec = vdotq_u32(sum_vec, d_vec, d_vec);

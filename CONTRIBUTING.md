@@ -60,6 +60,7 @@ Tests are also prone to bugs. If that is the case, please open an Issue.
 * Avoid `new` and `delete`
 * There is a `.clang-format` in the project. Make sure to adhere to it. We have provided scripts to check and format the files within the project:
 ```bash
+pip install clang-format==18.1.8
 ./scripts/format_check.sh   # Checks the formatting
 ./scripts/format.sh         # Fix the formatting
 ```

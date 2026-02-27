@@ -103,7 +103,7 @@ const std::vector<float> EXPLORE_FRACTIONS = {0.001f,  0.002f,  0.003f,  0.004f,
 const std::vector<int> KNN_VALUES = {10, 100};
 
 // Benchmark configuration
-const int MAX_ITERS = 25;
+const int MAX_ITERS = 10;
 const int N_QUERIES = 1000;
 
 // Early termination benchmark configuration

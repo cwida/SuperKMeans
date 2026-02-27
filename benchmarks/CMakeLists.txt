@@ -52,6 +52,9 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 add_executable(end_to_end_superkmeans.out end_to_end/end_to_end_superkmeans.cpp)
 target_link_libraries(end_to_end_superkmeans.out PRIVATE ${BENCH_COMMON_LIBS})
 
+add_executable(end_to_end_hierarchical.out end_to_end/end_to_end_hierarchical.cpp)
+target_link_libraries(end_to_end_hierarchical.out PRIVATE ${BENCH_COMMON_LIBS})
+
 # FAISS benchmark on real datasets with recall computation
 add_executable(end_to_end_faiss.out end_to_end/end_to_end_faiss.cpp)
 target_link_libraries(end_to_end_faiss.out PRIVATE ${FAISS_COMMON_LIBS} ${BENCH_COMMON_LIBS})
@@ -125,6 +128,7 @@ target_link_libraries(cohere_bench_faiss.out PRIVATE ${FAISS_COMMON_LIBS} ${BENC
 add_custom_target(benchmarks
     DEPENDS
         end_to_end_superkmeans.out
+        end_to_end_hierarchical.out
         end_to_end_faiss.out
         varying_k_superkmeans.out
         varying_k_faiss.out
