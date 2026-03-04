@@ -12,6 +12,8 @@ struct HierarchicalSuperKMeansConfig : SuperKMeansConfig {
     uint32_t iters_mesoclustering = 3;
     uint32_t iters_fineclustering = 5;
     uint32_t iters_refinement = 0; // Refinement iteration is not needed to achieve good recall
+
+    HierarchicalSuperKMeansConfig() { sampling_fraction = 1.0f; }
 };
 
 /**
@@ -51,6 +53,7 @@ class HierarchicalSuperKMeans : public SuperKMeans<q, alpha> {
         SKMEANS_ENSURE_POSITIVE(config.iters_fineclustering);
 
         static_cast<SuperKMeansConfig&>(hierarchical_config) = this->config;
+        hierarchical_config.sampling_fraction = config.sampling_fraction;
 
         if (n_clusters <= 128) {
             if (!this->hierarchical_config.suppress_warnings) {

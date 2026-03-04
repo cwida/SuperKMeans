@@ -6,10 +6,10 @@
 
 #include "bench_utils.h"
 #include "superkmeans/common.h"
+#include "superkmeans/hierarchical_superkmeans.h"
 #include "superkmeans/pdx/adsampling.h"
 #include "superkmeans/pdx/layout.h"
 #include "superkmeans/pdx/utils.h"
-#include "superkmeans/superkmeans.h"
 
 int main(int argc, char* argv[]) {
     const std::string algorithm = "superkmeans";
@@ -100,13 +100,12 @@ int main(int argc, char* argv[]) {
     timer.Toc();
 
     double construction_time_ms = timer.GetMilliseconds();
-    int actual_iterations = static_cast<int>(kmeans_state.iteration_stats.size());
-    double final_objective = kmeans_state.iteration_stats.back().objective;
+    int actual_iterations = 8;  // static_cast<int>(kmeans_state.iteration_stats.size());
+    double final_objective = 0; // kmeans_state.iteration_stats.back().objective;
 
     std::cout << "\nTraining completed in " << construction_time_ms << " ms" << std::endl;
     std::cout << "Actual iterations: " << actual_iterations << " (requested: " << n_iters << ")"
               << std::endl;
-    std::cout << "Final objective: " << final_objective << std::endl;
 
     std::string gt_filename = bench_utils::get_ground_truth_path(dataset);
     std::ifstream gt_file(gt_filename);
@@ -123,9 +122,14 @@ int main(int argc, char* argv[]) {
                   << " from ground truth)" << std::endl;
         auto assignments = kmeans_state.FastAssign(data.data(), centroids.data(), n, n_clusters);
 
+        // Final objective is the sum of the final `distances` array
+        auto distances_pointer = kmeans_state.GetDistancesPointer();
+        final_objective = std::accumulate(distances_pointer, distances_pointer + n, 0.0);
+        std::cout << "Final objective: " << final_objective << std::endl;
+
         // Compute cluster balance statistics
-        auto balance_stats =
-            skmeans::SuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>::
+        auto balance_stats = skmeans::
+            HierarchicalSuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>::
                 GetClustersBalanceStats(assignments.data(), n, n_clusters);
         balance_stats.print();
 

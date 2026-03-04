@@ -351,7 +351,8 @@ class SuperKMeans {
     ) {
         SKM_PROFILE_SCOPE("assign");
         std::vector<uint32_t> result_assignments(n_vectors);
-        std::vector<distance_t> tmp_distances_buf(X_BATCH_SIZE * Y_BATCH_SIZE);
+        std::unique_ptr<distance_t[]> tmp_distances_buf(new distance_t[X_BATCH_SIZE * Y_BATCH_SIZE]
+        );
         std::vector<vector_value_t> vector_norms(n_vectors);
         std::vector<vector_value_t> centroid_norms_local(n_centroids);
         std::vector<distance_t> result_distances(n_vectors);
@@ -374,17 +375,17 @@ class SuperKMeans {
             centroid_norms_local.data(),
             result_assignments.data(),
             result_distances.data(),
-            tmp_distances_buf.data()
+            tmp_distances_buf.get()
         );
 
         return result_assignments;
     }
 
     /**
-     * @brief [EXPERIMENTAL] Fast assignment using GEMM+PRUNING with trained state.
+     * @brief Fast assignment using GEMM+PRUNING with trained state.
      *
      * Assumes that the vectors sent here are the same as those used in .Train().
-     * Leverages the trained PDX layout, rotation, and pruning for a faster
+     * Leverages the assignments from the training for a faster
      * assignment than brute force Assign().
      *
      * @param vectors The data matrix (row-major, n_vectors x d)
@@ -566,6 +567,12 @@ class SuperKMeans {
 
     /** @brief Returns whether the model has been trained. */
     [[nodiscard]] bool IsTrained() const noexcept { return trained; }
+
+    /** @brief Returns the sampling fraction used during training. */
+    [[nodiscard]] float GetSamplingFraction() const noexcept { return config.sampling_fraction; }
+
+    /** @brief Returns a pointer to the distances array. */
+    [[nodiscard]] distance_t* GetDistancesPointer() { return distances.get(); }
 
     /**
      * @brief Calculate cluster balance statistics from assignments
