@@ -145,8 +145,46 @@ class PDXearch {
         size_t current_vertical_dimension = current_dimension_idx;
         size_t current_horizontal_dimension = 0;
 
+        bool use_nary_layout = false;
+        if (use_nary_layout){
+            // For every remaining vector...
+            for (size_t vector_idx = 0; vector_idx < n_vectors_not_pruned; vector_idx++) {
+                size_t v_idx = pruning_positions[vector_idx];
+                // Advance every 64 dimensions in the vector and try to prune
+                for (size_t d_idx = current_vertical_dimension; d_idx < pdx_data.num_dimensions; d_idx += H_DIM_SIZE) {
+                    // Cap advance until num_dimensions
+                    auto go_until = std::min(d_idx + H_DIM_SIZE, static_cast<size_t>(pdx_data.num_dimensions));
+                    // Compute how much I must explore
+                    auto dims_to_explore = go_until - d_idx;
+                    pruning_distances[v_idx] += DistanceComputer<alpha, Q>::Horizontal(
+                        query + d_idx, 
+                        data + (v_idx * pdx_data.num_dimensions) + d_idx, dims_to_explore
+                    );
+                    auto p_t = pruner.template GetPruningThreshold<Q>(best_candidate, go_until);
+                    // If the distance exceeds the threshold, we can skip this vector (break the dimensions loop)
+                    if (pruning_distances[v_idx] > p_t){
+                        break;
+                    }
+                    // If we are at the end of the vector
+                    if (go_until >= pdx_data.num_dimensions){
+                        // Is the distance smaller than the best candidate?
+                        if (pruning_distances[v_idx] < best_candidate.distance){
+                            // Replace the best candidate
+                            best_candidate.index = vector_indices[v_idx];
+                            best_candidate.distance = pruning_distances[v_idx];
+                        } 
+                    }
+                }
+            }
+            // Set to 0 so that SetBestCandidate() is not called outside
+            n_vectors_not_pruned = 0;
+            // Early return
+            return;
+        }
+
         // Go through the horizontal dimensions 64 at a time
-        while (pdx_data.num_horizontal_dimensions && n_vectors_not_pruned &&
+        bool use_pdx_pruning = true;
+        while (use_pdx_pruning && pdx_data.num_horizontal_dimensions && n_vectors_not_pruned &&
                current_horizontal_dimension < pdx_data.num_horizontal_dimensions) {
             cur_n_vectors_not_pruned = n_vectors_not_pruned;
             size_t offset_data = (pdx_data.num_vertical_dimensions * n_vectors) +
@@ -180,7 +218,41 @@ class PDXearch {
         }
 
         // Go through all the remaining vertical dimensions stored in the horizontal layout
-        if (n_vectors_not_pruned && current_vertical_dimension < pdx_data.num_vertical_dimensions) {
+        if (!use_pdx_pruning){
+            cur_n_vectors_not_pruned = n_vectors_not_pruned;
+            size_t dimensions_left = pdx_data.num_dimensions - current_vertical_dimension;
+            size_t offset_query = current_vertical_dimension;
+            for (size_t vector_idx = 0; vector_idx < n_vectors_not_pruned; vector_idx++) {
+                size_t v_idx = pruning_positions[vector_idx];
+                auto data_pos = data +
+                                (v_idx * pdx_data.num_dimensions) +
+                                current_vertical_dimension;
+                SKM_PREFETCH(data_pos, 0, 1);
+            }
+            for (size_t vector_idx = 0; vector_idx < n_vectors_not_pruned; vector_idx++) {
+                size_t v_idx = pruning_positions[vector_idx];
+                auto data_pos = data +
+                                (v_idx * pdx_data.num_dimensions) +
+                                current_vertical_dimension;
+                pruning_distances[v_idx] += DistanceComputer<alpha, Q>::Horizontal(
+                    query + offset_query, data_pos, dimensions_left
+                );
+            }
+            current_dimension_idx = pdx_data.num_dimensions;
+            current_vertical_dimension = pdx_data.num_vertical_dimensions;
+            assert(
+                current_dimension_idx == current_vertical_dimension + current_horizontal_dimension
+            );
+            GetPruningThreshold<Q>(best_candidate, pruning_threshold, current_dimension_idx);
+            EvaluatePruningPredicateOnPositionsArray<Q>(
+                cur_n_vectors_not_pruned,
+                n_vectors_not_pruned,
+                pruning_positions,
+                pruning_threshold,
+                pruning_distances
+            );            
+        }
+        else if (n_vectors_not_pruned && current_vertical_dimension < pdx_data.num_vertical_dimensions) {
             cur_n_vectors_not_pruned = n_vectors_not_pruned;
             size_t dimensions_left = pdx_data.num_vertical_dimensions - current_vertical_dimension;
             size_t offset_query = current_vertical_dimension;

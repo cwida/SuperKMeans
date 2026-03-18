@@ -390,9 +390,10 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
 
                         // To prune even better, we get the initial threshold from the previously
                         // assigned centroid
-                        const auto prev_assignment = out_knn[i_idx];
+                        auto prev_assignment = out_knn[i_idx];
                         distance_t dist_to_prev_centroid;
                         if (j == 0) {
+                            //prev_assignment = 0;
                             dist_to_prev_centroid =
                                 DistanceComputer<DistanceFunction::l2, Quantization::f32>::
                                     Horizontal(y + (prev_assignment * d), data_p, d);

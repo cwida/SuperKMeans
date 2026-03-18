@@ -1237,6 +1237,7 @@ class SuperKMeans {
             avg_not_pruned_pct += static_cast<float>(not_pruned_counts[i]);
         }
         avg_not_pruned_pct /= static_cast<float>(n_samples * n_y);
+        // return avg_not_pruned_pct;
 
         uint32_t old_partial_d = partial_d;
         if (avg_not_pruned_pct > config.max_not_pruned_pct) {

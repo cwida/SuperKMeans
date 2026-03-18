@@ -125,6 +125,24 @@ target_link_libraries(cohere_bench_superkmeans.out PRIVATE ${BENCH_COMMON_LIBS})
 add_executable(cohere_bench_faiss.out cohere_bench_faiss.cpp)
 target_link_libraries(cohere_bench_faiss.out PRIVATE ${FAISS_COMMON_LIBS} ${BENCH_COMMON_LIBS})
 
+# fast-kmeans library (Hamerly, Elkan, Annulus, Drake, etc.)
+set(FAST_KMEANS_DIR ${CMAKE_SOURCE_DIR}/extern/fast-kmeans/src)
+file(GLOB FAST_KMEANS_SRCS ${FAST_KMEANS_DIR}/*.cpp)
+# Exclude driver files and python bindings from the library
+list(FILTER FAST_KMEANS_SRCS EXCLUDE REGEX "driver-.*\\.cpp$")
+list(FILTER FAST_KMEANS_SRCS EXCLUDE REGEX "fastkmeans.*\\.cpp$")
+list(FILTER FAST_KMEANS_SRCS EXCLUDE REGEX "py.*\\.cpp$")
+
+add_library(fast_kmeans STATIC ${FAST_KMEANS_SRCS})
+target_include_directories(fast_kmeans PUBLIC ${FAST_KMEANS_DIR})
+target_compile_definitions(fast_kmeans PUBLIC USE_THREADS)
+target_link_libraries(fast_kmeans PUBLIC pthread)
+target_compile_options(fast_kmeans PRIVATE -w) # Suppress warnings from third-party code
+
+# fast-kmeans benchmark on real datasets with recall computation
+add_executable(end_to_end_fast_kmeans.out end_to_end/end_to_end_fast_kmeans.cpp)
+target_link_libraries(end_to_end_fast_kmeans.out PRIVATE fast_kmeans ${BENCH_COMMON_LIBS})
+
 add_custom_target(benchmarks
     DEPENDS
         end_to_end_superkmeans.out
@@ -148,4 +166,5 @@ add_custom_target(benchmarks
         microbenchmark_horizontal_kernels.out
         cohere_bench_superkmeans.out
         cohere_bench_faiss.out
+        end_to_end_fast_kmeans.out
 )

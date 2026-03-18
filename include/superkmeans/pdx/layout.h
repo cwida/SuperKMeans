@@ -161,6 +161,14 @@ class PDXLayout {
     ) {
         using scalar_t = skmeans_value_t<q>;
 
+        // TODO: DELETE
+        // memcpy(
+        //     (void*) out_pdx_vectors,
+        //     (void*) in_vectors,
+        //     n * d * sizeof(scalar_t)
+        // );
+        // return;
+
         auto [horizontal_d, vertical_d] = GetDimensionSplit(d);
         assert(horizontal_d % H_DIM_SIZE == 0);
 
