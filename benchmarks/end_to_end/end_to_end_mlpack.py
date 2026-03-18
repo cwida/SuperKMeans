@@ -26,6 +26,7 @@ VALID_ALGORITHMS = {
     "hamerly": "HamerlyKMeans",
     "pelleg-moore": "PellegMooreKMeans",
     "dualtree": "DualTreeKMeans",
+    "dualtree-covertree": "DualTreeCoverTree"
 }
 
 if __name__ == "__main__":
