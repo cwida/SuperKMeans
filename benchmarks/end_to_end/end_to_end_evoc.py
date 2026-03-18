@@ -70,6 +70,7 @@ if __name__ == "__main__":
         )
     construction_time_ms = timer.get_milliseconds()
     print(f"\nTraining completed in {construction_time_ms:.2f} ms")
+    exit()
 
     # Derive cluster assignments from the chosen EVoC layer.
     # With max_layers=1, clusterer.labels_ already corresponds to that layer.
