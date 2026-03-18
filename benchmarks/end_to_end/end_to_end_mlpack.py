@@ -82,7 +82,7 @@ if __name__ == "__main__":
     construction_time_ms = timer.get_milliseconds()
 
     # Extract centroids: mlpack returns (d, k) column-major -> transpose to (k, d) row-major
-    centroids = result['centroid'].T.astype(np.float32)
+    centroids = result['centroid'].astype(np.float32)
     # Extract assignments: mlpack returns a (1, num_vectors) row of cluster labels
     assignments = result['output'].flatten().astype(np.int64)
 
