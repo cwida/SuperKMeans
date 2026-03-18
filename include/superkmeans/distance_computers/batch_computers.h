@@ -343,6 +343,41 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
                 if (j + Y_BATCH_SIZE > n_y) {
                     batch_n_y = n_y - j;
                 }
+                // ABLATION: First y_batch uses full GEMM + brute-force min, no pruning
+                if (j == 0) {
+                    {
+                        SKM_PROFILE_SCOPE("search/1st_blas");
+                        BlasMatrixMultiplication(
+                            batch_x_p, batch_y_p, batch_n_x, batch_n_y, d, 0, tmp_distances_buf
+                        );
+                    }
+                    Eigen::Map<MatrixR> distances_matrix(tmp_distances_buf, batch_n_x, batch_n_y);
+                    // Precompute full y norms for this batch (norms_y are partial)
+                    std::vector<float> full_norms_y(batch_n_y);
+                    for (size_t c = 0; c < batch_n_y; ++c) {
+                        Eigen::Map<const Eigen::VectorXf> yc(batch_y_p + c * d, d);
+                        full_norms_y[c] = yc.squaredNorm();
+                    }
+#pragma omp parallel for num_threads(g_n_threads)
+                    for (size_t r = 0; r < batch_n_x; ++r) {
+                        const auto i_idx = i + r;
+                        Eigen::Map<const Eigen::VectorXf> xr(x + i_idx * d, d);
+                        float norm_x_full = xr.squaredNorm();
+                        float* row_p = distances_matrix.data() + r * batch_n_y;
+#pragma clang loop vectorize(enable)
+                        for (size_t c = 0; c < batch_n_y; ++c) {
+                            row_p[c] = -2.0f * row_p[c] + norm_x_full + full_norms_y[c];
+                        }
+                        uint32_t knn_idx;
+                        auto batch_top_1 = distances_matrix.row(r).minCoeff(&knn_idx);
+                        if (batch_top_1 < out_distances[i_idx]) {
+                            out_distances[i_idx] = std::max(0.0f, batch_top_1);
+                            out_knn[i_idx] = j + knn_idx;
+                        }
+                    }
+                    continue;
+                }
+                // Normal flow for j > 0: partial GEMM + pruning
                 {
                     SKM_PROFILE_SCOPE("search/blas");
 #if defined(__APPLE__)
