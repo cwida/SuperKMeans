@@ -46,7 +46,7 @@ if __name__ == "__main__":
             f"Choose from {list(DATASET_PARAMS.keys())}"
         )
     num_vectors, num_dimensions = DATASET_PARAMS[dataset]
-    num_centroids = 5 # get_default_n_clusters(num_vectors)
+    num_centroids = 100 # get_default_n_clusters(num_vectors)
     n_iter = 10 # MAX_ITERS
     threads = threads
 
