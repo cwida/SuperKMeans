@@ -75,6 +75,7 @@ if __name__ == "__main__":
             input_=data_f64,
             clusters=num_centroids,
             algorithm=variant,
+            allow_empty_clusters=True,
             max_iterations=n_iter,
             seed=42,
             labels_only=True,
