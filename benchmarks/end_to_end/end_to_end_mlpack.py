@@ -47,7 +47,7 @@ if __name__ == "__main__":
         )
     num_vectors, num_dimensions = DATASET_PARAMS[dataset]
     num_centroids = get_default_n_clusters(num_vectors)
-    n_iter = MAX_ITERS
+    n_iter = 10 # MAX_ITERS
     threads = threads
 
     print(f"=== Running algorithm: {algorithm} ({VALID_ALGORITHMS[variant]}) ===")
@@ -82,7 +82,7 @@ if __name__ == "__main__":
     construction_time_ms = timer.get_milliseconds()
 
     # Extract centroids: (num_dimensions, num_centroids) -> (num_centroids, num_dimensions)
-    centroids = result['centroid'].T.astype(np.float32)
+    centroids = result['centroid'].astype(np.float32)
     # Extract assignments: mlpack returns a (1, num_vectors) row of cluster labels
     assignments = result['output'].flatten().astype(np.int64)
 
