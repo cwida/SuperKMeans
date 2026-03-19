@@ -2,9 +2,9 @@
   Super K-Means
 <div align="center">
     <a href="https://img.shields.io/badge/Paper-COMINGSOON-blue"><img src="https://img.shields.io/badge/Paper-blue" alt="Paper" /></a>
-    <img src="https://github.com/lkuffo/SuperKMeans/actions/workflows/ci.yml/badge.svg?cacheSeconds=3600" alt="License" />
-    <a href="https://github.com/lkuffo/SuperKMeans/blob/main/LICENSE"><img src="https://img.shields.io/github/license/lkuffo/SuperKMeans?cacheSeconds=3600" alt="License" /></a>
-    <a href="https://github.com/lkuffo/SuperKMeans/stargazers"><img src="https://img.shields.io/github/stars/lkuffo/SuperKMeans" alt="GitHub stars" /></a>
+    <img src="https://github.com/cwida/SuperKMeans/actions/workflows/ci.yml/badge.svg?cacheSeconds=3600" alt="License" />
+    <a href="https://github.com/cwida/SuperKMeans/blob/main/LICENSE"><img src="https://img.shields.io/github/license/cwida/SuperKMeans?cacheSeconds=3600" alt="License" /></a>
+    <a href="https://github.com/cwida/SuperKMeans/stargazers"><img src="https://img.shields.io/github/stars/cwida/SuperKMeans" alt="GitHub stars" /></a>
 </div>
 </h1>
 <h3 align="center">
@@ -82,7 +82,7 @@ int main(int argc, char* argv[]) {
 Check our [examples](./examples/) for fully working examples in Python and C++.
 
 ## Documentation
-Check [our wiki](https://github.com/lkuffo/SuperKMeans/wiki/Documentation) for advanced usage.
+Check [our wiki](https://github.com/cwida/SuperKMeans/wiki/Documentation) for advanced usage.
 
 ## Installation
 We provide Python bindings for ease of use. Soon we will be available in PyPI.
@@ -94,7 +94,7 @@ We provide Python bindings for ease of use. Soon we will be available in PyPI.
 - Python 3 (only for Python bindings)
 
 ```bash
-git clone https://github.com/lkuffo/SuperKMeans.git
+git clone https://github.com/cwida/SuperKMeans.git
 cd SuperKMeans
 git submodule update --init
 pip install .
@@ -111,7 +111,7 @@ python ./examples/simple_clustering.py 200000 1536 1000
 <summary>Compilation in C++</summary>
 
 ```bash
-git clone https://github.com/lkuffo/SuperKMeans.git
+git clone https://github.com/cwida/SuperKMeans.git
 cd SuperKMeans
 git submodule update --init
 

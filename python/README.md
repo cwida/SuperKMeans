@@ -5,7 +5,7 @@ Python bindings for SuperKMeans
 ### Install from source
 
 ```bash
-git clone https://github.com/lkuffo/SuperKMeans.git
+git clone https://github.com/cwida/SuperKMeans.git
 cd SuperKMeans
 pip install .
 ```
