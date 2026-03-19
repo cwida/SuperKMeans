@@ -1,6 +1,6 @@
 # Benchmarking
 
-We provide a set of benchmarks to reproduce every result of our VLDB'26 publication. To compile them, you need to add the following CMake variable:
+We provide a set of benchmarks to reproduce every result of our paper. To compile them, you need to add the following CMake variable:
 
 ```bash
 cmake . -DSKMEANS_COMPILE_BENCHMARKS=ON

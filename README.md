@@ -1,7 +1,7 @@
 <h1 align="center">
   Super K-Means
 <div align="center">
-    <a href="https://img.shields.io/badge/Paper-COMINGSOON-blue"><img src="https://img.shields.io/badge/Paper-VLDB'26-blue" alt="Paper" /></a>
+    <a href="https://img.shields.io/badge/Paper-COMINGSOON-blue"><img src="https://img.shields.io/badge/Paper-blue" alt="Paper" /></a>
     <img src="https://github.com/lkuffo/SuperKMeans/actions/workflows/ci.yml/badge.svg?cacheSeconds=3600" alt="License" />
     <a href="https://github.com/lkuffo/SuperKMeans/blob/main/LICENSE"><img src="https://img.shields.io/github/license/lkuffo/SuperKMeans?cacheSeconds=3600" alt="License" /></a>
     <a href="https://github.com/lkuffo/SuperKMeans/stargazers"><img src="https://img.shields.io/github/stars/lkuffo/SuperKMeans" alt="GitHub stars" /></a>
@@ -15,9 +15,6 @@
         <img src="./benchmarks/results/plots/github_1.png" height=260 alt="SuperKMeans vs FAISS and Scikit Learn" style="{max-height: 250px}">
 </p>
 
-> [!IMPORTANT]
-> **VLDB'26 reviewers**: For reproducibility of our results, check [BENCHMARKING.md](./BENCHMARKING.md).
-
 ## Why Super K-Means?
 - **100x faster clustering** than FAISS of vector embeddings (Cohere, OpenAI, MXBAI, CLIP, MiniLM).
 - Index 10M embeddings of 1024 dimensions [**in less than a minute**](https://www.lkuffo.com/superkmeans/) on a single CPU.
@@ -25,9 +22,8 @@
 - Efficient in **CPUs** (ARM and x86) and **GPUs**.
 
 ## Our secret sauce
-- Reliable and efficient **pruning of dimensions**.
+- Carefully interleaving GEMM routines and pruning kernels that **prune dimensions** efficiently
 - In the benchmarks you see in the cover image, **all algorithms are clustering the same data**: No dimensionality reduction, no sampling, no early-termination.
-- We will release our paper with all the details soon!
 
 ## Usage
 ```py
