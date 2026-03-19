@@ -14,7 +14,7 @@ Once you have these requirements, you can install Python Bindings or compile our
 <summary> <b> Installing Python Bindings </b></summary>
 
 ```sh
-git clone https://github.com/lkuffo/SuperKMeans.git
+git clone https://github.com/cwida/SuperKMeans.git
 cd SuperKMeans
 git submodule update --init
 
@@ -30,7 +30,7 @@ pip install .
 <summary> <b> Compiling C++ Library </b></summary>
 
 ```sh
-git clone https://github.com/lkuffo/SuperKMeans.git
+git clone https://github.com/cwida/SuperKMeans.git
 cd SuperKMeans
 git submodule update --init
 

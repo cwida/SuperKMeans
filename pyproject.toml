@@ -46,8 +46,8 @@ test = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/lkuffo/superkmeans"
-Repository = "https://github.com/lkuffo/superkmeans"
+Homepage = "https://github.com/cwida/superkmeans"
+Repository = "https://github.com/cwida/superkmeans"
 
 [tool.scikit-build]
 cmake.source-dir = "."
