@@ -1,7 +1,7 @@
 <h1 align="center">
   Super K-Means
 <div align="center">
-    <a href="https://img.shields.io/badge/Paper-COMINGSOON-blue"><img src="https://img.shields.io/badge/Paper-blue" alt="Paper" /></a>
+    <a href="https://arxiv.org/pdf/2603.20009"><img src="https://img.shields.io/badge/Paper-arXiv-blue" alt="Paper" /></a>
     <img src="https://github.com/cwida/SuperKMeans/actions/workflows/ci.yml/badge.svg?cacheSeconds=3600" alt="License" />
     <a href="https://github.com/cwida/SuperKMeans/blob/main/LICENSE"><img src="https://img.shields.io/github/license/cwida/SuperKMeans?cacheSeconds=3600" alt="License" /></a>
     <a href="https://github.com/cwida/SuperKMeans/stargazers"><img src="https://img.shields.io/github/stars/cwida/SuperKMeans" alt="GitHub stars" /></a>
