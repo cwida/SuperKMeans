@@ -33,6 +33,8 @@ tar xzf /tmp/openblas.tar.gz -C /tmp
 cd /tmp/OpenBLAS-${OPENBLAS_VERSION}
 
 # Build OpenBLAS with GCC (doesn't need Clang, has its own optimized kernels)
+# Unset Clang-specific flags that leak from cibuildwheel environment
+unset CFLAGS CXXFLAGS
 make CC=gcc FC= \
     DYNAMIC_ARCH=1 \
     USE_OPENMP=1 \
