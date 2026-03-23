@@ -948,9 +948,9 @@ class SuperKMeans {
         size_t& iter_idx,
         const bool is_first_iter,
         std::vector<SuperKMeansIterationStats>& target_stats,
-        const bool run_quantized_assignment = true,
+        const bool run_quantized_assignment = false,
         const bool run_f32_assignment = true,
-        const bool use_quantized_assignment_for_update = true
+        const bool use_quantized_assignment_for_update = false
     ) {
         if (!is_first_iter) {
             std::swap(horizontal_centroids, prev_centroids);
@@ -983,7 +983,6 @@ class SuperKMeans {
             if (run_quantized_assignment && run_f32_assignment) {
                 SKM_PROFILE_SCOPE("compare_assignments");
                 size_t match = 0;
-                size_t mismatches_printed = 0;
                 for (size_t s = 0; s < n_samples; ++s) {
                     if (i8_assignments[s] == assignments[s]) {
                         ++match;
