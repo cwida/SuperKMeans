@@ -56,7 +56,8 @@ cmake.build-type = "Release"
 cmake.args = [
     "-DSKMEANS_COMPILE_TESTS=OFF",
     "-DSKMEANS_COMPILE_BENCHMARKS=OFF",
-    "-DSKMEANS_COMPILE_EXAMPLES=OFF"
+    "-DSKMEANS_COMPILE_EXAMPLES=OFF",
+    "-DCMAKE_CXX_FLAGS=-DBENCHMARK_TIME"
 ]
 
 [tool.scikit-build.cmake.define]
