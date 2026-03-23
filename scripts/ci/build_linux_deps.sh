@@ -7,6 +7,9 @@ set -euo pipefail
 LLVM_VERSION="18.1.8"
 OPENBLAS_VERSION="0.3.31"
 
+echo "=== Installing system dependencies ==="
+dnf install -y ncurses-compat-libs
+
 echo "=== Installing Clang ${LLVM_VERSION} ==="
 ARCH=$(uname -m)
 if [ "$ARCH" = "x86_64" ]; then
