@@ -24,7 +24,7 @@ cmake -B build \
     -DCMAKE_CXX_COMPILER=clang++ \
     -DCMAKE_MODULE_PATH=/tmp/cmake-${LLVM_VERSION}.src/Modules
 cmake --build build -j"$(sysctl -n hw.ncpu)"
-cmake --install build
+sudo cmake --install build
 
 echo "=== Dependencies installed ==="
 ls -la /usr/local/lib/libomp*
