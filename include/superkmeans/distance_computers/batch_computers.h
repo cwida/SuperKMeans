@@ -2,33 +2,16 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <limits>
+#include <vector>
 #include <omp.h>
 
 #include "superkmeans/common.h"
 #include "superkmeans/distance_computers/base_computers.h"
+#include "superkmeans/distance_computers/matmul.h"
 #include "superkmeans/pdx/layout.h"
 #include "superkmeans/profiler.h"
 #include <Eigen/Dense>
-
-// Eigen already declares sgemm_, so we don't need to redeclare it
-// TODO(lkuffo, low): However, I would like to have more control over this
-extern "C" {
-/* declare BLAS functions, see http://www.netlib.org/clapack/cblas/ */
-// int sgemm_(
-//         const char* transa,
-//         const char* transb,
-//         FINTEGER* m,
-//         FINTEGER* n,
-//         FINTEGER* k,
-//         const float* alpha,
-//         const float* a,
-//         FINTEGER* lda,
-//         const float* b,
-//         FINTEGER* ldb,
-//         float* beta,
-//         float* c,
-//         FINTEGER* ldc);
-}
 
 namespace skmeans {
 
@@ -37,6 +20,145 @@ class BatchComputer {};
 
 template <>
 class BatchComputer<DistanceFunction::l2, Quantization::u8> {};
+
+/**
+ * @brief Finds the top-1 nearest neighbor for each query vector (int8 data).
+ *
+ * Computes L2 distances between X and Y using int8 dot products via XNNPACK:
+ *   ||x-y||² = ||x||² + ||y||² - 2*x·y
+ *
+ * @param x Query vectors in row-major layout (n_x × d), int8
+ * @param y Reference vectors in row-major layout (n_y × d), int8
+ * @param n_x Number of query vectors
+ * @param n_y Number of reference vectors
+ * @param d Dimensionality
+ * @param norms_x Pre-computed squared L2 norms of query vectors (float)
+ * @param norms_y Pre-computed squared L2 norms of reference vectors (float)
+ * @param out_knn Output: index of nearest neighbor for each query
+ * @param out_distances Output: distance to nearest neighbor for each query
+ * @param tmp_distances_buf Buffer for batch distance computation (size: X_BATCH_SIZE × Y_BATCH_SIZE)
+ */
+/**
+ * @brief Finds the top-k nearest neighbors for each query vector (int8 data).
+ *
+ * Computes L2 distances between X and Y using int8 dot products via XNNPACK:
+ *   ||x-y||² = ||x||² + ||y||² - 2*x·y
+ * For k=1, uses vectorized minCoeff. For k>1, maintains a sorted top-k array
+ * per query with threshold-based rejection.
+ *
+ * @param x Query vectors in row-major layout (n_x × d), int8
+ * @param y Reference vectors in row-major layout (n_y × d), int8
+ * @param n_x Number of query vectors
+ * @param n_y Number of reference vectors
+ * @param d Dimensionality
+ * @param norms_x Pre-computed squared L2 norms of query vectors (float)
+ * @param norms_y Pre-computed squared L2 norms of reference vectors (float)
+ * @param k Number of nearest neighbors to find
+ * @param out_knn Output: indices of k nearest neighbors per query (size: n_x × k)
+ * @param out_distances Output: distances to k nearest neighbors per query (size: n_x × k)
+ * @param tmp_distances_buf Buffer for batch distance computation (size: X_BATCH_SIZE × Y_BATCH_SIZE)
+ */
+inline void FindKNearestNeighborsI8(
+    const int8_t* SKM_RESTRICT x,
+    const int8_t* SKM_RESTRICT y,
+    const size_t n_x,
+    const size_t n_y,
+    const size_t d,
+    const float* SKM_RESTRICT norms_x,
+    const float* SKM_RESTRICT norms_y,
+    const size_t k,
+    uint32_t* SKM_RESTRICT out_knn,
+    float* SKM_RESTRICT out_distances,
+    float* SKM_RESTRICT tmp_distances_buf
+) {
+    using MatrixR = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+    matmul::InitXnnpack();
+    SKM_PROFILE_SCOPE("blas_i8_knn");
+    std::fill_n(out_distances, n_x * k, std::numeric_limits<float>::max());
+    std::fill_n(out_knn, n_x * k, static_cast<uint32_t>(-1));
+
+    for (size_t i = 0; i < n_x; i += X_BATCH_SIZE) {
+        auto batch_n_x = X_BATCH_SIZE;
+        auto batch_x_p = x + (i * d);
+        if (i + X_BATCH_SIZE > n_x) {
+            batch_n_x = n_x - i;
+        }
+        for (size_t j = 0; j < n_y; j += Y_BATCH_SIZE) {
+            auto batch_n_y = Y_BATCH_SIZE;
+            auto batch_y_p = y + (j * d);
+            if (j + Y_BATCH_SIZE > n_y) {
+                batch_n_y = n_y - j;
+            }
+            {
+                SKM_PROFILE_SCOPE("blas_i8_knn/gemm");
+                matmul::XnnpackMatmulI8F32(
+                    batch_x_p, batch_y_p, batch_n_x, batch_n_y, d, 0, tmp_distances_buf
+                );
+            }
+            Eigen::Map<MatrixR> distances_matrix(tmp_distances_buf, batch_n_x, batch_n_y);
+
+            SKM_PROFILE_SCOPE("blas_i8_knn/top_k");
+#pragma omp parallel for num_threads(g_n_threads)
+            for (size_t r = 0; r < batch_n_x; ++r) {
+                const auto i_idx = i + r;
+                const float norm_x_i = norms_x[i_idx];
+                float* row_p = distances_matrix.data() + r * batch_n_y;
+#pragma clang loop vectorize(enable)
+                for (size_t c = 0; c < batch_n_y; ++c) {
+                    row_p[c] = -2.0f * row_p[c] + norm_x_i + norms_y[j + c];
+                }
+
+                float* out_dist_row = out_distances + i_idx * k;
+                uint32_t* out_knn_row = out_knn + i_idx * k;
+
+                if (k == 1) {
+                    uint32_t min_idx;
+                    auto min_dist = distances_matrix.row(r).minCoeff(&min_idx);
+                    if (min_dist < out_dist_row[0]) {
+                        out_dist_row[0] = std::max(0.0f, min_dist);
+                        out_knn_row[0] = static_cast<uint32_t>(j + min_idx);
+                    }
+                    continue;
+                }
+
+                float threshold = out_dist_row[k - 1];
+                for (size_t c = 0; c < batch_n_y; ++c) {
+                    float dist = std::max(0.0f, row_p[c]);
+                    if (dist >= threshold) continue;
+
+                    // Find where the new candidate belongs
+                    size_t pos = 0;
+                    for (; pos < k; ++pos) {
+                        if (dist < out_dist_row[pos]) break;
+                    }
+                    // Shift worse entries down by one (evicts the k-th)
+                    for (size_t ki = k - 1; ki > pos; --ki) {
+                        out_dist_row[ki] = out_dist_row[ki - 1];
+                        out_knn_row[ki] = out_knn_row[ki - 1];
+                    }
+                    out_dist_row[pos] = dist;
+                    out_knn_row[pos] = static_cast<uint32_t>(j + c);
+                    threshold = out_dist_row[k - 1];
+                }
+            }
+        }
+    }
+}
+
+inline void FindNearestNeighborI8(
+    const int8_t* SKM_RESTRICT x,
+    const int8_t* SKM_RESTRICT y,
+    const size_t n_x,
+    const size_t n_y,
+    const size_t d,
+    const float* SKM_RESTRICT norms_x,
+    const float* SKM_RESTRICT norms_y,
+    uint32_t* SKM_RESTRICT out_knn,
+    float* SKM_RESTRICT out_distances,
+    float* SKM_RESTRICT tmp_distances_buf
+) {
+    FindKNearestNeighborsI8(x, y, n_x, n_y, d, norms_x, norms_y, 1, out_knn, out_distances, tmp_distances_buf);
+}
 
 template <>
 class BatchComputer<DistanceFunction::l2, Quantization::f32> {
@@ -48,59 +170,6 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
     using layout_t = PDXLayout<Quantization::f32, DistanceFunction::l2>;
     using MatrixR = Eigen::Matrix<distance_t, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
     using MatrixC = Eigen::Matrix<distance_t, Eigen::Dynamic, Eigen::Dynamic, Eigen::ColMajor>;
-
-  private:
-    /**
-     * @brief Performs BLAS matrix multiplication: distances = x * y^T
-     *
-     * Computes the dot product matrix between X and Y
-     * Can optionally use only the first partial_d dimensions for partial distance computation.
-     *
-     * @param batch_x_p Pointer to query vectors batch (batch_n_x × d)
-     * @param batch_y_p Pointer to reference vectors batch (batch_n_y × d)
-     * @param batch_n_x Number of query vectors in batch
-     * @param batch_n_y Number of reference vectors in batch
-     * @param d Full dimensionality
-     * @param partial_d Number of dimensions to use (if 0, uses all dimensions)
-     * @param tmp_distances_buf Output buffer for distance matrix (batch_n_x × batch_n_y)
-     */
-    static void BlasMatrixMultiplication(
-        const data_t* SKM_RESTRICT batch_x_p,
-        const data_t* SKM_RESTRICT batch_y_p,
-        const size_t batch_n_x,
-        const size_t batch_n_y,
-        const size_t d,
-        const size_t partial_d,
-        float* SKM_RESTRICT tmp_distances_buf
-    ) {
-        const char trans_a = 'T';
-        const char trans_b = 'N';
-
-        int m = static_cast<int>(batch_n_y);
-        int n = static_cast<int>(batch_n_x);
-        int k = static_cast<int>(partial_d > 0 && partial_d < d ? partial_d : d);
-        float alpha = 1.0f;
-        float beta = 0.0f;
-        int lda = static_cast<int>(d);         // d of y (row stride in row-major)
-        int ldb = static_cast<int>(d);         // d of x (row stride in row-major)
-        int ldc = static_cast<int>(batch_n_y); // Leading dimension of tmp_distances_buf
-
-        sgemm_(
-            &trans_a,
-            &trans_b,
-            &m,
-            &n,
-            &k,
-            &alpha,
-            batch_y_p,
-            &lda,
-            batch_x_p,
-            &ldb,
-            &beta,
-            tmp_distances_buf,
-            &ldc
-        );
-    }
 
   public:
     /**
@@ -133,8 +202,6 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
         distance_t* SKM_RESTRICT out_distances,
         float* SKM_RESTRICT tmp_distances_buf
     ) {
-        SKM_PROFILE_SCOPE("search");
-        SKM_PROFILE_SCOPE("search/1st_blas");
         std::fill_n(out_distances, n_x, std::numeric_limits<distance_t>::max());
         for (size_t i = 0; i < n_x; i += X_BATCH_SIZE) {
             auto batch_n_x = X_BATCH_SIZE;
@@ -154,7 +221,7 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
 #pragma omp parallel for num_threads(g_n_threads) schedule(static)
                 for (size_t r = 0; r < batch_n_x; r += MINI_BATCH_SIZE) {
                     auto mini_batch_n_x = std::min(MINI_BATCH_SIZE, batch_n_x - r);
-                    BlasMatrixMultiplication(
+                    matmul::MatrixMultiplication(
                         batch_x_p + r * d,
                         batch_y_p,
                         mini_batch_n_x,
@@ -165,7 +232,7 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
                     );
                 }
 #else
-                BlasMatrixMultiplication(
+                matmul::MatrixMultiplication(
                     batch_x_p, batch_y_p, batch_n_x, batch_n_y, d, 0, tmp_distances_buf
                 );
 #endif
@@ -245,7 +312,7 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
                     batch_n_y = n_y - j;
                 }
 
-                BlasMatrixMultiplication(
+                matmul::MatrixMultiplication(
                     batch_x_p, batch_y_p, batch_n_x, batch_n_y, d, 0, tmp_distances_buf
                 );
                 Eigen::Map<MatrixR> distances_matrix(tmp_distances_buf, batch_n_x, batch_n_y);
@@ -351,7 +418,7 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
 #pragma omp parallel for num_threads(g_n_threads) schedule(static)
                     for (size_t r = 0; r < batch_n_x; r += MINI_BATCH_SIZE) {
                         auto mini_batch_n_x = std::min(MINI_BATCH_SIZE, batch_n_x - r);
-                        BlasMatrixMultiplication(
+                        matmul::MatrixMultiplication(
                             batch_x_p + r * d,
                             batch_y_p,
                             mini_batch_n_x,
@@ -362,7 +429,7 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
                         );
                     }
 #else
-                    BlasMatrixMultiplication(
+                    matmul::MatrixMultiplication(
                         batch_x_p, batch_y_p, batch_n_x, batch_n_y, d, partial_d, tmp_distances_buf
                     );
 #endif

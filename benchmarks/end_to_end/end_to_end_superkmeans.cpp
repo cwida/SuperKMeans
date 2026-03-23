@@ -67,13 +67,14 @@ int main(int argc, char* argv[]) {
 
     skmeans::SuperKMeansConfig config;
     config.iters = n_iters;
-    config.verbose = false;
+    config.verbose = true;
     config.n_threads = THREADS;
     config.objective_k = 100;
     config.ann_explore_fraction = 0.01f;
     config.unrotate_centroids = true;
     config.early_termination = false;
     config.sampling_fraction = sampling_fraction;
+    // TODO: For joseph experiment
     config.use_blas_only = false;
 
     auto is_angular = std::find(
