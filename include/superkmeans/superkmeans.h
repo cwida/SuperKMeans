@@ -948,19 +948,15 @@ class SuperKMeans {
         size_t& iter_idx,
         const bool is_first_iter,
         std::vector<SuperKMeansIterationStats>& target_stats,
-        const bool run_quantized_assignment = false,
+        const bool run_quantized_assignment = true,
         const bool run_f32_assignment = true,
-        const bool use_quantized_assignment_for_update = false
+        const bool use_quantized_assignment_for_update = true
     ) {
-        std::cout << "Training centroids iteration=" << iter_idx << std::endl;
-
         if (!is_first_iter) {
             std::swap(horizontal_centroids, prev_centroids);
         }
 
         if constexpr (GEMM_ONLY) {
-            std::cout << "Running GEMM loop" << std::endl;
-
             // f32 assignment path
             if (run_f32_assignment) {
                 SKM_PROFILE_SCOPE("assign_f32");
@@ -992,15 +988,6 @@ class SuperKMeans {
                     if (i8_assignments[s] == assignments[s]) {
                         ++match;
                         continue;
-                    }
-                    if (mismatches_printed < 10) {
-                        std::cout << "  mismatch[" << mismatches_printed << "] sample=" << s
-                                  << " i8_assign=" << i8_assignments[s]
-                                  << " f32_assign=" << assignments[s]
-                                  << " i8_dist=" << i8_distances[s]
-                                  << " f32_dist=" << distances[s]
-                                  << " delta=" << (i8_distances[s] - distances[s]) << std::endl;
-                        ++mismatches_printed;
                     }
                 }
                 std::cout << "i8 vs f32 assignment agreement: " << match << " / " << n_samples

@@ -36,14 +36,13 @@ inline bool InitXnnpack() {
 }
 
 /**
- * @brief Packs kernel rows into a contiguous partial-dimension buffer for XNNPACK.
+ * XNNPack does not support performing matrix multiplication on an arbitrary subset of dimensions
+ * Based on our benchmarks - we believe it is sufficiently performant to just re-copy the subset of dimensions that we care about
  *
  * When partial_d < d, XNNPACK requires the kernel to be contiguous N × partial_d.
  * This copies the first partial_d elements from each of the n_rows rows (stride d)
  * into a thread-local contiguous buffer and returns a pointer to it.
- * When partial_d == d, returns the original pointer with no copy.
- *
- * @return Pointer to contiguous kernel data and the effective dimension count.
+ * If partial_d == d, returns the original pointer with no copy.
  */
 template <typename T>
 inline std::pair<const T*, size_t> PackKernelForPartialD(
@@ -53,6 +52,7 @@ inline std::pair<const T*, size_t> PackKernelForPartialD(
     if (partial_d_ == d) {
         return {kernel, d};
     }
+    // Note: this file uses threadlocals to avoid repeated allocations
     thread_local std::vector<char> buf;
     buf.resize(n_rows * partial_d_ * sizeof(T));
     auto* dst = reinterpret_cast<T*>(buf.data());
@@ -63,14 +63,10 @@ inline std::pair<const T*, size_t> PackKernelForPartialD(
 }
 
 /**
- * @brief Performs matrix multiplication using XNNPACK's fully-connected operator: C = X * Y^T
- *
  * Uses XNNPACK's NC F32 fully-connected operator where X is the "input" (batch_n_x × d)
  * and Y is the "kernel" (batch_n_y × d). Supports partial-dimension computation via partial_d:
  * the input (X) uses XNNPACK's input_stride to skip trailing dimensions without copying,
  * while the kernel (Y) rows are packed into a contiguous buffer when partial_d < d.
- *
- * Thread-local pthreadpool with g_n_threads threads is used. Not safe to call from OMP parallel regions.
  */
 inline void XnnpackMatmulF32(
     const float* SKM_RESTRICT batch_x_p,
@@ -86,6 +82,8 @@ inline void XnnpackMatmulF32(
     size_t partial_d_;
     {
         SKM_PROFILE_SCOPE("xnnpack_f32/pack");
+        // Only Y needs repacking: XNNPACK supports strided access for X (via input_stride),
+        // but requires Y to be contiguous N × partial_d.
         std::tie(kernel_p, partial_d_) = PackKernelForPartialD(batch_y_p, batch_n_y, d, partial_d);
     }
 
@@ -93,16 +91,37 @@ inline void XnnpackMatmulF32(
         SKM_PROFILE_SCOPE("xnnpack_f32/matmul");
         thread_local pthreadpool_t tp = pthreadpool_create(omp_get_max_threads());
         xnn_operator_t op = nullptr;
+        // Create the fully-connected operator. XNNPACK's API is designed for neural network layers,
+        // so we have to pass several parameters (bias, clamping, flags) that we don't use.
         xnn_create_fully_connected_nc_f32(
-            partial_d_, batch_n_y, d, batch_n_y,
-            kernel_p, nullptr,
+            // input_channels: number of dimensions to dot-product over
+            partial_d_,
+            // output_channels: number of rows in Y (columns in the output matrix)
+            batch_n_y,
+            // input_stride: full row stride in X, even if we only use partial_d_ dims
+            d,
+            // output_stride
+            batch_n_y,
+            // the Y matrix
+            kernel_p,
+            // Do not set a "bias" since we want raw dot products. The "bias" is a vector that is added to the output.
+            nullptr,
+            // no output clamping (we should be able to use the full range of f32 values)
             -std::numeric_limits<float>::infinity(),
             std::numeric_limits<float>::infinity(),
-            0, nullptr, &op
+            // Don't set any special flags
+            0,
+            // Do not set a cache; we recreate the operator each call
+            nullptr,
+            &op
         );
+        // Allocate internal buffers for batch_n_x input rows
         xnn_reshape_fully_connected_nc_f32(op, batch_n_x, tp);
+        // Bind X as input and tmp_distances_buf as output
         xnn_setup_fully_connected_nc_f32(op, batch_x_p, tmp_distances_buf);
+        // Execute the matmul using the thread pool
         xnn_run_operator(op, tp);
+        // Free the operator (the thread pool is reused across calls)
         xnn_delete_operator(op);
     }
 }
@@ -130,6 +149,8 @@ inline void XnnpackMatmulI8F32(
     size_t partial_d_;
     {
         SKM_PROFILE_SCOPE("xnnpack_i8f32/pack");
+        // Only Y needs repacking: XNNPACK supports strided access for X (via input_stride),
+        // but requires Y to be contiguous N × partial_d.
         std::tie(kernel_p, partial_d_) = PackKernelForPartialD(batch_y_p, batch_n_y, d, partial_d);
     }
 
@@ -144,100 +165,44 @@ inline void XnnpackMatmulI8F32(
         thread_local pthreadpool_t tp_i8 = pthreadpool_create(omp_get_max_threads());
         xnn_operator_t op = nullptr;
         xnn_create_fully_connected_nc_qd8_f32_qc8w(
-            partial_d_, batch_n_y, d, batch_n_y,
-            kernel_scale.data(), kernel_p, nullptr,
+            // input_channels: number of dimensions to dot-product over
+            partial_d_,
+            // output_channels: number of rows in Y (columns in the output matrix)
+            batch_n_y,
+            // input_stride: full row stride in X, even if we only use partial_d_ dims
+            d,
+            // output_stride
+            batch_n_y,
+            // per-row scale for Y; set to 1.0 for identity quantization
+            kernel_scale.data(),
+            // the Y matrix (XNNPACK calls this "kernel")
+            kernel_p,
+            // Do not set a "bias" since we want raw dot products. The "bias" is a vector that is added to the output.
+            nullptr,
+            // no output clamping (we should be able to use the full range of f32 values)
             -std::numeric_limits<float>::infinity(),
             std::numeric_limits<float>::infinity(),
-            0, nullptr, &op
+            // Don't set any special flags
+            0,
+            // Do not set a cache; we recreate the operator each call
+            nullptr,
+            &op
         );
+        // Allocate internal buffers for batch_n_x input rows; also reports workspace size needed
         size_t ws_size = 0;
         xnn_reshape_fully_connected_nc_qd8_f32_qc8w(op, batch_n_x, &ws_size, tp_i8);
         thread_local std::vector<char> ws;
         ws.resize(ws_size);
+        // Bind X as input, tmp_distances_buf as output, plus workspace and quantization params
         xnn_setup_fully_connected_nc_qd8_f32_qc8w(
             op, batch_x_p, tmp_distances_buf, ws.data(), qparams.data()
         );
+        // Execute the matmul using the thread pool
         xnn_run_operator(op, tp_i8);
+        // Free the operator (the thread pool is reused across calls)
         xnn_delete_operator(op);
     }
 }
-
-#if defined(__aarch64__)
-/**
- * @brief Performs int8 matrix multiplication using NEON SDOT: C = X * Y^T
- *
- * Hand-written kernel using vdotq_s32 (SDOT) instructions for int8 dot products.
- * Both X and Y are row-major with stride d; only the first partial_d dimensions are used.
- * Output is int32 accumulation of the dot products.
- */
-inline void NeonSdotMatmulI8(
-    const int8_t* SKM_RESTRICT batch_x_p,
-    const int8_t* SKM_RESTRICT batch_y_p,
-    const size_t batch_n_x,
-    const size_t batch_n_y,
-    const size_t d,
-    const size_t partial_d,
-    int32_t* SKM_RESTRICT tmp_distances_buf
-) {
-    const size_t partial_d_ = (partial_d > 0 && partial_d < d) ? partial_d : d;
-    const size_t K16 = partial_d_ & ~(size_t)15;
-
-#pragma omp parallel for schedule(static) num_threads(g_n_threads)
-    for (size_t m = 0; m < batch_n_x; m++) {
-        const int8_t* a_row = batch_x_p + m * d;
-        int32_t* c_row = tmp_distances_buf + m * batch_n_y;
-
-        size_t n = 0;
-        for (; n + 4 <= batch_n_y; n += 4) {
-            const int8_t* b0 = batch_y_p + (n + 0) * d;
-            const int8_t* b1 = batch_y_p + (n + 1) * d;
-            const int8_t* b2 = batch_y_p + (n + 2) * d;
-            const int8_t* b3 = batch_y_p + (n + 3) * d;
-
-            int32x4_t acc0 = vdupq_n_s32(0);
-            int32x4_t acc1 = vdupq_n_s32(0);
-            int32x4_t acc2 = vdupq_n_s32(0);
-            int32x4_t acc3 = vdupq_n_s32(0);
-
-            for (size_t k = 0; k < K16; k += 16) {
-                int8x16_t va = vld1q_s8(a_row + k);
-                acc0 = vdotq_s32(acc0, va, vld1q_s8(b0 + k));
-                acc1 = vdotq_s32(acc1, va, vld1q_s8(b1 + k));
-                acc2 = vdotq_s32(acc2, va, vld1q_s8(b2 + k));
-                acc3 = vdotq_s32(acc3, va, vld1q_s8(b3 + k));
-            }
-
-            int32_t s0 = vaddvq_s32(acc0), s1 = vaddvq_s32(acc1);
-            int32_t s2 = vaddvq_s32(acc2), s3 = vaddvq_s32(acc3);
-
-            for (size_t k = K16; k < partial_d_; k++) {
-                int32_t a_val = a_row[k];
-                s0 += a_val * static_cast<int32_t>(b0[k]);
-                s1 += a_val * static_cast<int32_t>(b1[k]);
-                s2 += a_val * static_cast<int32_t>(b2[k]);
-                s3 += a_val * static_cast<int32_t>(b3[k]);
-            }
-
-            c_row[n + 0] = s0;
-            c_row[n + 1] = s1;
-            c_row[n + 2] = s2;
-            c_row[n + 3] = s3;
-        }
-
-        for (; n < batch_n_y; n++) {
-            const int8_t* b_row = batch_y_p + n * d;
-            int32x4_t acc = vdupq_n_s32(0);
-            size_t k = 0;
-            for (; k < K16; k += 16)
-                acc = vdotq_s32(acc, vld1q_s8(a_row + k), vld1q_s8(b_row + k));
-            int32_t sum = vaddvq_s32(acc);
-            for (; k < partial_d_; k++)
-                sum += static_cast<int32_t>(a_row[k]) * static_cast<int32_t>(b_row[k]);
-            c_row[n] = sum;
-        }
-    }
-}
-#endif
 
 /**
  * @brief Performs matrix multiplication via BLAS sgemm: C = X * Y^T
@@ -299,6 +264,7 @@ inline void MatrixMultiplication(
     const size_t partial_d,
     float* SKM_RESTRICT tmp_distances_buf
 ) {
+    // While we do support XnnpackMatmulF32 - we don't use it in any e2e benchmarks as of now. 
     if (UseXnnpack() && InitXnnpack()) {
         XnnpackMatmulF32(
             batch_x_p, batch_y_p, batch_n_x, batch_n_y, d, partial_d, tmp_distances_buf

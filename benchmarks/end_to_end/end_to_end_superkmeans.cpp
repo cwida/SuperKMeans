@@ -67,15 +67,15 @@ int main(int argc, char* argv[]) {
 
     skmeans::SuperKMeansConfig config;
     config.iters = n_iters;
-    config.verbose = true;
+    config.verbose = false;
     config.n_threads = THREADS;
     config.objective_k = 100;
     config.ann_explore_fraction = 0.01f;
     config.unrotate_centroids = true;
     config.early_termination = false;
     config.sampling_fraction = sampling_fraction;
-    // TODO: For joseph experiment
-    config.use_blas_only = false;
+    // Used for this set of benchmarks
+    config.use_blas_only = true;
 
     auto is_angular = std::find(
         bench_utils::ANGULAR_DATASETS.begin(), bench_utils::ANGULAR_DATASETS.end(), dataset
