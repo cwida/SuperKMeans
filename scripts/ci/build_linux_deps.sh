@@ -32,7 +32,8 @@ curl -L "https://github.com/OpenMathLib/OpenBLAS/releases/download/v${OPENBLAS_V
 tar xzf /tmp/openblas.tar.gz -C /tmp
 cd /tmp/OpenBLAS-${OPENBLAS_VERSION}
 
-make CC=clang FC= \
+# Build OpenBLAS with GCC (doesn't need Clang, has its own optimized kernels)
+make CC=gcc FC= \
     DYNAMIC_ARCH=1 \
     USE_OPENMP=1 \
     NO_LAPACK=1 \
