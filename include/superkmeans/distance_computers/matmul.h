@@ -15,10 +15,6 @@
 #include <pthreadpool.h>
 #include <xnnpack.h>
 
-#if defined(__aarch64__)
-#include <arm_neon.h>
-#endif
-
 // Eigen already declares sgemm_, so we don't need to redeclare it
 extern "C" {}
 
@@ -144,18 +140,17 @@ inline void XnnpackMatmulI8F32(
     const size_t partial_d,
     float* SKM_RESTRICT tmp_distances_buf
 ) {
-    SKM_PROFILE_SCOPE("xnnpack_i8f32");
     const int8_t* kernel_p;
     size_t partial_d_;
     {
-        SKM_PROFILE_SCOPE("xnnpack_i8f32/pack");
+        SKM_PROFILE_SCOPE("i8_knn/pack");
         // Only Y needs repacking: XNNPACK supports strided access for X (via input_stride),
         // but requires Y to be contiguous N × partial_d.
         std::tie(kernel_p, partial_d_) = PackKernelForPartialD(batch_y_p, batch_n_y, d, partial_d);
     }
 
     {
-        SKM_PROFILE_SCOPE("xnnpack_i8f32/matmul");
+        SKM_PROFILE_SCOPE("i8_knn/matmul");
         thread_local std::vector<float> kernel_scale;
         kernel_scale.assign(batch_n_y, 1.0f);
 

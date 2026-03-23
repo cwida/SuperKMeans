@@ -699,12 +699,12 @@ class SuperKMeans {
             GetQuantizedL2NormsRowMajor(quantized_centroids_buf.data(), n_clusters, quantized_centroid_norms.get());
         }
 
-        const size_t i8_k = 2;
+        const size_t i8_k = 1;
         std::vector<uint32_t> i8_knn(n_samples * i8_k);
         std::vector<float> i8_knn_distances(n_samples * i8_k);
         std::vector<float> i8_tmp_distances_buf(X_BATCH_SIZE * Y_BATCH_SIZE);
         {
-            SKM_PROFILE_SCOPE("assign_i8/knn");
+            SKM_PROFILE_SCOPE("assign_i8/i8_knn");
             FindKNearestNeighborsI8(
                 quantized_data.data(),
                 quantized_centroids_buf.data(),

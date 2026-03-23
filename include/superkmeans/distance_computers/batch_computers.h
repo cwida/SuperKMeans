@@ -73,7 +73,7 @@ inline void FindKNearestNeighborsI8(
 ) {
     using MatrixR = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
     matmul::InitXnnpack();
-    SKM_PROFILE_SCOPE("blas_i8_knn");
+    SKM_PROFILE_SCOPE("i8_knn");
     std::fill_n(out_distances, n_x * k, std::numeric_limits<float>::max());
     std::fill_n(out_knn, n_x * k, static_cast<uint32_t>(-1));
 
@@ -89,15 +89,12 @@ inline void FindKNearestNeighborsI8(
             if (j + Y_BATCH_SIZE > n_y) {
                 batch_n_y = n_y - j;
             }
-            {
-                SKM_PROFILE_SCOPE("blas_i8_knn/gemm");
-                matmul::XnnpackMatmulI8F32(
-                    batch_x_p, batch_y_p, batch_n_x, batch_n_y, d, 0, tmp_distances_buf
-                );
-            }
+            matmul::XnnpackMatmulI8F32(
+                batch_x_p, batch_y_p, batch_n_x, batch_n_y, d, 0, tmp_distances_buf
+            );
             Eigen::Map<MatrixR> distances_matrix(tmp_distances_buf, batch_n_x, batch_n_y);
 
-            SKM_PROFILE_SCOPE("blas_i8_knn/top_k");
+            SKM_PROFILE_SCOPE("i8_knn/top_k");
 #pragma omp parallel for num_threads(g_n_threads)
             for (size_t r = 0; r < batch_n_x; ++r) {
                 const auto i_idx = i + r;
