@@ -27,7 +27,8 @@ cmake -B build \
     -DCMAKE_C_COMPILER=gcc \
     -DCMAKE_CXX_COMPILER=g++ \
     -DCMAKE_MODULE_PATH=/tmp/cmake-${LLVM_VERSION}.src/Modules \
-    -DLIBOMP_ENABLE_SHARED=ON
+    -DLIBOMP_ENABLE_SHARED=ON \
+    -DOPENMP_ENABLE_LIBOMPTARGET=OFF
 cmake --build build -j"$(nproc)"
 cmake --install build
 ldconfig
