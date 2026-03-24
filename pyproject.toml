@@ -63,6 +63,7 @@ cmake.args = [
 [tool.scikit-build.cmake.define]
 SKMEANS_PORTABLE = {env = "SKMEANS_PORTABLE", default = "OFF"}
 SKMEANS_SKIP_FFTW = {env = "SKMEANS_SKIP_FFTW", default = "OFF"}
+SKMEANS_USE_LIBOMP = {env = "SKMEANS_USE_LIBOMP", default = "OFF"}
 
 [tool.cibuildwheel]
 build = "cp39-* cp310-* cp311-* cp312-* cp313-*"
@@ -75,7 +76,7 @@ manylinux-x86_64-image = "manylinux_2_28"
 manylinux-aarch64-image = "manylinux_2_28"
 archs = ["auto64"]
 before-all = "bash {project}/scripts/ci/build_linux_deps.sh"
-environment = { SKMEANS_PORTABLE="ON", SKMEANS_SKIP_FFTW="ON" }
+environment = { SKMEANS_PORTABLE="ON", SKMEANS_SKIP_FFTW="ON", SKMEANS_USE_LIBOMP="ON" }
 
 [tool.cibuildwheel.macos]
 archs = ["auto"]
