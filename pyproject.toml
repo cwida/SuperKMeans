@@ -57,7 +57,6 @@ cmake.args = [
     "-DSKMEANS_COMPILE_TESTS=OFF",
     "-DSKMEANS_COMPILE_BENCHMARKS=OFF",
     "-DSKMEANS_COMPILE_EXAMPLES=OFF",
-    "-DCMAKE_CXX_FLAGS=-DBENCHMARK_TIME"
 ]
 
 [tool.scikit-build.cmake.define]
@@ -75,7 +74,7 @@ manylinux-x86_64-image = "manylinux_2_28"
 manylinux-aarch64-image = "manylinux_2_28"
 archs = ["auto64"]
 before-all = "bash {project}/scripts/ci/build_linux_deps.sh"
-environment = { CC="clang", CXX="clang++", CFLAGS="-fuse-ld=lld -rtlib=compiler-rt", CXXFLAGS="-fuse-ld=lld -rtlib=compiler-rt", SKMEANS_PORTABLE="ON", SKMEANS_SKIP_FFTW="ON" }
+environment = { CC="clang", CXX="clang++", CFLAGS="-rtlib=compiler-rt", CXXFLAGS="-rtlib=compiler-rt", LDFLAGS="-fuse-ld=lld -rtlib=compiler-rt", SKMEANS_PORTABLE="ON", SKMEANS_SKIP_FFTW="ON" }
 
 [tool.cibuildwheel.macos]
 archs = ["auto"]

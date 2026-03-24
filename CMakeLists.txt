@@ -98,6 +98,7 @@ else()
 endif()
 
 add_compile_definitions(CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+add_compile_definitions(BENCHMARK_TIME)
 include_directories(include extern/Eigen)
 
 if(SKMEANS_COMPILE_TESTS)
