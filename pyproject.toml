@@ -75,7 +75,7 @@ manylinux-x86_64-image = "manylinux_2_28"
 manylinux-aarch64-image = "manylinux_2_28"
 archs = ["auto64"]
 before-all = "bash {project}/scripts/ci/build_linux_deps.sh"
-environment = { CC="clang", CXX="clang++", SKMEANS_PORTABLE="ON", SKMEANS_SKIP_FFTW="ON" }
+environment = { CC="clang", CXX="clang++", CFLAGS="-fuse-ld=lld -rtlib=compiler-rt", CXXFLAGS="-fuse-ld=lld -rtlib=compiler-rt", SKMEANS_PORTABLE="ON", SKMEANS_SKIP_FFTW="ON" }
 
 [tool.cibuildwheel.macos]
 archs = ["auto"]
