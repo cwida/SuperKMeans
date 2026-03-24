@@ -50,8 +50,8 @@ int main(int argc, char* argv[]) {
     const size_t n = it->second.first;
     const size_t n_queries = bench_utils::N_QUERIES;
     const size_t d = it->second.second;
-    const size_t n_clusters = 10;
-         //std::max<size_t>(1u, static_cast<size_t>(std::sqrt(static_cast<double>(n)) * 4.0));
+    const size_t n_clusters =  //10000;
+          std::max<size_t>(1u, static_cast<size_t>(std::sqrt(static_cast<double>(n)) * 4.0));
     int n_iters = bench_utils::MAX_ITERS;
     float sampling_fraction = 1.0;
     std::string filename = bench_utils::get_data_path(dataset);
@@ -113,6 +113,9 @@ int main(int argc, char* argv[]) {
 
 
     // Time the training
+    bench_utils::TicToc timer;
+    timer.Tic();
+
     auto kmeans_state =
         skmeans::SuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>(
             n_clusters, d, config
@@ -121,18 +124,6 @@ int main(int argc, char* argv[]) {
         data.data(), n //,
                        // queries.data(), n_queries
     );
-    bench_utils::TicToc timer;
-    timer.Tic();
-    for (int i = 0; i < 0; i++) {
-        auto _tmp_state =
-            skmeans::SuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>(
-                n_clusters, d, config
-            );
-        std::vector<float> _tmp_centroids = _tmp_state.Train(
-            data.data(), n //,
-            // queries.data(), n_queries
-        );
-    }
     timer.Toc();
     double construction_time_ms = timer.GetMilliseconds();
 

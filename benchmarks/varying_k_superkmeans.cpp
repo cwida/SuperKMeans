@@ -16,6 +16,14 @@
 #include "superkmeans/superkmeans.h"
 
 int main(int argc, char* argv[]) {
+#ifdef USE_CUDA
+    // Trigger GPU Initialization
+    // We need to do this before benchmarking, as the GPU will only initialize
+    // when the first kernel is launched. Therefore we now launch a bogus kernel first.
+    printf("Trigger GPU initialization.\n");
+    skmeans::kernels::trigger_gpu_initialization();
+    printf("Triggered GPU initialization.\n");
+#endif
     // Experiment configuration
     const std::string algorithm = "superkmeans";
     const std::string experiment_name = "varying_k";
@@ -75,7 +83,10 @@ int main(int argc, char* argv[]) {
     file_queries.close();
 
     // Loop over different n_clusters values
-    for (int n_clusters : bench_utils::VARYING_K_VALUES) {
+    //for (int n_clusters : bench_utils::VARYING_K_VALUES) {
+    const size_t n_clusters = 
+         std::max<size_t>(1u, static_cast<size_t>(std::sqrt(static_cast<double>(n)) * 4.0));
+		{
         std::cout << "\n========================================" << std::endl;
         std::cout << "n_clusters=" << n_clusters << std::endl;
         std::cout << "========================================" << std::endl;

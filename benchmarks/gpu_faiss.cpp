@@ -59,8 +59,8 @@ int main(int argc, char* argv[]) {
 
     const size_t n = it->second.first;
     const size_t d = it->second.second;
-    // const size_t n_clusters = 
-    //      std::max<int>(1u, static_cast<int>(std::sqrt(static_cast<double>(n)) * 4.0));
+     const size_t n_clusters = 
+          std::max<int>(1u, static_cast<int>(std::sqrt(static_cast<double>(n)) * 4.0));
     int n_iters = bench_utils::MAX_ITERS;
     const size_t THREADS = omp_get_max_threads();
     omp_set_num_threads(THREADS);
@@ -87,7 +87,8 @@ int main(int argc, char* argv[]) {
     file.close();
 
     // Loop over different n_clusters values
-    for (int n_clusters : bench_utils::VARYING_K_VALUES) {
+    //for (int n_clusters : bench_utils::VARYING_K_VALUES) {
+		{
         std::cout << "\n========================================" << std::endl;
         std::cout << "n_clusters=" << n_clusters << std::endl;
         std::cout << "========================================" << std::endl;
