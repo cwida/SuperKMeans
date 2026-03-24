@@ -19,4 +19,4 @@ build-gpu: Dockerfile.gpu
 	docker build -t kmeans-gpu -f Dockerfile.gpu ..
 
 open-gpu:
-	docker run -it --rm -v ..:/home --gpus all kmeans-gpu /bin/bash
+	docker run -it --rm -v ..:/home -v /mnt/scratch/shepkema/vector-data/processed:/data --gpus all kmeans-gpu /bin/bash
