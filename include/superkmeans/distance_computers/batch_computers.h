@@ -175,7 +175,7 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
                     const auto i_idx = i + r;
                     const float norm_x_i = norms_x[i_idx];
                     float* row_p = distances_matrix.data() + r * batch_n_y;
-#pragma clang loop vectorize(enable)
+SKM_VECTORIZE_LOOP
                     for (size_t c = 0; c < batch_n_y; ++c) {
                         row_p[c] = -2.0f * row_p[c] + norm_x_i + norms_y[j + c];
                     }
@@ -255,7 +255,7 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
                     const auto i_idx = i + r;
                     const float norm_x_i = norms_x[i_idx];
                     float* row_p = distances_matrix.data() + r * batch_n_y;
-#pragma clang loop vectorize(enable)
+SKM_VECTORIZE_LOOP
                     for (size_t c = 0; c < batch_n_y; ++c) {
                         row_p[c] = -2.0f * row_p[c] + norm_x_i + norms_y[j + c];
                     }
@@ -375,7 +375,7 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
                         const auto i_idx = i + r;
                         const float norm_x_i = norms_x[i_idx];
                         float* row_p = distances_matrix.data() + r * batch_n_y;
-#pragma clang loop vectorize(enable)
+SKM_VECTORIZE_LOOP
                         for (size_t c = 0; c < batch_n_y; ++c) {
                             row_p[c] = -2.0f * row_p[c] + norm_x_i + norms_y[j + c];
                         }

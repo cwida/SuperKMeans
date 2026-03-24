@@ -26,6 +26,15 @@ else()
     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native")
 endif()
 
+# GCC-specific flags to close the performance gap with Clang
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -ffast-math -fassociative-math -funroll-loops -fno-semantic-interposition")
+endif()
+
+message(STATUS "C++ compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+message(STATUS "CXX flags: ${CMAKE_CXX_FLAGS}")
+message(STATUS "CXX flags (Release): ${CMAKE_CXX_FLAGS_RELEASE}")
+
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/extern/findFFTW")
 
 add_compile_options(-fPIC)

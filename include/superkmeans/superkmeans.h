@@ -757,7 +757,7 @@ class SuperKMeans {
         const vector_value_t* SKM_RESTRICT vector,
         const uint32_t cluster_idx
     ) {
-#pragma clang loop vectorize(enable)
+SKM_VECTORIZE_LOOP
         for (size_t i = 0; i < d; ++i) {
             horizontal_centroids[cluster_idx * d + i] += vector[i];
         }
@@ -943,7 +943,7 @@ class SuperKMeans {
                     continue;
                 }
                 float mult_factor = 1.0 / cluster_sizes[i];
-#pragma clang loop vectorize(enable)
+SKM_VECTORIZE_LOOP
                 for (size_t j = 0; j < d; ++j) {
                     horizontal_centroids_p[j] *= mult_factor;
                 }
@@ -973,7 +973,7 @@ class SuperKMeans {
         SKM_PROFILE_SCOPE("compute_cost");
         prev_cost = cost;
         cost = 0.0f;
-#pragma clang loop vectorize(enable)
+SKM_VECTORIZE_LOOP
         for (size_t i = 0; i < n_samples; ++i) {
             cost += distances[i];
         }

@@ -55,6 +55,17 @@
 #define SKM_PREFETCH(addr, rw, locality) ((void) 0)
 #endif
 
+// Cross-compiler vectorization hint for loops.
+// Clang: #pragma clang loop vectorize(enable)
+// GCC:   #pragma GCC ivdep (asserts no loop-carried dependencies, enabling vectorization)
+#if defined(__clang__)
+#define SKM_VECTORIZE_LOOP _Pragma("clang loop vectorize(enable)")
+#elif defined(__GNUC__)
+#define SKM_VECTORIZE_LOOP _Pragma("GCC ivdep")
+#else
+#define SKM_VECTORIZE_LOOP
+#endif
+
 namespace skmeans {
 
 static inline constexpr float PROPORTION_HORIZONTAL_DIM = 0.75;
