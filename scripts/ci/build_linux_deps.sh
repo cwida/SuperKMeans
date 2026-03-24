@@ -47,8 +47,8 @@ make FC= \
     NO_LAPACK=1 \
     NO_FORTRAN=1 \
     NUM_THREADS=384 \
-    -j"$(nproc)" > /dev/null 2>&1
-make install PREFIX=/usr/local > /dev/null 2>&1
+    -j"$(nproc)"
+make install PREFIX=/usr/local
 ldconfig
 
 echo "=== Dependencies installed ==="
