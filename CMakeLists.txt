@@ -48,26 +48,7 @@ set(SKMEANS_COMPILE_BENCHMARKS OFF CACHE BOOL "Whether to compile benchmarks")
 set(SKMEANS_ENABLE_GPU OFF CACHE BOOL "Whether to use the GPU-based implementation of SuperKMeans")
 set(SKMEANS_COMPILE_EXAMPLES ON CACHE BOOL "Whether to compile examples")
 
-set(SKMEANS_USE_LIBOMP OFF CACHE BOOL "Use LLVM libomp instead of libgomp (recommended for GCC wheel builds)")
-
 find_package(OpenMP REQUIRED)
-
-# GCC + libomp: use GCC code generation with LLVM's superior thread pool.
-# libomp exports GOMP compatibility symbols, so GCC-compiled code works seamlessly.
-if(SKMEANS_USE_LIBOMP AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    find_library(LIBOMP_PATH omp PATHS /usr/local/lib)
-    if(LIBOMP_PATH)
-        message(STATUS "Using libomp instead of libgomp: ${LIBOMP_PATH}")
-        set_target_properties(OpenMP::OpenMP_CXX PROPERTIES
-            INTERFACE_LINK_LIBRARIES "${LIBOMP_PATH}"
-        )
-        set_target_properties(OpenMP::OpenMP_C PROPERTIES
-            INTERFACE_LINK_LIBRARIES "${LIBOMP_PATH}"
-        )
-    else()
-        message(WARNING "SKMEANS_USE_LIBOMP=ON but libomp not found, falling back to libgomp")
-    endif()
-endif()
 
 list(PREPEND CMAKE_PREFIX_PATH /usr/local)
 

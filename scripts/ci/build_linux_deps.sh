@@ -8,6 +8,11 @@ set -euo pipefail
 # parallel region entry/exit (common in batched BLAS + distance computation loops).
 # LLVM's libomp maintains a persistent spin-waiting thread pool that performs much better.
 # libomp exports GOMP compatibility symbols, so GCC-compiled code works seamlessly.
+#
+# Strategy: build libomp, then replace the system libgomp with a symlink to libomp.
+# When GCC's -fopenmp links -lgomp, it finds libomp instead. The resulting binary's
+# DT_NEEDED entry points to libomp.so (via SONAME), so only libomp is loaded at runtime.
+# This is equivalent to LD_PRELOAD=libomp but done at link time.
 
 OPENBLAS_VERSION="0.3.31"
 LLVM_VERSION="18.1.8"
@@ -31,6 +36,10 @@ cmake -B build \
     -DOPENMP_ENABLE_LIBOMPTARGET=OFF
 cmake --build build -j"$(nproc)"
 cmake --install build
+
+# Replace libgomp with libomp so that GCC's -fopenmp resolves to libomp.
+# The linker reads libomp's SONAME, so the binary depends on libomp.so.5 at runtime.
+ln -sf /usr/local/lib/libomp.so /usr/local/lib/libgomp.so
 ldconfig
 
 echo "=== Building OpenBLAS ${OPENBLAS_VERSION} with DYNAMIC_ARCH ==="
@@ -39,11 +48,11 @@ curl -L "https://github.com/OpenMathLib/OpenBLAS/releases/download/v${OPENBLAS_V
 tar xzf /tmp/openblas.tar.gz -C /tmp
 cd /tmp/OpenBLAS-${OPENBLAS_VERSION}
 
-# USE_OPENMP=0: OpenBLAS uses its own pthreads pool internally,
-# avoiding conflicts with the libomp runtime used by the application.
+# USE_OPENMP=1: OpenBLAS uses OpenMP, which resolves to libomp via the symlink above.
+# Single OpenMP runtime (libomp) for both OpenBLAS and the application.
 make libs netlib shared FC= \
     DYNAMIC_ARCH=1 \
-    USE_OPENMP=0 \
+    USE_OPENMP=1 \
     NO_LAPACK=1 \
     NO_LAPACKE=1 \
     NO_FORTRAN=1 \
@@ -54,5 +63,8 @@ ldconfig
 
 echo "=== Dependencies installed ==="
 gcc --version
+echo "=== Verifying libomp symlink ==="
+ls -la /usr/local/lib/libgomp.so
+ldd /usr/local/lib/libopenblas.so | grep -E "omp|gomp" || true
 ls -la /usr/local/lib/libomp*
 ls -la /usr/local/lib/libopenblas*
