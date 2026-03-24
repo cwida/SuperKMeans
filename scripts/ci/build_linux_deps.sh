@@ -41,15 +41,13 @@ cd /tmp/OpenBLAS-${OPENBLAS_VERSION}
 
 # USE_OPENMP=0: OpenBLAS uses its own pthreads pool internally,
 # avoiding conflicts with the libomp runtime used by the application.
-make FC= \
+make libs netlib shared FC= \
     DYNAMIC_ARCH=1 \
     USE_OPENMP=0 \
     NO_LAPACK=1 \
     NO_LAPACKE=1 \
     NO_FORTRAN=1 \
     NUM_THREADS=384 \
-    MAKE_NO_J=1 \
-    NO_UTEST=1 \
     -j"$(nproc)"
 make install PREFIX=/usr/local
 ldconfig
