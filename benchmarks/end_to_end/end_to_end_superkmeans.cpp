@@ -74,7 +74,8 @@ int main(int argc, char* argv[]) {
     config.unrotate_centroids = true;
     config.early_termination = false;
     config.sampling_fraction = sampling_fraction;
-    config.use_blas_only = false;
+    // Used for this set of benchmarks
+    config.use_blas_only = true;
 
     auto is_angular = std::find(
         bench_utils::ANGULAR_DATASETS.begin(), bench_utils::ANGULAR_DATASETS.end(), dataset

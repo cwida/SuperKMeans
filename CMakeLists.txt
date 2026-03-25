@@ -47,7 +47,20 @@ set(SKMEANS_COMPILE_BENCHMARKS OFF CACHE BOOL "Whether to compile benchmarks")
 set(SKMEANS_ENABLE_GPU OFF CACHE BOOL "Whether to use the GPU-based implementation of SuperKMeans")
 set(SKMEANS_COMPILE_EXAMPLES ON CACHE BOOL "Whether to compile examples")
 
-find_package(OpenMP REQUIRED)
+
+# Apple Clang does not bundle OpenMP; point FindOpenMP at Homebrew's libomp.
+if(APPLE)
+    execute_process(COMMAND brew --prefix libomp
+        OUTPUT_VARIABLE HOMEBREW_LIBOMP_PREFIX OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(HOMEBREW_LIBOMP_PREFIX)
+        set(OpenMP_CXX_FLAGS "-Xclang -fopenmp -I${HOMEBREW_LIBOMP_PREFIX}/include"
+            CACHE STRING "" FORCE)
+        set(OpenMP_CXX_LIB_NAMES "omp" CACHE STRING "" FORCE)
+        set(OpenMP_omp_LIBRARY "${HOMEBREW_LIBOMP_PREFIX}/lib/libomp.dylib"
+            CACHE FILEPATH "" FORCE)
+    endif()
+endif()
+find_package(OpenMP REQUIRED COMPONENTS CXX)
 
 list(PREPEND CMAKE_PREFIX_PATH /usr/local)
 
@@ -96,7 +109,19 @@ else()
     message(STATUS "GPU disabled")
 endif()
 
-add_compile_definitions(CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+set(XNNPACK_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(XNNPACK_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
+set(XNNPACK_BUILD_ALL_MICROKERNELS OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    xnnpack
+    GIT_REPOSITORY https://github.com/google/XNNPACK.git
+    GIT_TAG master
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(xnnpack)
+set(XNNPACK_LINK_LIBRARIES XNNPACK pthreadpool)
+
+add_compile_definitions(CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}" BENCHMARK_TIME)
 include_directories(include extern/Eigen)
 
 if(SKMEANS_COMPILE_TESTS)
@@ -146,6 +171,8 @@ if(Python_FOUND AND pybind11_FOUND)
     else()
         target_link_libraries(_superkmeans PRIVATE ${BLAS_LINK_LIBRARIES})
     endif()
+
+    target_link_libraries(_superkmeans PRIVATE ${XNNPACK_LINK_LIBRARIES})
 
     if(FFTW_FLOAT_LIB_FOUND)
         target_link_libraries(_superkmeans PRIVATE ${FFTW_FLOAT_LIB} ${FFTW_FLOAT_OPENMP_LIB})

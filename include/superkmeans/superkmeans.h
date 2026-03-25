@@ -669,6 +669,104 @@ class SuperKMeans {
     }
 
     /**
+     * @brief Performs assignment using quantized (int8) distance computation.
+     *
+     * Quantizes data (once) and centroids, finds top-k candidates via i8 GEMM,
+     * then reranks with f32 distances when k > 1. Writes final assignments to
+     * assignments/distances members and zeros accumulators for UpdateCentroids.
+     *
+     * @param data Data matrix (row-major, n_samples × d), used for reranking
+     * @param centroids f32 centroids (row-major, n_clusters × d), used for quantization and reranking
+     * @param n_samples Number of vectors in the data
+     * @param n_clusters Number of centroids
+     */
+    void QuantizedAssignAndUpdateCentroids(
+        const vector_value_t* SKM_RESTRICT data,
+        const vector_value_t* SKM_RESTRICT centroids,
+        const size_t n_samples,
+        const size_t n_clusters,
+        uint32_t* SKM_RESTRICT out_assignments,
+        distance_t* SKM_RESTRICT out_distances
+    ) {
+        if (quantized_data.empty()) {
+            SKM_PROFILE_SCOPE("quantize_data");
+            quantized_data.resize(n_samples * d);
+            quantized_data_norms.reset(new vector_value_t[n_samples]);
+            QuantizeEmbeddings(data, n_samples, d, quantized_data.data());
+            GetQuantizedL2NormsRowMajor(quantized_data.data(), n_samples, quantized_data_norms.get());
+        }
+
+        std::vector<int8_t> quantized_centroids_buf;
+        std::unique_ptr<vector_value_t[]> quantized_centroid_norms;
+        {
+            SKM_PROFILE_SCOPE("quantize_centroids");
+            quantized_centroids_buf.resize(n_clusters * d);
+            quantized_centroid_norms.reset(new vector_value_t[n_clusters]);
+            QuantizeEmbeddings(centroids, n_clusters, d, quantized_centroids_buf.data());
+            GetQuantizedL2NormsRowMajor(quantized_centroids_buf.data(), n_clusters, quantized_centroid_norms.get());
+        }
+
+        const size_t i8_k = 1;
+        std::vector<uint32_t> i8_knn(n_samples * i8_k);
+        std::vector<float> i8_knn_distances(n_samples * i8_k);
+        std::vector<float> i8_tmp_distances_buf(X_BATCH_SIZE * Y_BATCH_SIZE);
+        {
+            SKM_PROFILE_SCOPE("assign_i8/i8_knn");
+            FindKNearestNeighborsI8(
+                quantized_data.data(),
+                quantized_centroids_buf.data(),
+                n_samples,
+                n_clusters,
+                d,
+                quantized_data_norms.get(),
+                quantized_centroid_norms.get(),
+                i8_k,
+                i8_knn.data(),
+                i8_knn_distances.data(),
+                i8_tmp_distances_buf.data()
+            );
+        }
+
+        if (i8_k > 1) {
+            SKM_PROFILE_SCOPE("assign_i8/rerank");
+#pragma omp parallel for num_threads(g_n_threads)
+            for (size_t s = 0; s < n_samples; ++s) {
+                const float* __restrict__ point = data + s * d;
+                float best_dist = std::numeric_limits<float>::max();
+                uint32_t best_idx = 0;
+                for (size_t ki = 0; ki < i8_k; ++ki) {
+                    uint32_t c_idx = i8_knn[s * i8_k + ki];
+                    if (c_idx == static_cast<uint32_t>(-1)) break;
+                    const float* __restrict__ cent = centroids + c_idx * d;
+                    float dist = 0;
+#pragma omp simd reduction(+:dist)
+                    for (size_t dim = 0; dim < d; ++dim) {
+                        float diff = point[dim] - cent[dim];
+                        dist += diff * diff;
+                    }
+                    if (dist < best_dist) {
+                        best_dist = dist;
+                        best_idx = c_idx;
+                    }
+                }
+                out_assignments[s] = best_idx;
+                out_distances[s] = best_dist;
+            }
+        } else {
+            for (size_t s = 0; s < n_samples; ++s) {
+                out_assignments[s] = i8_knn[s];
+                out_distances[s] = i8_knn_distances[s];
+            }
+        }
+
+        {
+            SKM_PROFILE_SCOPE("fill");
+            std::fill(horizontal_centroids.get(), horizontal_centroids.get() + (n_clusters * d), 0.0);
+            std::fill(cluster_sizes.get(), cluster_sizes.get() + n_clusters, 0);
+        }
+    }
+
+    /**
      * @brief Performs assignment and centroid update using GEMM+PRUNING.
      *
      * Uses GEMM for partial distance computation (first partial_d dimensions),
@@ -763,6 +861,67 @@ class SuperKMeans {
         }
     }
 
+    void GetQuantizedL2NormsRowMajor(
+        const int8_t* SKM_RESTRICT data,
+        const size_t n,
+        vector_value_t* SKM_RESTRICT out_norm
+    ) {
+        SKM_PROFILE_SCOPE("norms_calc");
+        for (size_t i = 0; i < n; ++i) {
+            const int8_t* row = data + i * d;
+            int32_t acc = 0;
+    #pragma clang loop vectorize(enable)
+            for (size_t j = 0; j < d; ++j) {
+                acc += static_cast<int32_t>(row[j]) * static_cast<int32_t>(row[j]);
+            }
+            out_norm[i] = static_cast<vector_value_t>(acc);
+        }
+    }
+
+    static void QuantizeEmbedding(
+        const float* embedding,
+        const size_t num_dimensions,
+        const float quantization_base,
+        const float quantization_scale,
+        int8_t* output_quantized_embedding
+    ) {
+#pragma clang loop vectorize(enable)
+        for (size_t i = 0; i < num_dimensions; ++i) {
+            float scaled = (embedding[i] - quantization_base) * quantization_scale;
+            uint8_t u = static_cast<uint8_t>(std::min(nearbyintf(scaled), 255.0f));
+            output_quantized_embedding[i] = static_cast<int8_t>(u - 128);
+        }
+    }
+
+    static void QuantizeEmbeddings(
+        const float* embeddings,
+        const size_t total_elements,
+        const size_t num_dimensions,
+        int8_t* output_quantized_embeddings
+    ) {
+        const size_t total_values = total_elements * num_dimensions;
+        float global_min = std::numeric_limits<float>::max();
+        float global_max = std::numeric_limits<float>::lowest();
+#pragma omp parallel for num_threads(g_n_threads) reduction(min:global_min) reduction(max:global_max)
+        for (size_t i = 0; i < total_values; ++i) {
+            global_min = std::min(global_min, embeddings[i]);
+            global_max = std::max(global_max, embeddings[i]);
+        }
+        const float range = global_max - global_min;
+        const float scaling_factor = (range > 0) ? 255.0f / range : 1.0f;
+
+#pragma omp parallel for num_threads(g_n_threads) schedule(static)
+        for (size_t i = 0; i < total_elements; ++i) {
+            QuantizeEmbedding(
+                &embeddings[i * num_dimensions],
+                num_dimensions,
+                global_min,
+                scaling_factor,
+                &output_quantized_embeddings[i * num_dimensions]
+            );
+        }
+    }
+
     /**
      * @brief Runs a single K-Means iteration with either GEMM-only or GEMM+PRUNING strategy.
      *
@@ -795,17 +954,59 @@ class SuperKMeans {
         const size_t n_clusters,
         size_t& iter_idx,
         const bool is_first_iter,
-        std::vector<SuperKMeansIterationStats>& target_stats
+        std::vector<SuperKMeansIterationStats>& target_stats,
+        const bool run_quantized_assignment = false,
+        const bool run_f32_assignment = true,
+        const bool use_quantized_assignment_for_update = false
     ) {
         if (!is_first_iter) {
             std::swap(horizontal_centroids, prev_centroids);
         }
 
         if constexpr (GEMM_ONLY) {
-            GetL2NormsRowMajor(prev_centroids.get(), n_clusters, centroid_norms.get());
-            FirstAssignAndUpdateCentroids(
-                data_to_cluster, prev_centroids.get(), tmp_distances_buf, n_samples, n_clusters
-            );
+            // f32 assignment path
+            if (run_f32_assignment) {
+                SKM_PROFILE_SCOPE("assign_f32");
+                GetL2NormsRowMajor(prev_centroids.get(), n_clusters, centroid_norms.get());
+                FirstAssignAndUpdateCentroids(
+                    data_to_cluster, prev_centroids.get(), tmp_distances_buf, n_samples, n_clusters
+                );
+            }
+
+            // Quantized (i8) assignment path
+            std::vector<uint32_t> i8_assignments;
+            std::vector<float> i8_distances;
+            if (run_quantized_assignment) {
+                i8_assignments.resize(n_samples);
+                i8_distances.assign(n_samples, std::numeric_limits<float>::max());
+                SKM_PROFILE_SCOPE("assign_i8");
+                QuantizedAssignAndUpdateCentroids(
+                    data_to_cluster, prev_centroids.get(), n_samples, n_clusters,
+                    i8_assignments.data(), i8_distances.data()
+                );
+            }
+
+            // Compare i8 vs f32 assignments when both were computed
+            if (run_quantized_assignment && run_f32_assignment) {
+                SKM_PROFILE_SCOPE("compare_assignments");
+                size_t match = 0;
+                for (size_t s = 0; s < n_samples; ++s) {
+                    if (i8_assignments[s] == assignments[s]) {
+                        ++match;
+                        continue;
+                    }
+                }
+                std::cout << "i8 vs f32 assignment agreement: " << match << " / " << n_samples
+                          << " (" << (100.0 * match / n_samples) << "%)" << std::endl;
+            }
+
+            // Choose which assignments drive centroid updates
+            if (use_quantized_assignment_for_update) {
+                assert(!i8_assignments.empty() && i8_assignments.size() == n_samples);
+                std::copy(i8_assignments.begin(), i8_assignments.end(), assignments.get());
+                std::copy(i8_distances.begin(), i8_distances.end(), distances.get());
+            }
+
         } else {
             GetPartialL2NormsRowMajor(
                 prev_centroids.get(), n_clusters, centroids_partial_norms.data(), partial_d
@@ -1477,6 +1678,10 @@ class SuperKMeans {
     std::unique_ptr<vector_value_t[]> data_norms;
     std::unique_ptr<vector_value_t[]> centroid_norms;
     std::unique_ptr<size_t[]> sampled_indices;
+
+    // Quantized data (computed once, reused across iterations)
+    std::vector<int8_t> quantized_data;
+    std::unique_ptr<vector_value_t[]> quantized_data_norms;
 
     // Buffers for ground truth and recall computation
     std::unique_ptr<uint32_t[]> gt_assignments;
