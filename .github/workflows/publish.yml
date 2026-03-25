@@ -3,7 +3,6 @@ name: Publish to PyPI
 on:
   push:
     tags: ["v*"]
-  pull_request:  # TEMPORARY: remove after first successful CI run
   workflow_dispatch:
 
 jobs:

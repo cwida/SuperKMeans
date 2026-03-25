@@ -70,7 +70,7 @@ class SIMDComputer<skmeans::DistanceFunction::l2, skmeans::Quantization::f32> {
         // Convert the final sum to a scalar double-precision value and return
         double d2 = _mm_cvtsd_f64(sum128);
 
-SKM_VECTORIZE_LOOP
+        SKM_VECTORIZE_LOOP
         for (; i < num_dimensions; ++i) {
             float d = vector1[i] - vector2[i];
             d2 += d * d;

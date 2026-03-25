@@ -1,6 +1,10 @@
 # Installation
 
-Looking for installation on GPU? We have an implementation (see `gpu_optimized` branch)! But the installation instructions are still WiP
+### PyPI
+We are available in PyPI. However, we recommend installing from source for maximum performance.
+```sh
+pip install superkmeans
+```
 
 ### Super K-Means on CPU needs:
 - Clang 17, CMake 3.26
@@ -11,7 +15,7 @@ Looking for installation on GPU? We have an implementation (see `gpu_optimized` 
 Once you have these requirements, you can install Python Bindings or compile our [C++ example](./examples/) code.
 
 <details>
-<summary> <b> Installing Python Bindings </b></summary>
+<summary> <b> Installing Python Bindings from source </b></summary>
 
 ```sh
 git clone https://github.com/cwida/SuperKMeans.git
@@ -27,7 +31,7 @@ pip install .
 </details>
 
 <details>
-<summary> <b> Compiling C++ Library </b></summary>
+<summary> <b> Compiling C++ Library from source </b></summary>
 
 ```sh
 git clone https://github.com/cwida/SuperKMeans.git
@@ -207,3 +211,5 @@ make TARGET=NEOVERSEV1 DYNAMIC_ARCH=0 USE_OPENMP=1 NUM_THREADS=128
 ### Does Super K-Means use SIMD?
 Yes. We have optimizations for AVX512, AVX2, and NEON. You don't need to do anything special to activate these. If your machine doesn't have any of these, we rely on scalar code. 
 
+## GPU 
+Looking for installation on GPU? We have an implementation (see `legacy_gpu` branch)! But the installation instructions are still WiP.
