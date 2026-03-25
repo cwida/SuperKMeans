@@ -13,20 +13,40 @@ if (MKL_FOUND)
 endif()
 
 set(FAISS_ENABLE_PYTHON OFF CACHE BOOL "disable python" FORCE)
-set(FAISS_ENABLE_GPU OFF CACHE BOOL "disable gpu" FORCE)
+
+if (SKMEANS_ENABLE_GPU)
+	set(FAISS_ENABLE_GPU ON CACHE BOOL "enable gpu" FORCE)
+	set(FAISS_ENABLE_CUVS ON CACHE BOOL "enable CUVS" FORCE)
+else()
+	set(FAISS_ENABLE_GPU OFF CACHE BOOL "disable gpu" FORCE)
+endif()
 set(BUILD_TESTING OFF CACHE BOOL "disable faiss tests" FORCE)
 set(BUILD_SHARED_LIBS ON CACHE BOOL "shared libs" FORCE)
 set(FAISS_OPT_LEVEL "${FAISS_OPT_LEVEL}" CACHE STRING "CPU optimization level" FORCE)
 
-FetchContent_Declare(
-    faiss
-    GIT_REPOSITORY https://github.com/facebookresearch/faiss.git
-    GIT_TAG        v1.11.0
-)
+if (SKMEANS_ENABLE_GPU) 
+	FetchContent_Declare(
+			faiss
+			GIT_REPOSITORY https://github.com/facebookresearch/faiss.git
+			GIT_TAG        v1.13.2
+	)
+else()
+	FetchContent_Declare(
+			faiss
+			GIT_REPOSITORY https://github.com/facebookresearch/faiss.git
+			GIT_TAG        v1.11.0
+	)
+endif()
 FetchContent_MakeAvailable(faiss)
 
 # Common benchmark dependencies
 set(BENCH_COMMON_LIBS ${MKL_COMMON_LIBS} ${BLAS_LINK_LIBRARIES})
+
+if (SKMEANS_ENABLE_GPU)
+		set(CUDA_LIBS PRIVATE CUDA::cudart CUDA::cublas)
+		list(APPEND BENCH_COMMON_LIBS ${CUDA_LIBS})
+endif()
+
 set(FAISS_COMMON_LIBS faiss)
 
 # Link architecture-specific FAISS library based on FAISS_OPT_LEVEL
