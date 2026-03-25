@@ -26,9 +26,8 @@ else()
     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native")
 endif()
 
-# GCC-specific flags to close the performance gap with Clang
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -ffast-math -fassociative-math -funroll-loops -fno-semantic-interposition")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -fassociative-math -funroll-loops")
 endif()
 
 message(STATUS "C++ compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
@@ -98,7 +97,6 @@ else()
 endif()
 
 add_compile_definitions(CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-add_compile_definitions(BENCHMARK_TIME)
 include_directories(include extern/Eigen)
 
 if(SKMEANS_COMPILE_TESTS)
