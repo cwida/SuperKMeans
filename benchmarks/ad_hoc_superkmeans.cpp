@@ -18,7 +18,7 @@
 #include "superkmeans/gpu/superkmeans.h"
 
 int main(int argc, char* argv[]) {
-		skmeans::gpu::trigger_gpu_initialization();
+    skmeans::gpu::trigger_gpu_initialization();
 
     const std::string algorithm = "superkmeans";
     std::string dataset = (argc > 1) ? std::string(argv[1]) : std::string("yahoo");

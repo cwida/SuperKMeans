@@ -159,7 +159,7 @@ class SuperKMeans {
      *
      * @return std::vector<skmeans_centroid_value_t<q>> Trained centroids
      */
-    std::vector<skmeans_centroid_value_t<q>> Train(
+    virtual std::vector<skmeans_centroid_value_t<q>> Train(
         const vector_value_t* SKM_RESTRICT data,
         const size_t n,
         const vector_value_t* SKM_RESTRICT queries = nullptr,
@@ -343,7 +343,7 @@ class SuperKMeans {
      * @param n_centroids Number of centroids
      * @return std::vector<uint32_t> Assignment for each vector (index of nearest centroid)
      */
-    [[nodiscard]] std::vector<uint32_t> Assign(
+    [[nodiscard]] virtual std::vector<uint32_t> Assign(
         const vector_value_t* SKM_RESTRICT vectors,
         const vector_value_t* SKM_RESTRICT centroids,
         const size_t n_vectors,
@@ -394,7 +394,7 @@ class SuperKMeans {
      * @param n_centroids Number of centroids
      * @return std::vector<uint32_t> Assignment for each vector (index of nearest centroid)
      */
-    [[nodiscard]] std::vector<uint32_t> FastAssign(
+    [[nodiscard]] virtual std::vector<uint32_t> FastAssign(
         const vector_value_t* SKM_RESTRICT vectors,
         const vector_value_t* SKM_RESTRICT centroids,
         const size_t n_vectors,
@@ -640,7 +640,7 @@ class SuperKMeans {
      * @param n_samples Number of vectors in the data
      * @param n_clusters Number of centroids
      */
-    void FirstAssignAndUpdateCentroids(
+    virtual void FirstAssignAndUpdateCentroids(
         const vector_value_t* SKM_RESTRICT data,
         const vector_value_t* SKM_RESTRICT rotated_initial_centroids,
         distance_t* SKM_RESTRICT tmp_distances_buf,
@@ -681,7 +681,7 @@ class SuperKMeans {
      * @param pdx_centroids PDX-layout centroids for PRUNING
      * @param out_not_pruned_counts Output for pruning statistics
      */
-    void AssignAndUpdateCentroids(
+    virtual void AssignAndUpdateCentroids(
         const vector_value_t* SKM_RESTRICT data,
         const vector_value_t* SKM_RESTRICT centroids,
         const vector_value_t* SKM_RESTRICT partial_centroid_norms,
@@ -725,7 +725,7 @@ class SuperKMeans {
      * @param n_samples
      * @param n_clusters
      */
-    void UpdateCentroids(
+    virtual void UpdateCentroids(
         const vector_value_t* SKM_RESTRICT data,
         const size_t n_samples,
         const size_t n_clusters

@@ -48,7 +48,7 @@ class GPUSuperKMeans : public skmeans::SuperKMeans<q, alpha> {
     using skmeans::SuperKMeans<q, alpha>::SampleAndRotateVectors;
     using skmeans::SuperKMeans<q, alpha>::ShouldStopEarly;
     using skmeans::SuperKMeans<q, alpha>::TunePartialD;
-    using skmeans::SuperKMeans<q, alpha>::UpdateCentroids;
+    using skmeans::SuperKMeans<q, alpha>::RunIteration;
 
     using gpu_batch_computer = skmeans::gpu::BatchComputer<alpha, q>;
     using cpu_batch_computer = skmeans::BatchComputer<alpha, q>;
@@ -76,7 +76,7 @@ class GPUSuperKMeans : public skmeans::SuperKMeans<q, alpha> {
         const size_t n,
         const vector_value_t* SKM_RESTRICT queries = nullptr,
         const size_t n_queries = 0
-    ) {
+    ) override {
         SKMEANS_ENSURE_POSITIVE(n);
         if (trained) {
             throw std::runtime_error("The clustering has already been trained");
@@ -206,7 +206,7 @@ class GPUSuperKMeans : public skmeans::SuperKMeans<q, alpha> {
             }
 
             if (use_gemm_only) {
-                RunIteration<true>(
+                this->template RunIteration<true>(
                     data_to_cluster,
                     tmp_distances_buf.data(),
                     centroids_pdx_wrapper,
@@ -221,7 +221,7 @@ class GPUSuperKMeans : public skmeans::SuperKMeans<q, alpha> {
                     iteration_stats
                 );
             } else {
-                RunIteration<false>(
+                this->template RunIteration<false>(
                     data_to_cluster,
                     tmp_distances_buf.data(),
                     centroids_pdx_wrapper,
@@ -268,7 +268,7 @@ class GPUSuperKMeans : public skmeans::SuperKMeans<q, alpha> {
         const vector_value_t* SKM_RESTRICT centroids,
         const size_t n_vectors,
         const size_t n_centroids
-    ) {
+    ) override {
         SKM_PROFILE_SCOPE("assign");
         std::vector<uint32_t> result_assignments(n_vectors);
         std::unique_ptr<distance_t[]> tmp_distances_buf(
@@ -320,7 +320,7 @@ class GPUSuperKMeans : public skmeans::SuperKMeans<q, alpha> {
         const vector_value_t* SKM_RESTRICT centroids,
         const size_t n_vectors,
         const size_t n_centroids
-    ) {
+    ) override {
         SKM_PROFILE_SCOPE("fast_assign");
         if (!trained) {
             throw std::runtime_error("FastAssign requires SuperKMeans to be trained first");
@@ -508,7 +508,7 @@ class GPUSuperKMeans : public skmeans::SuperKMeans<q, alpha> {
         distance_t* SKM_RESTRICT tmp_distances_buf,
         const size_t n_samples,
         const size_t n_clusters
-    ) {
+    ) override {
         gpu_batch_computer::FindNearestNeighborWithDeviceContext(
             gpu_device_context,
             data,
@@ -553,7 +553,7 @@ class GPUSuperKMeans : public skmeans::SuperKMeans<q, alpha> {
         size_t* out_not_pruned_counts,
         const size_t n_samples,
         const size_t n_clusters
-    ) {
+    ) override {
         gpu_batch_computer::FindNearestNeighborWithPruning(
             gpu_device_context,
             data,
@@ -579,122 +579,35 @@ class GPUSuperKMeans : public skmeans::SuperKMeans<q, alpha> {
         }
     }
 
-    /**
-     * @brief Runs a single K-Means iteration with either GEMM-only or GEMM+PRUNING strategy.
-     *
-     *
-     * @tparam GEMM_ONLY If true, uses full GEMM (FirstAssignAndUpdateCentroids).
-     *                   If false, uses GEMM+PRUNING (AssignAndUpdateCentroids with TunePartialD).
-     *
-     * @param data_to_cluster Training data (rotated, row-major)
-     * @param tmp_distances_buf Workspace buffer for distance computations
-     * @param centroids_pdx_wrapper PDX-layout centroids (only used when !GEMM_ONLY)
-     * @param centroids_partial_norms Partial norms buffer (only used when !GEMM_ONLY)
-     * @param not_pruned_counts Pruning statistics buffer (only used when !GEMM_ONLY)
-     * @param rotated_queries Query vectors for recall computation (nullptr if n_queries==0)
-     * @param n_queries Number of query vectors
-     * @param n_samples Number of training samples
-     * @param n_clusters Number of clusters
-     * @param iter_idx Current iteration index (0-based)
-     * @param is_first_iter Whether this is the first iteration (skips centroid swap)
-     */
-    template <bool GEMM_ONLY>
-    void RunIteration(
-        const vector_value_t* SKM_RESTRICT data_to_cluster,
-        distance_t* SKM_RESTRICT tmp_distances_buf,
-        const layout_t& centroids_pdx_wrapper,
-        std::vector<vector_value_t>& centroids_partial_norms,
-        std::vector<size_t>& not_pruned_counts,
-        const vector_value_t* SKM_RESTRICT rotated_queries,
-        const size_t n_queries,
+    void UpdateCentroids(
+        const vector_value_t* SKM_RESTRICT data,
         const size_t n_samples,
-        const size_t n_clusters,
-        size_t& iter_idx,
-        const bool is_first_iter,
-        std::vector<SuperKMeansIterationStats>& target_stats
-    ) {
-        if (!is_first_iter) {
-            std::swap(horizontal_centroids, prev_centroids);
-        }
+        const size_t n_clusters
+    ) override {
+        gpu::DeviceBuffer<uint32_t> cluster_sizes_dev(
+            gpu::compute_buffer_size<uint32_t>(n_clusters), gpu_device_context.main_stream.get()
+        );
+        gpu::DeviceBuffer<centroid_value_t> horizontal_centroids_dev(
+            gpu::compute_buffer_size<centroid_value_t>(n_clusters * d),
+            gpu_device_context.main_stream.get()
+        );
+        kernels::GPUUpdateCentroids(
+            gpu_device_context.x.get(),
+            n_clusters,
+            n_samples,
+            gpu_device_context.out_knn.get(),
+            cluster_sizes_dev.get(),
+            horizontal_centroids_dev.get(),
+            d,
+            gpu_device_context.main_stream.get()
+        );
 
-        if constexpr (GEMM_ONLY) {
-            GetL2NormsRowMajor(prev_centroids.get(), n_clusters, centroid_norms.get());
-            FirstAssignAndUpdateCentroids(
-                data_to_cluster, prev_centroids.get(), tmp_distances_buf, n_samples, n_clusters
-            );
-        } else {
-            GetPartialL2NormsRowMajor(
-                prev_centroids.get(), n_clusters, centroids_partial_norms.data(), partial_d
-            );
-            {
-                SKM_PROFILE_SCOPE("fill");
-                std::fill(not_pruned_counts.data(), not_pruned_counts.data() + n_samples, 0);
-            }
-            AssignAndUpdateCentroids(
-                data_to_cluster,
-                prev_centroids.get(),
-                centroids_partial_norms.data(),
-                tmp_distances_buf,
-                centroids_pdx_wrapper,
-                not_pruned_counts.data(),
-                n_samples,
-                n_clusters
-            );
-        }
-
-        UpdateCentroids(data_to_cluster, n_samples, n_clusters);
-
-        float avg_not_pruned_pct = -1.0f;
-        uint32_t old_partial_d = partial_d;
-        if constexpr (!GEMM_ONLY) {
-            bool partial_d_changed = false;
-            avg_not_pruned_pct =
-                TunePartialD(not_pruned_counts.data(), n_samples, n_clusters, partial_d_changed);
-            if (partial_d_changed) {
-                GetPartialL2NormsRowMajor(data_to_cluster, n_samples, data_norms.get(), partial_d);
-            }
-        }
-
-        ConsolidateCentroids(n_samples, n_clusters);
-
-        ComputeCost(n_samples);
-        ComputeShift(n_clusters);
-
-        if (n_queries) {
-            GetL2NormsRowMajor(horizontal_centroids.get(), n_clusters, centroid_norms.get());
-            recall = ComputeRecall(rotated_queries, n_queries);
-        }
-
-        SuperKMeansIterationStats stats;
-        stats.iteration = iter_idx + 1;
-        stats.objective = cost;
-        stats.shift = shift;
-        stats.split = n_split;
-        stats.recall = recall;
-        stats.is_gemm_only = GEMM_ONLY;
-        if constexpr (!GEMM_ONLY) {
-            stats.not_pruned_pct = avg_not_pruned_pct;
-            stats.partial_d = old_partial_d;
-        }
-        target_stats.push_back(stats);
-
-        if (config.verbose) {
-            std::cout << "Iteration " << iter_idx + 1 << "/" << config.iters
-                      << " | Objective: " << cost << " | Objective improvement: "
-                      << (iter_idx > 0 ? 1 - (cost / prev_cost) : 0.0f) << " | Shift: " << shift
-                      << " | Split: " << n_split << " | Recall: " << recall;
-            if constexpr (GEMM_ONLY) {
-                std::cout << " [BLAS-only]";
-            } else {
-                std::cout << " | Not Pruned %: " << avg_not_pruned_pct * 100.0f
-                          << " | d': " << old_partial_d << " -> " << partial_d;
-            }
-            std::cout << std::endl << std::endl;
-        }
+        cluster_sizes_dev.copy_to_host(cluster_sizes.get());
+        horizontal_centroids_dev.copy_to_host(horizontal_centroids.get());
+        gpu_device_context.main_stream.synchronize();
     }
 
-		gpu::GPUDeviceContext<skmeans_value_t<q>, skmeans_value_t<q>, distance_t>
-        gpu_device_context;
+    gpu::GPUDeviceContext<skmeans_value_t<q>, skmeans_value_t<q>, distance_t> gpu_device_context;
 
     // Bring in members of the base class
     using skmeans::SuperKMeans<q, alpha>::d;
