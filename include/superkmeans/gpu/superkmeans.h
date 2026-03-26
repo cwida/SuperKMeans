@@ -34,8 +34,8 @@ class SuperKMeans {
     using VectorR = Eigen::VectorXf;
 
     using gpu_batch_computer = skmeans::gpu::BatchComputer<alpha, q>;
-		// This batch computer we use for FindKNearestNeighbors, as GPU does not implement that yet
-		using cpu_batch_computer = skmeans::BatchComputer<alpha, q>;      
+    // This batch computer we use for FindKNearestNeighbors, as GPU does not implement that yet
+    using cpu_batch_computer = skmeans::BatchComputer<alpha, q>;
 
   public:
     /**
@@ -105,12 +105,15 @@ class SuperKMeans {
                 "Queries must be provided if n_queries > 0 and sample_queries is false"
             );
         }
-				// We use full n, not samples as calling FastAssign assumes that GPU holds full vectors
 
         const vector_value_t* SKM_RESTRICT data_p = data;
         n_samples = GetNVectorsToSample(n, n_clusters);
-				gpu_device_context = gpu::GPUDeviceContext<skmeans_value_t<q>, skmeans_value_t<q>, distance_t>(
-						n_samples, n_clusters, d, GPU_STREAM_POOL_SIZE);
+
+        // We use n, not n_samples for when fast assign is called afterwards
+        gpu_device_context =
+            gpu::GPUDeviceContext<skmeans_value_t<q>, skmeans_value_t<q>, distance_t>(
+                n_samples, n_clusters, d, GPU_STREAM_POOL_SIZE
+            );
         if (n_samples < n_clusters) {
             throw std::runtime_error(
                 "Not enough samples to train. Try increasing the sampling_fraction or "
@@ -281,7 +284,8 @@ class SuperKMeans {
     ) {
         SKM_PROFILE_SCOPE("assign");
         std::vector<uint32_t> result_assignments(n_vectors);
-        std::unique_ptr<distance_t[]> tmp_distances_buf(new distance_t[X_BATCH_SIZE * Y_BATCH_SIZE]
+        std::unique_ptr<distance_t[]> tmp_distances_buf(
+            new distance_t[X_BATCH_SIZE * Y_BATCH_SIZE]
         );
         std::vector<vector_value_t> vector_norms(n_vectors);
         std::vector<vector_value_t> centroid_norms_local(n_centroids);
@@ -380,8 +384,9 @@ class SuperKMeans {
         if (config.sampling_fraction == 1.0f) {
             // Recompute data norms defensively (data_p is independently rotated)
             GetPartialL2NormsRowMajor(data_p, n_vectors, data_norms.get(), partial_d);
+            // We do it on the GPU, as all vectors are there
             gpu_batch_computer::FindNearestNeighborWithPruning(
-								gpu_device_context,
+                gpu_device_context,
                 data_p,
                 horizontal_centroids.get(),
                 n_vectors,
@@ -416,8 +421,9 @@ class SuperKMeans {
             // data_norms was allocated for n_samples in Train(), reallocate for n_vectors
             data_norms.reset(new vector_value_t[n_vectors]);
             GetPartialL2NormsRowMajor(data_p, n_vectors, data_norms.get(), partial_d);
-            gpu_batch_computer::FindNearestNeighborWithPruning(
-								gpu_device_context,
+
+            // We do it on the CPU, as only the sampled vectors are loaded on the GPU
+            cpu_batch_computer::FindNearestNeighborWithPruning(
                 data_p,
                 horizontal_centroids.get(),
                 n_vectors,
@@ -475,8 +481,8 @@ class SuperKMeans {
             data_norms.reset(new vector_value_t[n_vectors]);
             GetPartialL2NormsRowMajor(data_p, n_vectors, data_norms.get(), partial_d);
 
-            gpu_batch_computer::FindNearestNeighborWithPruning(
-								gpu_device_context,
+            // We do it on the CPU, as only the sampled vectors are loaded on the GPU
+            cpu_batch_computer::FindNearestNeighborWithPruning(
                 data_p,
                 horizontal_centroids.get(),
                 n_vectors,
@@ -581,7 +587,7 @@ class SuperKMeans {
         const size_t n_clusters
     ) {
         gpu_batch_computer::FindNearestNeighborWithDeviceContext(
-						gpu_device_context,
+            gpu_device_context,
             data,
             rotated_initial_centroids,
             n_samples,
@@ -626,7 +632,7 @@ class SuperKMeans {
         const size_t n_clusters
     ) {
         gpu_batch_computer::FindNearestNeighborWithPruning(
-						gpu_device_context,
+            gpu_device_context,
             data,
             centroids,
             n_samples,
@@ -1421,10 +1427,11 @@ class SuperKMeans {
     std::unique_ptr<uint32_t[]> promising_centroids;
     std::unique_ptr<distance_t[]> recall_distances;
 
-		gpu::GPUDeviceContext<skmeans_value_t<q>, skmeans_value_t<q>, distance_t> gpu_device_context;
+    gpu::GPUDeviceContext<skmeans_value_t<q>, skmeans_value_t<q>, distance_t> gpu_device_context;
+
   public:
     std::unique_ptr<uint32_t[]> assignments;
     std::vector<SuperKMeansIterationStats> iteration_stats;
 };
-}
+} // namespace gpu
 } // namespace skmeans
