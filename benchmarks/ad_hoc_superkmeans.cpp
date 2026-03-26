@@ -95,7 +95,7 @@ int main(int argc, char* argv[]) {
     }
 
     auto kmeans_state =
-        skmeans::gpu::SuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>(
+        skmeans::GPUSuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>(
             n_clusters, d, config
         );
     bench_utils::TicToc timer;
@@ -116,7 +116,7 @@ int main(int argc, char* argv[]) {
     // Compute assignments and cluster balance statistics
     auto assignments = kmeans_state.FastAssign(data.data(), centroids.data(), n, n_clusters);
     auto balance_stats =
-        skmeans::gpu::SuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>::
+        skmeans::GPUSuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>::
             GetClustersBalanceStats(assignments.data(), n, n_clusters);
     balance_stats.print();
 
