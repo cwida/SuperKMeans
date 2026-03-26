@@ -15,7 +15,11 @@
 #include "superkmeans/pdx/utils.h"
 #include "superkmeans/superkmeans.h"
 
+#include "superkmeans/gpu/superkmeans.h"
+
 int main(int argc, char* argv[]) {
+		skmeans::gpu::trigger_gpu_initialization();
+
     const std::string algorithm = "superkmeans";
     std::string dataset = (argc > 1) ? std::string(argv[1]) : std::string("yahoo");
     std::string experiment_name = (argc > 2) ? std::string(argv[2]) : std::string("end_to_end");
@@ -91,7 +95,7 @@ int main(int argc, char* argv[]) {
     }
 
     auto kmeans_state =
-        skmeans::SuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>(
+        skmeans::gpu::SuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>(
             n_clusters, d, config
         );
     bench_utils::TicToc timer;
@@ -112,7 +116,7 @@ int main(int argc, char* argv[]) {
     // Compute assignments and cluster balance statistics
     auto assignments = kmeans_state.FastAssign(data.data(), centroids.data(), n, n_clusters);
     auto balance_stats =
-        skmeans::SuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>::
+        skmeans::gpu::SuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>::
             GetClustersBalanceStats(assignments.data(), n, n_clusters);
     balance_stats.print();
 

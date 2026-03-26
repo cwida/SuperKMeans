@@ -72,6 +72,10 @@ static inline constexpr size_t N_CLUSTERS_THRESHOLD_FOR_PRUNING = 256;
 static inline constexpr size_t X_BATCH_SIZE = 40960;
 static inline constexpr size_t Y_BATCH_SIZE = 2048;
 static inline constexpr size_t MINI_BATCH_SIZE = 256;
+#elif defined(SKMEANS_ENABLE_GPU)
+static inline constexpr size_t X_BATCH_SIZE = 4096 * 16; 
+static inline constexpr size_t Y_BATCH_SIZE = 1024;     
+static inline constexpr size_t GPU_STREAM_POOL_SIZE = 4;
 #else
 static inline constexpr size_t X_BATCH_SIZE = 4096;
 static inline constexpr size_t Y_BATCH_SIZE = 1024;
