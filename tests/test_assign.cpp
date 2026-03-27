@@ -135,7 +135,8 @@ TEST_F(AssignTest, UseTrainState_MatchesBruteForce) {
     );
     auto centroids = kmeans.Train(data.data(), n);
 
-    auto assignments_fast = kmeans.AssignTrainingPoints(data.data(), centroids.data(), n, n_clusters);
+    auto assignments_fast =
+        kmeans.AssignTrainingPoints(data.data(), centroids.data(), n, n_clusters);
     auto assignments_brute = kmeans.Assign(data.data(), centroids.data(), n, n_clusters);
 
     ASSERT_EQ(assignments_fast.size(), n);
@@ -179,7 +180,8 @@ TEST_F(AssignTest, UseTrainState_MatchesBruteForce_Sampled) {
     );
     auto centroids = kmeans.Train(data.data(), n);
 
-    auto assignments_fast = kmeans.AssignTrainingPoints(data.data(), centroids.data(), n, n_clusters);
+    auto assignments_fast =
+        kmeans.AssignTrainingPoints(data.data(), centroids.data(), n, n_clusters);
     auto assignments_brute = kmeans.Assign(data.data(), centroids.data(), n, n_clusters);
 
     ASSERT_EQ(assignments_fast.size(), n);
@@ -223,7 +225,8 @@ TEST_F(AssignTest, UseTrainState_MatchesBruteForce_Hierarchical) {
         );
     auto centroids = kmeans.Train(data.data(), n);
 
-    auto assignments_fast = kmeans.AssignTrainingPoints(data.data(), centroids.data(), n, n_clusters);
+    auto assignments_fast =
+        kmeans.AssignTrainingPoints(data.data(), centroids.data(), n, n_clusters);
     auto assignments_brute = kmeans.Assign(data.data(), centroids.data(), n, n_clusters);
 
     ASSERT_EQ(assignments_fast.size(), n);

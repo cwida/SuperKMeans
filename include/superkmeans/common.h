@@ -18,7 +18,8 @@ int sgemm_(
     int* ldb,
     float* beta,
     float* c,
-    int* ldc);
+    int* ldc
+);
 }
 
 #define SKMEANS_ENSURE_POSITIVE(x)                                                                 \

@@ -342,8 +342,7 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
                     }
 #else
                     BlasMatrixMultiplication(
-                        batch_x_p, batch_y_p, batch_n_x, batch_n_y, d, partial_d,
-                        tmp_distances_buf
+                        batch_x_p, batch_y_p, batch_n_x, batch_n_y, d, partial_d, tmp_distances_buf
                     );
 #endif
                 }

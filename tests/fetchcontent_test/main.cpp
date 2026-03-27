@@ -10,14 +10,16 @@ int main() {
     std::vector<float> data(n * d);
     std::mt19937 rng(42);
     std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-    for (auto& v : data) v = dist(rng);
+    for (auto& v : data)
+        v = dist(rng);
 
     skmeans::SuperKMeans<> skm(k, d);
     auto centroids = skm.Train(data.data(), n);
     auto assignments = skm.Assign(data.data(), centroids.data(), n, k);
 
     if (assignments.size() != n) {
-        std::cerr << "FAIL: expected " << n << " assignments, got " << assignments.size() << std::endl;
+        std::cerr << "FAIL: expected " << n << " assignments, got " << assignments.size()
+                  << std::endl;
         return 1;
     }
 

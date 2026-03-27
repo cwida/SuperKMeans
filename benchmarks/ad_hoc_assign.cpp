@@ -85,7 +85,8 @@ int main(int argc, char* argv[]) {
     // --- AssignTrainingPoints (GEMM+PRUNING fast path) ---
     bench_utils::TicToc timer_fast;
     timer_fast.Tic();
-    auto assignments_fast = kmeans.AssignTrainingPoints(data.data(), centroids.data(), n, n_clusters);
+    auto assignments_fast =
+        kmeans.AssignTrainingPoints(data.data(), centroids.data(), n, n_clusters);
     timer_fast.Toc();
     double fast_ms = timer_fast.GetMilliseconds();
     std::cout << "\nAssignTrainingPoints: " << fast_ms << " ms" << std::endl;

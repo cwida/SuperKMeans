@@ -92,7 +92,8 @@ int main() {
 
     timer.Reset();
     timer.Tic();
-    auto assignments = kmeans_state.AssignTrainingPoints(data.data(), centroids.data(), n, n_clusters);
+    auto assignments =
+        kmeans_state.AssignTrainingPoints(data.data(), centroids.data(), n, n_clusters);
     timer.Toc();
     double assignment_time_ms = timer.GetMilliseconds();
     std::cout << "Fast Assignment completed in " << assignment_time_ms << " ms" << std::endl;

@@ -402,15 +402,16 @@ class SuperKMeans {
     ) {
         SKM_PROFILE_SCOPE("assign_training_points");
         if (!trained) {
-            throw std::runtime_error("AssignTrainingPoints requires SuperKMeans to be trained first");
+            throw std::runtime_error("AssignTrainingPoints requires SuperKMeans to be trained first"
+            );
         }
 
         if (config.use_blas_only || d < DIMENSION_THRESHOLD_FOR_PRUNING ||
             n_clusters <= N_CLUSTERS_THRESHOLD_FOR_PRUNING) {
             if (!config.suppress_warnings) {
-                std::cout
-                    << "WARNING: AssignTrainingPoints cannot use pruning, falling back to brute force Assign"
-                    << std::endl;
+                std::cout << "WARNING: AssignTrainingPoints cannot use pruning, falling back to "
+                             "brute force Assign"
+                          << std::endl;
             }
             return Assign(vectors, centroids, n_vectors, n_centroids);
         }

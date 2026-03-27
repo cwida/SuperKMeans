@@ -117,7 +117,8 @@ int main(int argc, char* argv[]) {
     // Compute assignments and cluster balance statistics
     bench_utils::TicToc timer_fast;
     timer_fast.Tic();
-    auto assignments = kmeans_state.AssignTrainingPoints(data.data(), centroids.data(), n, n_clusters);
+    auto assignments =
+        kmeans_state.AssignTrainingPoints(data.data(), centroids.data(), n, n_clusters);
     timer_fast.Toc();
     std::cout << "Time taken for AssignTrainingPoints: " << timer_fast.GetMilliseconds() << " ms"
               << std::endl;
