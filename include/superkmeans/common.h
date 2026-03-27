@@ -4,6 +4,23 @@
 #include <cstdint>
 #include <cstdio>
 
+extern "C" {
+int sgemm_(
+    const char* transa,
+    const char* transb,
+    int* m,
+    int* n,
+    int* k,
+    const float* alpha,
+    const float* a,
+    int* lda,
+    const float* b,
+    int* ldb,
+    float* beta,
+    float* c,
+    int* ldc);
+}
+
 #define SKMEANS_ENSURE_POSITIVE(x)                                                                 \
     if ((x) <= 0) {                                                                                \
         throw std::invalid_argument("Value must be positive: " #x);                                \

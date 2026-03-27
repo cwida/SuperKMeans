@@ -10,26 +10,6 @@
 #include "superkmeans/profiler.h"
 #include <Eigen/Dense>
 
-// Eigen already declares sgemm_, so we don't need to redeclare it
-// TODO(lkuffo, low): However, I would like to have more control over this
-extern "C" {
-/* declare BLAS functions, see http://www.netlib.org/clapack/cblas/ */
-// int sgemm_(
-//         const char* transa,
-//         const char* transb,
-//         FINTEGER* m,
-//         FINTEGER* n,
-//         FINTEGER* k,
-//         const float* alpha,
-//         const float* a,
-//         FINTEGER* lda,
-//         const float* b,
-//         FINTEGER* ldb,
-//         float* beta,
-//         float* c,
-//         FINTEGER* ldc);
-}
-
 namespace skmeans {
 
 template <DistanceFunction alpha, Quantization q>

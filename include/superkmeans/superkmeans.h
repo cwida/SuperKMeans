@@ -384,32 +384,32 @@ class SuperKMeans {
     /**
      * @brief Fast assignment using GEMM+PRUNING with trained state.
      *
-     * Assumes that the vectors sent here are the same as those used in .Train().
-     * Leverages the assignments from the training for a faster
+     * Requires that the vectors passed here are the same as those used in .Train().
+     * Leverages the assignments from training for a faster
      * assignment than brute force Assign().
      *
-     * @param vectors The data matrix (row-major, n_vectors x d)
+     * @param vectors The training data matrix (row-major, n_vectors x d)
      * @param centroids The centroids matrix (row-major, n_centroids x d)
      * @param n_vectors Number of vectors
      * @param n_centroids Number of centroids
      * @return std::vector<uint32_t> Assignment for each vector (index of nearest centroid)
      */
-    [[nodiscard]] std::vector<uint32_t> FastAssign(
+    [[nodiscard]] std::vector<uint32_t> AssignTrainingPoints(
         const vector_value_t* SKM_RESTRICT vectors,
         const vector_value_t* SKM_RESTRICT centroids,
         const size_t n_vectors,
         const size_t n_centroids
     ) {
-        SKM_PROFILE_SCOPE("fast_assign");
+        SKM_PROFILE_SCOPE("assign_training_points");
         if (!trained) {
-            throw std::runtime_error("FastAssign requires SuperKMeans to be trained first");
+            throw std::runtime_error("AssignTrainingPoints requires SuperKMeans to be trained first");
         }
 
         if (config.use_blas_only || d < DIMENSION_THRESHOLD_FOR_PRUNING ||
             n_clusters <= N_CLUSTERS_THRESHOLD_FOR_PRUNING) {
             if (!config.suppress_warnings) {
                 std::cout
-                    << "WARNING: FastAssign cannot be used, falling back to brute force Assign"
+                    << "WARNING: AssignTrainingPoints cannot use pruning, falling back to brute force Assign"
                     << std::endl;
             }
             return Assign(vectors, centroids, n_vectors, n_centroids);

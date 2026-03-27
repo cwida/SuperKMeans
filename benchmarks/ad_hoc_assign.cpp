@@ -82,13 +82,13 @@ int main(int argc, char* argv[]) {
     timer_train.Toc();
     std::cout << "\nTraining completed in " << timer_train.GetMilliseconds() << " ms" << std::endl;
 
-    // --- FastAssign (GEMM+PRUNING fast path) ---
+    // --- AssignTrainingPoints (GEMM+PRUNING fast path) ---
     bench_utils::TicToc timer_fast;
     timer_fast.Tic();
-    auto assignments_fast = kmeans.FastAssign(data.data(), centroids.data(), n, n_clusters);
+    auto assignments_fast = kmeans.AssignTrainingPoints(data.data(), centroids.data(), n, n_clusters);
     timer_fast.Toc();
     double fast_ms = timer_fast.GetMilliseconds();
-    std::cout << "\nFastAssign: " << fast_ms << " ms" << std::endl;
+    std::cout << "\nAssignTrainingPoints: " << fast_ms << " ms" << std::endl;
 
     // --- Assign (brute force) ---
     bench_utils::TicToc timer_brute;

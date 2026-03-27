@@ -110,7 +110,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Final objective: " << final_objective << std::endl;
 
     // Compute assignments and cluster balance statistics
-    auto assignments = kmeans_state.FastAssign(data.data(), centroids.data(), n, n_clusters);
+    auto assignments = kmeans_state.AssignTrainingPoints(data.data(), centroids.data(), n, n_clusters);
     auto balance_stats =
         skmeans::SuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>::
             GetClustersBalanceStats(assignments.data(), n, n_clusters);

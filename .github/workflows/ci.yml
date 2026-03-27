@@ -171,6 +171,30 @@ jobs:
       - name: Run tests
         run: ctest --test-dir build_tsan --output-on-failure --exclude-regex "SLOW_"
 
+  fetchcontent:
+    runs-on: ubuntu-24.04
+    env:
+      CC: clang-18
+      CXX: clang++-18
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 libomp-18-dev cmake
+
+      - name: Configure consumer project
+        run: cmake -B build_fc tests/fetchcontent_test -DSUPERKMEANS_SOURCE_DIR=${{ github.workspace }} -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build_fc -j$(nproc)
+
+      - name: Run
+        run: ./build_fc/fetchcontent_test
+
   ci-pass:
     # Gate job: require this single job in branch protection settings
     runs-on: ubuntu-latest
@@ -182,6 +206,7 @@ jobs:
       - python
       - sanitizers-asan-ubsan
       - sanitizers-tsan
+      - fetchcontent
     steps:
       - name: Check all jobs passed
         run: |

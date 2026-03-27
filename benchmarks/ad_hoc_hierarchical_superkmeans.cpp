@@ -117,9 +117,9 @@ int main(int argc, char* argv[]) {
     // Compute assignments and cluster balance statistics
     bench_utils::TicToc timer_fast;
     timer_fast.Tic();
-    auto assignments = kmeans_state.FastAssign(data.data(), centroids.data(), n, n_clusters);
+    auto assignments = kmeans_state.AssignTrainingPoints(data.data(), centroids.data(), n, n_clusters);
     timer_fast.Toc();
-    std::cout << "Time taken for FastAssign: " << timer_fast.GetMilliseconds() << " ms"
+    std::cout << "Time taken for AssignTrainingPoints: " << timer_fast.GetMilliseconds() << " ms"
               << std::endl;
     auto balance_stats = skmeans::HierarchicalSuperKMeans<
         skmeans::Quantization::f32,

@@ -246,8 +246,7 @@ PYBIND11_MODULE(_superkmeans, m) {
             [](skmeans::SuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>&
                    self,
                py::array_t<float> vectors,
-               py::array_t<float> centroids,
-               py::object fast_obj) {
+               py::array_t<float> centroids) {
                 ValidatePyArray(vectors, "vectors", 2);
                 ValidatePyArray(centroids, "centroids", 2);
 
@@ -268,21 +267,8 @@ PYBIND11_MODULE(_superkmeans, m) {
                 const float* vectors_ptr = static_cast<const float*>(vectors_info.ptr);
                 const float* centroids_ptr = static_cast<const float*>(centroids_info.ptr);
 
-                bool use_fast;
-                if (fast_obj.is_none()) {
-                    use_fast = self.IsTrained() && self.GetSamplingFraction() > 0.5f;
-                } else {
-                    use_fast = fast_obj.cast<bool>();
-                }
-
-                std::vector<uint32_t> assignments_vec;
-                if (use_fast) {
-                    assignments_vec =
-                        self.FastAssign(vectors_ptr, centroids_ptr, n_vectors, n_centroids);
-                } else {
-                    assignments_vec =
-                        self.Assign(vectors_ptr, centroids_ptr, n_vectors, n_centroids);
-                }
+                auto assignments_vec =
+                    self.Assign(vectors_ptr, centroids_ptr, n_vectors, n_centroids);
 
                 auto result = py::array_t<uint32_t>(n_vectors);
                 auto result_info = result.request();
@@ -296,14 +282,62 @@ PYBIND11_MODULE(_superkmeans, m) {
             },
             py::arg("vectors"),
             py::arg("centroids"),
-            py::arg("fast") = py::none(),
-            "Assign vectors to their nearest centroid.\n\n"
-            "If fast=None (default), uses FastAssign when the model is trained and\n"
-            "sampling_fraction > 0.5. Pass fast=True/False to override.\n\n"
+            "Assign vectors to their nearest centroid using brute force.\n\n"
+            "Works with any vectors, not just the training data.\n\n"
             "Args:\n"
             "    vectors: NumPy array of shape (n_vectors, d) with dtype float32\n"
-            "    centroids: NumPy array of shape (n_centroids, d) with dtype float32\n"
-            "    fast: Use FastAssign (None=auto, True=force fast, False=force brute)\n\n"
+            "    centroids: NumPy array of shape (n_centroids, d) with dtype float32\n\n"
+            "Returns:\n"
+            "    NumPy array of shape (n_vectors,) with dtype uint32 containing cluster indices"
+        )
+
+        .def(
+            "assign_training_points",
+            [](skmeans::SuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>&
+                   self,
+               py::array_t<float> vectors,
+               py::array_t<float> centroids) {
+                ValidatePyArray(vectors, "vectors", 2);
+                ValidatePyArray(centroids, "centroids", 2);
+
+                auto vectors_info = vectors.request();
+                auto centroids_info = centroids.request();
+
+                size_t n_vectors = vectors_info.shape[0];
+                size_t d_vectors = vectors_info.shape[1];
+                size_t n_centroids = centroids_info.shape[0];
+                size_t d_centroids = centroids_info.shape[1];
+
+                if (d_vectors != d_centroids) {
+                    throw std::runtime_error(
+                        "vectors and centroids must have the same dimensionality"
+                    );
+                }
+
+                const float* vectors_ptr = static_cast<const float*>(vectors_info.ptr);
+                const float* centroids_ptr = static_cast<const float*>(centroids_info.ptr);
+
+                auto assignments_vec =
+                    self.AssignTrainingPoints(vectors_ptr, centroids_ptr, n_vectors, n_centroids);
+
+                auto result = py::array_t<uint32_t>(n_vectors);
+                auto result_info = result.request();
+                uint32_t* result_ptr = static_cast<uint32_t*>(result_info.ptr);
+
+                std::memcpy(
+                    result_ptr, assignments_vec.data(), assignments_vec.size() * sizeof(uint32_t)
+                );
+
+                return result;
+            },
+            py::arg("vectors"),
+            py::arg("centroids"),
+            "Fast assignment using trained state. Requires that the vectors are the same\n"
+            "as those used in train(). Leverages training assignments for faster\n"
+            "assignment than brute force assign().\n\n"
+            "Args:\n"
+            "    vectors: NumPy array of shape (n_vectors, d) with dtype float32 (must be training data)\n"
+            "    centroids: NumPy array of shape (n_centroids, d) with dtype float32\n\n"
             "Returns:\n"
             "    NumPy array of shape (n_vectors,) with dtype uint32 containing cluster indices"
         )
@@ -489,8 +523,7 @@ PYBIND11_MODULE(_superkmeans, m) {
                    skmeans::Quantization::f32,
                    skmeans::DistanceFunction::l2>& self,
                py::array_t<float> vectors,
-               py::array_t<float> centroids,
-               py::object fast_obj) {
+               py::array_t<float> centroids) {
                 ValidatePyArray(vectors, "vectors", 2);
                 ValidatePyArray(centroids, "centroids", 2);
 
@@ -511,21 +544,8 @@ PYBIND11_MODULE(_superkmeans, m) {
                 const float* vectors_ptr = static_cast<const float*>(vectors_info.ptr);
                 const float* centroids_ptr = static_cast<const float*>(centroids_info.ptr);
 
-                bool use_fast;
-                if (fast_obj.is_none()) {
-                    use_fast = self.IsTrained() && self.GetSamplingFraction() > 0.5f;
-                } else {
-                    use_fast = fast_obj.cast<bool>();
-                }
-
-                std::vector<uint32_t> assignments_vec;
-                if (use_fast) {
-                    assignments_vec =
-                        self.FastAssign(vectors_ptr, centroids_ptr, n_vectors, n_centroids);
-                } else {
-                    assignments_vec =
-                        self.Assign(vectors_ptr, centroids_ptr, n_vectors, n_centroids);
-                }
+                auto assignments_vec =
+                    self.Assign(vectors_ptr, centroids_ptr, n_vectors, n_centroids);
 
                 auto result = py::array_t<uint32_t>(n_vectors);
                 auto result_info = result.request();
@@ -539,14 +559,63 @@ PYBIND11_MODULE(_superkmeans, m) {
             },
             py::arg("vectors"),
             py::arg("centroids"),
-            py::arg("fast") = py::none(),
-            "Assign vectors to their nearest centroid.\n\n"
-            "If fast=None (default), uses FastAssign when the model is trained and\n"
-            "sampling_fraction > 0.5. Pass fast=True/False to override.\n\n"
+            "Assign vectors to their nearest centroid using brute force.\n\n"
+            "Works with any vectors, not just the training data.\n\n"
             "Args:\n"
             "    vectors: NumPy array of shape (n_vectors, d) with dtype float32\n"
-            "    centroids: NumPy array of shape (n_centroids, d) with dtype float32\n"
-            "    fast: Use FastAssign (None=auto, True=force fast, False=force brute)\n\n"
+            "    centroids: NumPy array of shape (n_centroids, d) with dtype float32\n\n"
+            "Returns:\n"
+            "    NumPy array of shape (n_vectors,) with dtype uint32 containing cluster indices"
+        )
+
+        .def(
+            "assign_training_points",
+            [](skmeans::HierarchicalSuperKMeans<
+                   skmeans::Quantization::f32,
+                   skmeans::DistanceFunction::l2>& self,
+               py::array_t<float> vectors,
+               py::array_t<float> centroids) {
+                ValidatePyArray(vectors, "vectors", 2);
+                ValidatePyArray(centroids, "centroids", 2);
+
+                auto vectors_info = vectors.request();
+                auto centroids_info = centroids.request();
+
+                size_t n_vectors = vectors_info.shape[0];
+                size_t d_vectors = vectors_info.shape[1];
+                size_t n_centroids = centroids_info.shape[0];
+                size_t d_centroids = centroids_info.shape[1];
+
+                if (d_vectors != d_centroids) {
+                    throw std::runtime_error(
+                        "vectors and centroids must have the same dimensionality"
+                    );
+                }
+
+                const float* vectors_ptr = static_cast<const float*>(vectors_info.ptr);
+                const float* centroids_ptr = static_cast<const float*>(centroids_info.ptr);
+
+                auto assignments_vec =
+                    self.AssignTrainingPoints(vectors_ptr, centroids_ptr, n_vectors, n_centroids);
+
+                auto result = py::array_t<uint32_t>(n_vectors);
+                auto result_info = result.request();
+                uint32_t* result_ptr = static_cast<uint32_t*>(result_info.ptr);
+
+                std::memcpy(
+                    result_ptr, assignments_vec.data(), assignments_vec.size() * sizeof(uint32_t)
+                );
+
+                return result;
+            },
+            py::arg("vectors"),
+            py::arg("centroids"),
+            "Fast assignment using trained state. Requires that the vectors are the same\n"
+            "as those used in train(). Leverages training assignments for faster\n"
+            "assignment than brute force assign().\n\n"
+            "Args:\n"
+            "    vectors: NumPy array of shape (n_vectors, d) with dtype float32 (must be training data)\n"
+            "    centroids: NumPy array of shape (n_centroids, d) with dtype float32\n\n"
             "Returns:\n"
             "    NumPy array of shape (n_vectors,) with dtype uint32 containing cluster indices"
         )

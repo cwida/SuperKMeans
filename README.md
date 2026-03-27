@@ -96,16 +96,17 @@ pip install superkmeans
 > For maximum performance, we recommend compiling from source.
 
 ### C++
-With CMake `FetchContent`:
+As a header-only library with CMake `FetchContent`:
 
 ```cmake
 FetchContent_Declare(
     superkmeans
     GIT_REPOSITORY https://github.com/cwida/superkmeans
+    GIT_TAG v0.1.0
 )
 FetchContent_MakeAvailable(superkmeans)
 
-target_link_libraries(myapp PRIVATE superkmeans::superkmeans)
+target_link_libraries(myapp PRIVATE superkmeans)
 ```
 
 <details>
@@ -143,7 +144,6 @@ python ./examples/simple_clustering.py 200000 1536 1000
 - CMake 3.26
 - OpenMP
 - A BLAS implementation
-- Python 3 (only for Python bindings)
 
 ```bash
 git clone https://github.com/cwida/SuperKMeans.git

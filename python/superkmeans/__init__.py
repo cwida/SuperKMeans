@@ -238,10 +238,11 @@ class SuperKMeans:
         self,
         vectors: NDArray[np.float32],
         centroids: NDArray[np.float32],
-        fast: Optional[bool] = None,
     ) -> NDArray[np.uint32]:
         """
-        Assign vectors to their nearest centroid.
+        Assign vectors to their nearest centroid using brute force.
+
+        Works with any vectors, not just the training data.
 
         Parameters
         ----------
@@ -249,10 +250,6 @@ class SuperKMeans:
             Vectors to assign. Must be C-contiguous.
         centroids : ndarray of shape (n_clusters, dimensionality), dtype=float32
             Cluster centroids. Must be C-contiguous.
-        fast : bool, optional (default=None)
-            Whether to use FastAssign. If None, automatically uses FastAssign
-            when the model is trained and sampling_fraction > 0.5.
-            Pass True/False to override.
 
         Returns
         -------
@@ -273,10 +270,51 @@ class SuperKMeans:
                 f"got {vectors.shape[1]} and {centroids.shape[1]}"
             )
 
-        return self._cpp_skmeans_obj.assign(vectors, centroids, fast)
+        return self._cpp_skmeans_obj.assign(vectors, centroids)
 
     # Alias for assign() to match FAISS API
     add = assign
+
+    def assign_training_points(
+        self,
+        vectors: NDArray[np.float32],
+        centroids: NDArray[np.float32],
+    ) -> NDArray[np.uint32]:
+        """
+        Fast assignment using trained state.
+
+        Requires that the vectors are the same as those used in train().
+        Leverages training assignments for faster assignment than brute force assign().
+
+        Parameters
+        ----------
+        vectors : ndarray of shape (n_vectors, dimensionality), dtype=float32
+            The training data. Must be the same data passed to train(). Must be C-contiguous.
+        centroids : ndarray of shape (n_clusters, dimensionality), dtype=float32
+            Cluster centroids. Must be C-contiguous.
+
+        Returns
+        -------
+        assignments : ndarray of shape (n_vectors,), dtype=uint32
+            Cluster index (0 to n_clusters-1) for each vector.
+
+        Raises
+        ------
+        ValueError
+            If inputs have wrong shape, dtype, or memory layout.
+        RuntimeError
+            If the model has not been trained yet.
+        """
+        vectors = self.validate_numpy_array(vectors, "vectors")
+        centroids = self.validate_numpy_array(centroids, "centroids")
+
+        if vectors.shape[1] != centroids.shape[1]:
+            raise ValueError(
+                f"vectors and centroids must have same dimensionality, "
+                f"got {vectors.shape[1]} and {centroids.shape[1]}"
+            )
+
+        return self._cpp_skmeans_obj.assign_training_points(vectors, centroids)
 
     @property
     def n_clusters_(self) -> int:

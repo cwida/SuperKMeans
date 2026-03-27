@@ -120,7 +120,7 @@ int main(int argc, char* argv[]) {
         auto gt_map = bench_utils::parse_ground_truth_json(gt_filename);
         std::cout << "Using " << n_queries << " queries (loaded " << gt_map.size()
                   << " from ground truth)" << std::endl;
-        auto assignments = kmeans_state.FastAssign(data.data(), centroids.data(), n, n_clusters);
+        auto assignments = kmeans_state.AssignTrainingPoints(data.data(), centroids.data(), n, n_clusters);
 
         // Final objective is the sum of the final `distances` array
         auto distances_pointer = kmeans_state.GetDistancesPointer();
