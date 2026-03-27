@@ -158,7 +158,6 @@ class ADSamplingPruner {
         float* SKM_RESTRICT out_buffer,
         const uint32_t n
     ) {
-        Eigen::Map<const MatrixR> vectors_matrix(vectors, n, num_dimensions);
         Eigen::Map<MatrixR> out(out_buffer, n, num_dimensions);
 #ifdef HAS_FFTW
 #ifdef __AVX2__
@@ -226,7 +225,6 @@ class ADSamplingPruner {
         float* SKM_RESTRICT out_buffer,
         const uint32_t n
     ) {
-        Eigen::Map<const MatrixR> vectors_matrix(rotated_vectors, n, num_dimensions);
         Eigen::Map<MatrixR> out(out_buffer, n, num_dimensions);
 #ifdef HAS_FFTW
 #ifdef __AVX2__
@@ -273,8 +271,31 @@ class ADSamplingPruner {
         }
 #endif
         // For orthonormal matrix: Q^{-1} = Q^T, and Rotate does v * Q^T, so Unrotate does v * Q
-        // TODO(@lkuffo, high): Use sgemm_ instead of Eigen
-        out.noalias() = vectors_matrix * matrix;
+        const char trans_a = 'N';
+        const char trans_b = 'N';
+        int m = static_cast<int>(num_dimensions);
+        int n_blas = static_cast<int>(n);
+        int k = static_cast<int>(num_dimensions);
+        float alpha = 1.0f;
+        float beta = 0.0f;
+        int lda = static_cast<int>(num_dimensions);
+        int ldb = static_cast<int>(num_dimensions);
+        int ldc = static_cast<int>(num_dimensions);
+        sgemm_(
+            &trans_a,
+            &trans_b,
+            &m,
+            &n_blas,
+            &k,
+            &alpha,
+            matrix.data(),
+            &lda,
+            rotated_vectors,
+            &ldb,
+            &beta,
+            out_buffer,
+            &ldc
+        );
     }
 
   private:
