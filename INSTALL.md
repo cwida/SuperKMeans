@@ -154,18 +154,6 @@ Solution: Install `python-dev` package:
 sudo apt install python3-dev
 ```
 
-### I get a bunch of `warnings` when compiling SuperKMeans
-
-If you see a lot of warnings like this one:
-```warning: ignoring ‘#pragma clang loop’```
-
-You are using GCC instead of Clang. If you installed Clang, you can set the correct compiler by doing the following:
-```sh
-export CXX="/usr/bin/clang++-18" # Linux
-
-export CXX="/opt/homebrew/opt/llvm/bin/clang++" # MacOS
-```
-
 
 ### Super K-Means is slow on my Apple Silicon
 If you previously installed OpenBLAS in your machine, the installation may be linking to OpenBLAS instead of Apple Accelerate. You can try forcing the linking of Apple Accelerate: 

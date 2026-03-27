@@ -114,7 +114,7 @@ target_link_libraries(myapp PRIVATE superkmeans)
 <summary>Compiling Python Bindings from source</summary>
 
 ### Prerequisites
-- Clang 17 (recommended) or GCC 13
+- Clang 17 or GCC 13
 - CMake 3.26
 - OpenMP
 - A BLAS implementation
@@ -140,7 +140,7 @@ python ./examples/simple_clustering.py 200000 1536 1000
 <summary>Compiling C++ library from source</summary>
 
 ### Prerequisites
-- Clang 17 (recommended) or GCC 13
+- Clang 17 or GCC 13
 - CMake 3.26
 - OpenMP
 - A BLAS implementation

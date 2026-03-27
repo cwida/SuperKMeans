@@ -349,7 +349,11 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
                 Eigen::Map<MatrixR> distances_matrix(tmp_distances_buf, batch_n_x, batch_n_y);
                 {
                     SKM_PROFILE_SCOPE("search/pdx");
+#if defined(__clang__)
 #pragma omp parallel for num_threads(g_n_threads) schedule(dynamic, 8)
+#else
+#pragma omp parallel for num_threads(g_n_threads)
+#endif
                     for (size_t r = 0; r < batch_n_x; ++r) {
                         const auto i_idx = i + r;
 
