@@ -348,69 +348,55 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
 #endif
                 }
                 Eigen::Map<MatrixR> distances_matrix(tmp_distances_buf, batch_n_x, batch_n_y);
-                // Single parallel region for norms + PDX: one fork/join instead of two
-                // separate #pragma omp parallel for regions.
-#pragma omp parallel num_threads(g_n_threads)
                 {
-                    {
-                        SKM_PROFILE_SCOPE("search/norms");
-#pragma omp for
-                        for (size_t r = 0; r < batch_n_x; ++r) {
-                            const auto i_idx = i + r;
-                            const float norm_x_i = norms_x[i_idx];
-                            float* row_p = distances_matrix.data() + r * batch_n_y;
-                            SKM_VECTORIZE_LOOP
-                            for (size_t c = 0; c < batch_n_y; ++c) {
-                                row_p[c] = -2.0f * row_p[c] + norm_x_i + norms_y[j + c];
-                            }
-                        }
-                    }
-                    {
-                        SKM_PROFILE_SCOPE("search/pdx");
-#pragma omp for schedule(dynamic, 8)
-                        for (size_t r = 0; r < batch_n_x; ++r) {
-                            const auto i_idx = i + r;
-                            auto data_p = x + (i_idx * d);
+                    SKM_PROFILE_SCOPE("search/pdx");
+#pragma omp parallel for num_threads(g_n_threads) schedule(dynamic, 8)
+                    for (size_t r = 0; r < batch_n_x; ++r) {
+                        const auto i_idx = i + r;
 
-                            // To prune even better, we get the initial threshold from the
-                            // previously assigned centroid
-                            const auto prev_assignment = out_knn[i_idx];
-                            distance_t dist_to_prev_centroid;
-                            if (j == 0) {
-                                dist_to_prev_centroid =
-                                    DistanceComputer<DistanceFunction::l2, Quantization::f32>::
-                                        Horizontal(y + (prev_assignment * d), data_p, d);
-                            } else {
-                                dist_to_prev_centroid = out_distances[i_idx];
-                            }
-
-                            // PDXearch per vector
-                            knn_candidate_t assignment;
-                            auto partial_distances_p =
-                                distances_matrix.data() + r * batch_n_y;
-                            size_t local_not_pruned = 0;
-                            assignment =
-                                pdx_centroids.searcher
-                                    ->Top1PartialSearchWithThresholdAndPartialDistances(
-                                        data_p,
-                                        dist_to_prev_centroid,
-                                        prev_assignment,
-                                        partial_distances_p,
-                                        partial_d,
-                                        j / VECTOR_CHUNK_SIZE, // start cluster_idx
-                                        (j + Y_BATCH_SIZE) /
-                                            VECTOR_CHUNK_SIZE, // end cluster_idx; We use
-                                                               // Y_BATCH_SIZE and not batch_n_y
-                                                               // because otherwise we would not
-                                                               // go up until incomplete clusters
-                                        local_not_pruned
-                                    );
-                            // Accumulate the not-pruned count for this X vector
-                            out_not_pruned_counts[i_idx] += local_not_pruned;
-                            auto [assignment_idx, assignment_distance] = assignment;
-                            out_knn[i_idx] = assignment_idx;
-                            out_distances[i_idx] = assignment_distance;
+                        // Norms: convert dot products to squared L2 distances
+                        const float norm_x_i = norms_x[i_idx];
+                        float* row_p = distances_matrix.data() + r * batch_n_y;
+                        SKM_VECTORIZE_LOOP
+                        for (size_t c = 0; c < batch_n_y; ++c) {
+                            row_p[c] = -2.0f * row_p[c] + norm_x_i + norms_y[j + c];
                         }
+
+                        // PDX pruned search per vector
+                        auto data_p = x + (i_idx * d);
+                        const auto prev_assignment = out_knn[i_idx];
+                        distance_t dist_to_prev_centroid;
+                        if (j == 0) {
+                            dist_to_prev_centroid =
+                                DistanceComputer<DistanceFunction::l2, Quantization::f32>::
+                                    Horizontal(y + (prev_assignment * d), data_p, d);
+                        } else {
+                            dist_to_prev_centroid = out_distances[i_idx];
+                        }
+
+                        knn_candidate_t assignment;
+                        auto partial_distances_p = distances_matrix.data() + r * batch_n_y;
+                        size_t local_not_pruned = 0;
+                        assignment =
+                            pdx_centroids.searcher
+                                ->Top1PartialSearchWithThresholdAndPartialDistances(
+                                    data_p,
+                                    dist_to_prev_centroid,
+                                    prev_assignment,
+                                    partial_distances_p,
+                                    partial_d,
+                                    j / VECTOR_CHUNK_SIZE, // start cluster_idx
+                                    (j + Y_BATCH_SIZE) /
+                                        VECTOR_CHUNK_SIZE, // end cluster_idx; We use
+                                                           // Y_BATCH_SIZE and not batch_n_y
+                                                           // because otherwise we would not
+                                                           // go up until incomplete clusters
+                                    local_not_pruned
+                                );
+                        out_not_pruned_counts[i_idx] += local_not_pruned;
+                        auto [assignment_idx, assignment_distance] = assignment;
+                        out_knn[i_idx] = assignment_idx;
+                        out_distances[i_idx] = assignment_distance;
                     }
                 }
             }
