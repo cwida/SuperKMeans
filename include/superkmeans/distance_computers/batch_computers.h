@@ -310,55 +310,48 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
         size_t* out_not_pruned_counts
     ) {
         SKM_PROFILE_SCOPE("search");
-        // Persistent parallel region: the thread team is created once and reused
-        // across all batch iterations, avoiding repeated fork/join overhead
-        // (which is costly with libgomp/GCC).
-        // BLAS is called via #pragma omp single — on non-Apple platforms, BLAS
-        // uses its own pthreads for internal parallelism, so no nesting conflict.
-#pragma omp parallel num_threads(g_n_threads)
-        {
-            for (size_t i = 0; i < n_x; i += X_BATCH_SIZE) {
-                auto batch_n_x = X_BATCH_SIZE;
-                auto batch_x_p = x + (i * d);
-                if (i + X_BATCH_SIZE > n_x) {
-                    batch_n_x = n_x - i;
+        for (size_t i = 0; i < n_x; i += X_BATCH_SIZE) {
+            auto batch_n_x = X_BATCH_SIZE;
+            auto batch_x_p = x + (i * d);
+            if (i + X_BATCH_SIZE > n_x) {
+                batch_n_x = n_x - i;
+            }
+            for (size_t j = 0; j < n_y; j += Y_BATCH_SIZE) {
+                auto batch_n_y = Y_BATCH_SIZE;
+                auto batch_y_p = y + (j * d);
+                if (j + Y_BATCH_SIZE > n_y) {
+                    batch_n_y = n_y - j;
                 }
-                for (size_t j = 0; j < n_y; j += Y_BATCH_SIZE) {
-                    auto batch_n_y = Y_BATCH_SIZE;
-                    auto batch_y_p = y + (j * d);
-                    if (j + Y_BATCH_SIZE > n_y) {
-                        batch_n_y = n_y - j;
-                    }
-                    {
-                        SKM_PROFILE_SCOPE("search/blas");
+                {
+                    SKM_PROFILE_SCOPE("search/blas");
 #if defined(__APPLE__)
-                        // AMX (used with Apple Accelerate) benefits from a different strategy for
-                        // parallelization
-#pragma omp for schedule(static)
-                        for (size_t r = 0; r < batch_n_x; r += MINI_BATCH_SIZE) {
-                            auto mini_batch_n_x = std::min(MINI_BATCH_SIZE, batch_n_x - r);
-                            BlasMatrixMultiplication(
-                                batch_x_p + r * d,
-                                batch_y_p,
-                                mini_batch_n_x,
-                                batch_n_y,
-                                d,
-                                partial_d,
-                                tmp_distances_buf + r * batch_n_y
-                            );
-                        }
-#else
-#pragma omp single
-                        {
-                            BlasMatrixMultiplication(
-                                batch_x_p, batch_y_p, batch_n_x, batch_n_y, d, partial_d,
-                                tmp_distances_buf
-                            );
-                        }
-#endif
+                    // AMX (used with Apple Accelerate) benefits from a different strategy for
+                    // parallelization
+#pragma omp parallel for num_threads(g_n_threads) schedule(static)
+                    for (size_t r = 0; r < batch_n_x; r += MINI_BATCH_SIZE) {
+                        auto mini_batch_n_x = std::min(MINI_BATCH_SIZE, batch_n_x - r);
+                        BlasMatrixMultiplication(
+                            batch_x_p + r * d,
+                            batch_y_p,
+                            mini_batch_n_x,
+                            batch_n_y,
+                            d,
+                            partial_d,
+                            tmp_distances_buf + r * batch_n_y
+                        );
                     }
-                    // implicit barrier after omp single / omp for
-                    Eigen::Map<MatrixR> distances_matrix(tmp_distances_buf, batch_n_x, batch_n_y);
+#else
+                    BlasMatrixMultiplication(
+                        batch_x_p, batch_y_p, batch_n_x, batch_n_y, d, partial_d,
+                        tmp_distances_buf
+                    );
+#endif
+                }
+                Eigen::Map<MatrixR> distances_matrix(tmp_distances_buf, batch_n_x, batch_n_y);
+                // Single parallel region for norms + PDX: one fork/join instead of two
+                // separate #pragma omp parallel for regions.
+#pragma omp parallel num_threads(g_n_threads)
+                {
                     {
                         SKM_PROFILE_SCOPE("search/norms");
 #pragma omp for
@@ -421,7 +414,7 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
                     }
                 }
             }
-        } // end omp parallel
+        }
     }
 };
 
