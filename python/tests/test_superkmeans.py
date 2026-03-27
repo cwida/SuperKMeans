@@ -389,5 +389,28 @@ class TestSuperKMeans:
         assert "hierarchical=True" in repr_str_trained
 
 
+    def test_assign_training_points(self):
+        """Test that assign_training_points produces similar results to assign on training data."""
+        np.random.seed(42)
+        n = 50000
+        d = 512
+        k = 500
+
+        data = np.random.randn(n, d).astype(np.float32)
+
+        kmeans = SuperKMeans(n_clusters=k, dimensionality=d, iters=5, verbose=False)
+        centroids = kmeans.train(data)
+
+        assignments = kmeans.assign(data, centroids)
+        fast_assignments = kmeans.assign_training_points(data, centroids)
+
+        assert fast_assignments.shape == (n,)
+        assert fast_assignments.dtype == np.uint32
+        assert np.all(fast_assignments < k)
+
+        agreement = np.mean(assignments == fast_assignments)
+        assert agreement >= 0.95, f"Expected >= 95% agreement, got {agreement:.1%}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

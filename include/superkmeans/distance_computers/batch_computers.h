@@ -370,6 +370,8 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
                         const auto prev_assignment = out_knn[i_idx];
                         distance_t dist_to_prev_centroid;
                         if (j == 0) {
+                            // We get the assignment from the previous iteration
+                            // To prune as soon as possible
                             dist_to_prev_centroid =
                                 DistanceComputer<DistanceFunction::l2, Quantization::f32>::
                                     Horizontal(y + (prev_assignment * d), data_p, d);
