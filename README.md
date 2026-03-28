@@ -102,7 +102,6 @@ As a header-only library with CMake `FetchContent`:
 FetchContent_Declare(
     superkmeans
     GIT_REPOSITORY https://github.com/cwida/superkmeans
-    GIT_TAG v0.1.0
 )
 FetchContent_MakeAvailable(superkmeans)
 
