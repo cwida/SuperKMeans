@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "superkmeans"
-version = "0.1.0"
+version = "0.1.1"
 description = "A Super fast K-Means library for High-Dimensional vectors on CPUs (x86, ARM) and GPUs"
 readme = "README.md"
 requires-python = ">=3.9"
