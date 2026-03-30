@@ -14,29 +14,16 @@ endif()
 
 set(FAISS_ENABLE_PYTHON OFF CACHE BOOL "disable python" FORCE)
 
-if (SKMEANS_ENABLE_GPU)
-	set(FAISS_ENABLE_GPU ON CACHE BOOL "enable gpu" FORCE)
-	set(FAISS_ENABLE_CUVS ON CACHE BOOL "enable CUVS" FORCE)
-else()
-	set(FAISS_ENABLE_GPU OFF CACHE BOOL "disable gpu" FORCE)
-endif()
+set(FAISS_ENABLE_GPU OFF CACHE BOOL "disable gpu" FORCE)
 set(BUILD_TESTING OFF CACHE BOOL "disable faiss tests" FORCE)
 set(BUILD_SHARED_LIBS ON CACHE BOOL "shared libs" FORCE)
 set(FAISS_OPT_LEVEL "${FAISS_OPT_LEVEL}" CACHE STRING "CPU optimization level" FORCE)
 
-if (SKMEANS_ENABLE_GPU) 
-	FetchContent_Declare(
-			faiss
-			GIT_REPOSITORY https://github.com/facebookresearch/faiss.git
-			GIT_TAG        v1.13.2
-	)
-else()
-	FetchContent_Declare(
-			faiss
-			GIT_REPOSITORY https://github.com/facebookresearch/faiss.git
-			GIT_TAG        v1.11.0
-	)
-endif()
+FetchContent_Declare(
+		faiss
+		GIT_REPOSITORY https://github.com/facebookresearch/faiss.git
+		GIT_TAG        v1.11.0
+)
 FetchContent_MakeAvailable(faiss)
 
 # Common benchmark dependencies
@@ -116,6 +103,10 @@ target_link_libraries(pareto_hierarchical_superkmeans.out PRIVATE ${BENCH_COMMON
 # Ad-hoc benchmark (verbose mode, no CSV output)
 add_executable(ad_hoc_superkmeans.out ad_hoc_superkmeans.cpp ${BENCH_COMMON_SRCS})
 target_link_libraries(ad_hoc_superkmeans.out PRIVATE ${BENCH_COMMON_LIBS})
+
+# GPU Ad-hoc benchmark (verbose mode, no CSV output)
+add_executable(gpu_ad_hoc_superkmeans.out gpu_ad_hoc_superkmeans.cpp ${BENCH_COMMON_SRCS})
+target_link_libraries(gpu_ad_hoc_superkmeans.out PRIVATE ${BENCH_COMMON_LIBS})
 
 # Ad-hoc hierarchical superkmeans benchmark
 add_executable(ad_hoc_hierarchical_superkmeans.out ad_hoc_hierarchical_superkmeans.cpp ${BENCH_COMMON_SRCS})

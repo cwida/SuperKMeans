@@ -1,3 +1,5 @@
+#ifdef SKMEANS_ENABLE_GPU
+
 #ifndef BENCHMARK_TIME
 #define BENCHMARK_TIME = true
 #endif
@@ -15,7 +17,13 @@
 #include "superkmeans/pdx/utils.h"
 #include "superkmeans/superkmeans.h"
 
+#include "superkmeans/gpu/superkmeans.h"
+
 int main(int argc, char* argv[]) {
+		// Note: for benchmarking purposes, we need to initialize the gpu first.
+		// Otherwise the first kernel launch will be really slow.
+    skmeans::gpu::trigger_gpu_initialization();
+
     const std::string algorithm = "superkmeans";
     std::string dataset = (argc > 1) ? std::string(argv[1]) : std::string("yahoo");
     std::string experiment_name = (argc > 2) ? std::string(argv[2]) : std::string("end_to_end");
@@ -91,7 +99,7 @@ int main(int argc, char* argv[]) {
     }
 
     auto kmeans_state =
-        skmeans::SuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>(
+        skmeans::GPUSuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>(
             n_clusters, d, config
         );
     bench_utils::TicToc timer;
@@ -112,7 +120,7 @@ int main(int argc, char* argv[]) {
     // Compute assignments and cluster balance statistics
     auto assignments = kmeans_state.FastAssign(data.data(), centroids.data(), n, n_clusters);
     auto balance_stats =
-        skmeans::SuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>::
+        skmeans::GPUSuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>::
             GetClustersBalanceStats(assignments.data(), n, n_clusters);
     balance_stats.print();
 
@@ -150,3 +158,13 @@ int main(int argc, char* argv[]) {
         std::cout << "Skipping CSV output (recall computation requires ground truth)" << std::endl;
     }
 }
+
+#else 
+
+#include <iostream>
+
+int main(int argc, char* argv[]) {
+	std::cout << "Compile with -DSKMEANS_ENABLE_GPU to compile the GPU benchmarks." << std::endl;
+}
+
+#endif

@@ -182,7 +182,7 @@ class DeviceBuffer {
     ) {
         assert(is_valid());
         CUDA_SAFE_CALL(cudaMemcpyAsync(
-            reinterpret_cast<void*>(get()) + offset,
+            reinterpret_cast<void*>(reinterpret_cast<std::byte*>(get()) + offset),
             reinterpret_cast<const void*>(host_ptr),
             size,
             cudaMemcpyHostToDevice,

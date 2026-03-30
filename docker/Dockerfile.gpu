@@ -34,85 +34,13 @@ RUN clang-18 --version
 ENV CC=/usr/bin/clang-18
 ENV CXX=/usr/bin/clang++-18
 
+ARG CPU_TARGET
 RUN git clone https://github.com/xianyi/OpenBLAS.git --branch v0.3.30 && \
 	cd OpenBLAS && \
-  make TARGET=SKYLAKEX DYNAMIC_ARCH=0 USE_OPENMP=1 NUM_THREADS=128 && \ 
+  make TARGET=$CPU_TARGET DYNAMIC_ARCH=1 USE_OPENMP=1 NUM_THREADS=128 && \ 
 	make install PREFIX=/usr && \
 	ldconfig
 
 RUN ls -l /usr/lib/libopenblas* 
 
-# Install nsys
-ARG NSYS_URL=https://developer.nvidia.com/downloads/assets/tools/secure/nsight-systems/2025_5/
-ARG NSYS_PKG=nsight-systems-2025.5.1_2025.5.1.121-1_amd64.deb
-
-RUN apt-get update && apt install -y --no-install-recommends \
-  wget \
-  libglib2.0-0 \
-  libxcb-xinerama0 \
-  libxcb-icccm4 \
-  libxcb-image0 \
-  libxcb-keysyms1 \
-  libxcb-randr0 \
-  libxcb-render-util0 \
-  libxcb-xfixes0 \
-  libxcb-shape0 \
-  libxkbcommon-x11-0 \
-  libxcb-xinput0 \
-  libxcb-cursor0 \
-  libfontconfig1 \
-  libnss3 \
-  libxcomposite1 \
-  libxdamage1 \
-  libxrandr2 \
-  libxtst6 \
-  libopengl0 \
-  libegl1 \
-  libxi6 \
-  openmpi-bin \
-  libopenmpi-dev 
-
-RUN wget ${NSYS_URL}${NSYS_PKG} && dpkg -i $NSYS_PKG && rm $NSYS_PKG
-
-# Need to add the last two variables, otherwise Make won't find the OpenBLAS (and CMake will lie to you that it found them)
-# cmake . -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS_RELEASE="-O3 -mavx512f -fopenmp -march=znver4" -DBLA_VENDOR=OpenBLAS -DBLAS_LIBRARIES=/usr/lib/libopenblas.so
-
-
 RUN pip3 install numpy scikit-learn h5py --break-system-packages 
-
-
-# CONDA & CUVS
-
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y \
-    wget \
-    bzip2 \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-ENV CONDA_DIR=/opt/conda
-RUN wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh && \
-    bash /tmp/miniconda.sh -b -p $CONDA_DIR && \
-    rm /tmp/miniconda.sh
-ENV PATH=$CONDA_DIR/bin:$PATH
-RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
-	conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
-RUN conda create -y -n rapids \
-    -c rapidsai \
-    -c conda-forge \
-    -c nvidia \
-    libcuvs=25.10 \
-		libraft-headers=25.10 \
-    libraft=25.10 \
-    cuda-version=13.1 && \
-    conda clean -afy
-#ENV PATH=$CONDA_DIR/envs/rapids/bin:$PATH
-#ENV CPATH=$CONDA_DIR/envs/rapids/include:$CPATH
-#ENV LIBRARY_PATH=$CONDA_DIR/envs/rapids/lib:$LIBRARY_PATH
-#ENV LD_LIBRARY_PATH=$CONDA_DIR/envs/rapids/lib:$LD_LIBRARY_PATH
-ENV CPATH=$CONDA_DIR/envs/rapids/include
-ENV LIBRARY_PATH=$CONDA_DIR/envs/rapids/lib
-ENV LD_LIBRARY_PATH=$CONDA_DIR/envs/rapids/lib
-ENV PATH=$CONDA_DIR/envs/rapids/bin:$PATH
-
-ENV CC=/usr/bin/gcc
-ENV CXX=/usr/bin/g++
