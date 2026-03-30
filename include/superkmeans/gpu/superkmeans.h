@@ -1,5 +1,7 @@
 #pragma once
 
+#ifdef SKMEANS_ENABLE_GPU
+
 #include <Eigen/Dense>
 #include <algorithm>
 #include <iomanip>
@@ -647,3 +649,5 @@ class GPUSuperKMeans : public skmeans::SuperKMeans<q, alpha> {
 };
 
 } // namespace skmeans
+
+#endif
