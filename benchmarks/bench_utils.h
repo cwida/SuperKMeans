@@ -3,11 +3,13 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <random>
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
@@ -521,6 +523,32 @@ inline void write_results_to_csv(
 
     csv_file.close();
     std::cout << "Results written to: " << csv_path << std::endl;
+}
+
+/**
+ * @brief Generate random int8 matrix (row-major, n × d).
+ */
+inline std::vector<int8_t> generate_random_i8(size_t n, size_t d, uint32_t seed = 42) {
+    std::vector<int8_t> data(n * d);
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<int> dist(-128, 127);
+    for (auto& v : data) {
+        v = static_cast<int8_t>(dist(rng));
+    }
+    return data;
+}
+
+/**
+ * @brief Generate random uint8 matrix (row-major, n × d).
+ */
+inline std::vector<uint8_t> generate_random_u8(size_t n, size_t d, uint32_t seed = 42) {
+    std::vector<uint8_t> data(n * d);
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<int> dist(0, 255);
+    for (auto& v : data) {
+        v = static_cast<uint8_t>(dist(rng));
+    }
+    return data;
 }
 
 } // namespace bench_utils

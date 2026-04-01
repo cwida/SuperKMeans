@@ -76,6 +76,63 @@ skmeans_add_benchmark(microbenchmark_flip_sign.out microbenchmarks/microbenchmar
 skmeans_add_benchmark(microbenchmark_horizontal_kernels.out microbenchmarks/microbenchmark_horizontal_kernels.cpp)
 skmeans_add_benchmark(cohere_bench_superkmeans.out cohere_bench_superkmeans.cpp)
 
+# ── XNNPACK ──
+set(XNNPACK_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(XNNPACK_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
+set(XNNPACK_BUILD_ALL_MICROKERNELS OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    xnnpack
+    GIT_REPOSITORY https://github.com/google/XNNPACK.git
+    GIT_TAG master
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(xnnpack)
+set(XNNPACK_LINK_LIBRARIES XNNPACK pthreadpool)
+
+# ── oneDNN (for GEMM benchmarks) ──
+set(DNNL_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(DNNL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(DNNL_GPU_RUNTIME "NONE" CACHE STRING "" FORCE)
+FetchContent_Declare(
+    onednn
+    URL https://github.com/uxlfoundation/oneDNN/archive/refs/tags/v3.11.2.tar.gz
+)
+FetchContent_MakeAvailable(onednn)
+
+# ── NumKong (for GEMM benchmarks) ──
+FetchContent_Declare(
+    numkong
+    GIT_REPOSITORY https://github.com/ashvardanian/NumKong.git
+    GIT_TAG main
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(numkong)
+
+# ── ForkUnion (lightweight thread pool for NumKong) ──
+FetchContent_Declare(
+    fork_union
+    GIT_REPOSITORY https://github.com/ashvardanian/ForkUnion.git
+    GIT_TAG main
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(fork_union)
+
+# GEMM microbenchmarks
+add_executable(gemm_u8_xnn.out gemm/u8/xnn.cpp)
+target_link_libraries(gemm_u8_xnn.out PRIVATE ${XNNPACK_LINK_LIBRARIES})
+target_compile_definitions(gemm_u8_xnn.out PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_include_directories(gemm_u8_xnn.out PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(gemm_u8_onednn.out gemm/u8/onednn.cpp)
+target_link_libraries(gemm_u8_onednn.out PRIVATE dnnl OpenMP::OpenMP_CXX)
+target_compile_definitions(gemm_u8_onednn.out PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_include_directories(gemm_u8_onednn.out PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(gemm_u8_numkong.out gemm/u8/numkong.cpp)
+target_link_libraries(gemm_u8_numkong.out PRIVATE numkong fork_union)
+target_compile_definitions(gemm_u8_numkong.out PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_include_directories(gemm_u8_numkong.out PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 # FAISS benchmarks
 skmeans_add_faiss_benchmark(end_to_end_faiss.out end_to_end/end_to_end_faiss.cpp)
 skmeans_add_faiss_benchmark(varying_k_faiss.out varying_k/varying_k_faiss.cpp)

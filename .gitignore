@@ -106,3 +106,10 @@ _deps/
 tmp/
 
 DartConfiguration.tcl
+
+*-download/
+*-source/
+cpuinfo
+FXdiv 
+kleidiai
+pthreadpool

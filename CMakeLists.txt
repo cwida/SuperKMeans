@@ -97,7 +97,6 @@ else()
         message(STATUS "BLAS library found: ${BLAS_LIBRARIES}")
         list(APPEND _SKMEANS_LINK_LIBS ${BLAS_LIBRARIES})
     endif()
-
 endif()
 
 # ── FFTW (optional) ──
