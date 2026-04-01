@@ -13,46 +13,6 @@
 constexpr int WARMUP_RUNS = 3;
 constexpr int MEASURED_RUNS = 10;
 
-/**
- * @brief Run a single XNNPack qd8_f32_qc8w GEMM: C(m, n) = A(m, d) * B(n, d)^T
- *
- * Uses identity quantization (scale=1.0, zero_point=0) so the output is
- * the integer dot product cast to float.
- */
-double RunXnnpackGemm(
-    const int8_t* a,
-    const int8_t* b,
-    size_t m,
-    size_t n,
-    size_t d,
-    float* out,
-    pthreadpool_t tp
-) {
-    std::vector<float> kernel_scale(n, 1.0f);
-    std::vector<xnn_quantization_params> qparams(m, {0, 1.0f});
-
-    xnn_operator_t op = nullptr;
-    xnn_create_fully_connected_nc_qd8_f32_qc8w(
-        d, n, d, n,
-        kernel_scale.data(), b, nullptr,
-        -std::numeric_limits<float>::infinity(),
-        std::numeric_limits<float>::infinity(),
-        0, nullptr, &op
-    );
-
-    size_t ws_size = 0;
-    xnn_reshape_fully_connected_nc_qd8_f32_qc8w(op, m, &ws_size, tp);
-    std::vector<char> ws(ws_size);
-    xnn_setup_fully_connected_nc_qd8_f32_qc8w(op, a, out, ws.data(), qparams.data());
-
-    auto t0 = std::chrono::high_resolution_clock::now();
-    xnn_run_operator(op, tp);
-    auto t1 = std::chrono::high_resolution_clock::now();
-
-    xnn_delete_operator(op);
-    return std::chrono::duration<double, std::milli>(t1 - t0).count();
-}
-
 void PrintUsage(const char* argv0) {
     std::cerr << "Usage: " << argv0 << " <m> <n> <d> [threads]" << std::endl;
     std::cerr << "  m       - number of rows in A (left matrix)" << std::endl;
@@ -85,21 +45,44 @@ int main(int argc, char** argv) {
     auto a = bench_utils::generate_random_i8(m, d, 42);
     auto b = bench_utils::generate_random_i8(n, d, 123);
     std::vector<float> out(m * n);
+    std::vector<float> kernel_scale(n, 1.0f);
+    std::vector<xnn_quantization_params> qparams(m, {0, 1.0f});
+
+    // Create operator once (includes weight packing — not timed)
+    xnn_operator_t op = nullptr;
+    xnn_create_fully_connected_nc_qd8_f32_qc8w(
+        d, n, d, n,
+        kernel_scale.data(), b.data(), nullptr,
+        -std::numeric_limits<float>::infinity(),
+        std::numeric_limits<float>::infinity(),
+        0, nullptr, &op
+    );
+
+    // Reshape once (m is fixed across runs)
+    size_t ws_size = 0;
+    xnn_reshape_fully_connected_nc_qd8_f32_qc8w(op, m, &ws_size, tp);
+    std::vector<char> ws(ws_size);
+
+    // Setup once (a, out, qparams pointers are stable)
+    xnn_setup_fully_connected_nc_qd8_f32_qc8w(op, a.data(), out.data(), ws.data(), qparams.data());
 
     // Warmup
     std::cout << "Warming up..." << std::flush;
     for (int i = 0; i < WARMUP_RUNS; ++i) {
-        RunXnnpackGemm(a.data(), b.data(), m, n, d, out.data(), tp);
+        xnn_run_operator(op, tp);
     }
     std::cout << " done" << std::endl;
 
-    // Measured runs
+    // Measured runs — only timing xnn_run_operator
     std::cout << "Measuring..." << std::flush;
     double total_ms = 0.0;
     double min_ms = std::numeric_limits<double>::max();
     double max_ms = 0.0;
     for (int i = 0; i < MEASURED_RUNS; ++i) {
-        double ms = RunXnnpackGemm(a.data(), b.data(), m, n, d, out.data(), tp);
+        auto t0 = std::chrono::high_resolution_clock::now();
+        xnn_run_operator(op, tp);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         total_ms += ms;
         min_ms = std::min(min_ms, ms);
         max_ms = std::max(max_ms, ms);
@@ -117,6 +100,7 @@ int main(int argc, char** argv) {
     std::cout << "  Max: " << max_ms << " ms" << std::endl;
     std::cout << "  Throughput: " << std::setprecision(1) << gops << " GOPS" << std::endl;
 
+    xnn_delete_operator(op);
     pthreadpool_destroy(tp);
     return 0;
 }
