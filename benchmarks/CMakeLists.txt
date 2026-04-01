@@ -136,6 +136,7 @@ add_executable(gemm_u8_numkong.out gemm/u8/numkong.cpp)
 target_link_libraries(gemm_u8_numkong.out PRIVATE numkong fork_union)
 target_compile_definitions(gemm_u8_numkong.out PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_include_directories(gemm_u8_numkong.out PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(gemm_u8_numkong.out PRIVATE -march=native)
 
 # FAISS benchmarks
 skmeans_add_faiss_benchmark(end_to_end_faiss.out end_to_end/end_to_end_faiss.cpp)
