@@ -138,6 +138,12 @@ target_compile_definitions(gemm_u8_numkong.out PRIVATE CMAKE_SOURCE_DIR="${CMAKE
 target_include_directories(gemm_u8_numkong.out PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(gemm_u8_numkong.out PRIVATE -march=native)
 
+add_executable(gemm_u8_l2_numkong.out gemm/u8/l2_numkong.cpp)
+target_link_libraries(gemm_u8_l2_numkong.out PRIVATE numkong fork_union)
+target_compile_definitions(gemm_u8_l2_numkong.out PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_include_directories(gemm_u8_l2_numkong.out PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(gemm_u8_l2_numkong.out PRIVATE -march=native)
+
 # f32 GEMM microbenchmarks
 add_executable(gemm_f32_blas.out gemm/f32/blas.cpp)
 target_link_libraries(gemm_f32_blas.out PRIVATE ${BENCH_COMMON_LIBS})
