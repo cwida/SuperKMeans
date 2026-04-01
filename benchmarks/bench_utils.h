@@ -551,4 +551,17 @@ inline std::vector<uint8_t> generate_random_u8(size_t n, size_t d, uint32_t seed
     return data;
 }
 
+/**
+ * @brief Generate random float32 matrix (row-major, n × d) with values in [-1, 1].
+ */
+inline std::vector<float> generate_random_f32(size_t n, size_t d, uint32_t seed = 42) {
+    std::vector<float> data(n * d);
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    for (auto& v : data) {
+        v = dist(rng);
+    }
+    return data;
+}
+
 } // namespace bench_utils

@@ -138,6 +138,28 @@ target_compile_definitions(gemm_u8_numkong.out PRIVATE CMAKE_SOURCE_DIR="${CMAKE
 target_include_directories(gemm_u8_numkong.out PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(gemm_u8_numkong.out PRIVATE -march=native)
 
+# f32 GEMM microbenchmarks
+add_executable(gemm_f32_blas.out gemm/f32/blas.cpp)
+target_link_libraries(gemm_f32_blas.out PRIVATE ${BENCH_COMMON_LIBS})
+target_compile_definitions(gemm_f32_blas.out PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_include_directories(gemm_f32_blas.out PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(gemm_f32_xnn.out gemm/f32/xnn.cpp)
+target_link_libraries(gemm_f32_xnn.out PRIVATE ${XNNPACK_LINK_LIBRARIES})
+target_compile_definitions(gemm_f32_xnn.out PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_include_directories(gemm_f32_xnn.out PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(gemm_f32_onednn.out gemm/f32/onednn.cpp)
+target_link_libraries(gemm_f32_onednn.out PRIVATE dnnl OpenMP::OpenMP_CXX)
+target_compile_definitions(gemm_f32_onednn.out PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_include_directories(gemm_f32_onednn.out PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(gemm_f32_numkong.out gemm/f32/numkong.cpp)
+target_link_libraries(gemm_f32_numkong.out PRIVATE numkong fork_union)
+target_compile_definitions(gemm_f32_numkong.out PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_include_directories(gemm_f32_numkong.out PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(gemm_f32_numkong.out PRIVATE -march=native)
+
 # FAISS benchmarks
 skmeans_add_faiss_benchmark(end_to_end_faiss.out end_to_end/end_to_end_faiss.cpp)
 skmeans_add_faiss_benchmark(varying_k_faiss.out varying_k/varying_k_faiss.cpp)
