@@ -80,6 +80,7 @@ skmeans_add_benchmark(cohere_bench_superkmeans.out cohere_bench_superkmeans.cpp)
 set(XNNPACK_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(XNNPACK_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
 set(XNNPACK_BUILD_ALL_MICROKERNELS OFF CACHE BOOL "" FORCE)
+set(XNNPACK_BUILD_LIBRARY_TYPE "static" CACHE STRING "" FORCE)
 FetchContent_Declare(
     xnnpack
     GIT_REPOSITORY https://github.com/google/XNNPACK.git
