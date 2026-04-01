@@ -77,10 +77,12 @@ skmeans_add_benchmark(microbenchmark_horizontal_kernels.out microbenchmarks/micr
 skmeans_add_benchmark(cohere_bench_superkmeans.out cohere_bench_superkmeans.cpp)
 
 # ── XNNPACK ──
+# Temporarily disable shared libs — XNNPACK/cpuinfo lack -fPIC for shared builds
+set(_saved_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})
+set(BUILD_SHARED_LIBS OFF)
 set(XNNPACK_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(XNNPACK_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
 set(XNNPACK_BUILD_ALL_MICROKERNELS OFF CACHE BOOL "" FORCE)
-set(XNNPACK_BUILD_LIBRARY_TYPE "static" CACHE STRING "" FORCE)
 FetchContent_Declare(
     xnnpack
     GIT_REPOSITORY https://github.com/google/XNNPACK.git
@@ -88,6 +90,7 @@ FetchContent_Declare(
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(xnnpack)
+set(BUILD_SHARED_LIBS ${_saved_BUILD_SHARED_LIBS})
 set(XNNPACK_LINK_LIBRARIES XNNPACK pthreadpool)
 
 # ── oneDNN (for GEMM benchmarks) ──
