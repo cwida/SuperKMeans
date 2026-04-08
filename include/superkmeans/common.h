@@ -128,16 +128,21 @@ enum class DistanceFunction : uint8_t { l2, dp };
 
 enum class Quantization : uint8_t { f32, u8, f16, bf16 };
 
+enum class QuantizerType : uint8_t { none, sq8 };
+
+// Distance type: float for all quantization types.
+// Even u8 GEMM produces integer dot products, but we convert to float L2 distances
+// so that convergence/recall code works uniformly.
 template <Quantization q>
 struct DistanceType {
-    using type = uint32_t;
-};
-template <>
-struct DistanceType<Quantization::f32> {
     using type = float;
 };
 template <Quantization q>
 using skmeans_distance_t = typename DistanceType<q>::type;
+
+// Input data type: always float (user provides float data, quantization is internal)
+template <Quantization q>
+using skmeans_input_t = float;
 
 template <Quantization q>
 struct DataType {

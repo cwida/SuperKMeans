@@ -10,13 +10,10 @@
 
 #include "bench_utils.h"
 #include "superkmeans/common.h"
-#include "superkmeans/pdx/adsampling.h"
-#include "superkmeans/pdx/layout.h"
-#include "superkmeans/pdx/utils.h"
 #include "superkmeans/superkmeans.h"
 
 int main(int argc, char* argv[]) {
-    const std::string algorithm = "superkmeans";
+    const std::string algorithm = "superkmeans_sq8";
     std::string dataset = (argc > 1) ? std::string(argv[1]) : std::string("yahoo");
     std::string experiment_name = (argc > 2) ? std::string(argv[2]) : std::string("end_to_end");
 
@@ -43,8 +40,8 @@ int main(int argc, char* argv[]) {
     std::cout << "Eigen # threads: " << Eigen::nbThreads()
               << " (note: it will always be 1 if BLAS is enabled)" << std::endl;
 
-    std::vector<skmeans::skmeans_value_t<skmeans::Quantization::f32>> data;
-    std::vector<skmeans::skmeans_value_t<skmeans::Quantization::f32>> queries;
+    std::vector<float> data;
+    std::vector<float> queries;
     try {
         data.reserve(n * d);
         queries.reserve(n_queries * d);
@@ -56,7 +53,7 @@ int main(int argc, char* argv[]) {
 
     std::ifstream file(filename, std::ios::binary);
     if (!file) {
-        std::cerr << "Failed to open " << std::endl;
+        std::cerr << "Failed to open " << filename << std::endl;
         return 1;
     }
     file.read(reinterpret_cast<char*>(data.data()), n * d * sizeof(float));
@@ -64,7 +61,7 @@ int main(int argc, char* argv[]) {
 
     std::ifstream file_queries(filename_queries, std::ios::binary);
     if (!file_queries) {
-        std::cerr << "Failed to open " << std::endl;
+        std::cerr << "Failed to open " << filename_queries << std::endl;
         return 1;
     }
     file_queries.read(reinterpret_cast<char*>(queries.data()), n_queries * d * sizeof(float));
@@ -74,13 +71,11 @@ int main(int argc, char* argv[]) {
     config.iters = n_iters;
     config.verbose = true;
     config.n_threads = THREADS;
-    config.objective_k = 100;
-    config.ann_explore_fraction = 0.01f;
     config.unrotate_centroids = true;
     config.early_termination = false;
     config.sampling_fraction = sampling_fraction;
-    config.use_blas_only = true;
     config.tol = 1e-3f;
+    config.quantizer_type = skmeans::QuantizerType::sq8;
 
     auto is_angular = std::find(
         bench_utils::ANGULAR_DATASETS.begin(), bench_utils::ANGULAR_DATASETS.end(), dataset
@@ -90,32 +85,38 @@ int main(int argc, char* argv[]) {
         config.angular = true;
     }
 
-    auto kmeans_state =
-        skmeans::SuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>(
+    auto kmeans =
+        skmeans::SuperKMeans<skmeans::Quantization::u8, skmeans::DistanceFunction::l2>(
             n_clusters, d, config
         );
     bench_utils::TicToc timer;
     timer.Tic();
-    std::vector<float> centroids = kmeans_state.Train(
-        data.data(), n //, queries.data(), n_queries
-    );
+    std::vector<float> centroids = kmeans.Train(data.data(), n);
     timer.Toc();
     double construction_time_ms = timer.GetMilliseconds();
-    int actual_iterations = static_cast<int>(kmeans_state.iteration_stats.size());
-    double final_objective = kmeans_state.iteration_stats.back().objective;
+    int actual_iterations = static_cast<int>(kmeans.iteration_stats.size());
+    double final_objective = kmeans.iteration_stats.back().objective;
 
     std::cout << "\nTraining completed in " << construction_time_ms << " ms" << std::endl;
     std::cout << "Actual iterations: " << actual_iterations << " (requested: " << n_iters << ")"
               << std::endl;
     std::cout << "Final objective: " << final_objective << std::endl;
 
-    // Compute assignments and cluster balance statistics
-    auto assignments =
-        kmeans_state.AssignTrainingPoints(data.data(), centroids.data(), n, n_clusters);
+    // Compute assignments with Assign() and QuantizedAssign()
+    auto assignments = kmeans.Assign(data.data(), centroids.data(), n, n_clusters);
+    auto q_assignments = kmeans.QuantizedAssign(data.data(), centroids.data(), n, n_clusters);
+
+    std::cout << "\n--- Assign() cluster balance ---" << std::endl;
     auto balance_stats =
-        skmeans::SuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>::
+        skmeans::SuperKMeans<skmeans::Quantization::u8, skmeans::DistanceFunction::l2>::
             GetClustersBalanceStats(assignments.data(), n, n_clusters);
     balance_stats.print();
+
+    std::cout << "--- QuantizedAssign() cluster balance ---" << std::endl;
+    auto q_balance_stats =
+        skmeans::SuperKMeans<skmeans::Quantization::u8, skmeans::DistanceFunction::l2>::
+            GetClustersBalanceStats(q_assignments.data(), n, n_clusters);
+    q_balance_stats.print();
 
     // Compute recall if ground truth file exists
     std::string gt_filename = bench_utils::get_ground_truth_path(dataset);
@@ -132,6 +133,8 @@ int main(int argc, char* argv[]) {
         std::cout << "Using " << n_queries << " queries (loaded " << gt_map.size()
                   << " from ground truth)" << std::endl;
 
+        // Recall with Assign()
+        std::cout << "\n  [Assign()]" << std::endl;
         auto results_knn_10 = bench_utils::compute_recall(
             gt_map, assignments, queries.data(), centroids.data(), n_queries, n_clusters, d, 10
         );
@@ -141,6 +144,18 @@ int main(int argc, char* argv[]) {
             gt_map, assignments, queries.data(), centroids.data(), n_queries, n_clusters, d, 100
         );
         bench_utils::print_recall_results(results_knn_100, 100);
+
+        // Recall with QuantizedAssign()
+        std::cout << "\n  [QuantizedAssign()]" << std::endl;
+        auto q_results_knn_10 = bench_utils::compute_recall(
+            gt_map, q_assignments, queries.data(), centroids.data(), n_queries, n_clusters, d, 10
+        );
+        bench_utils::print_recall_results(q_results_knn_10, 10);
+
+        auto q_results_knn_100 = bench_utils::compute_recall(
+            gt_map, q_assignments, queries.data(), centroids.data(), n_queries, n_clusters, d, 100
+        );
+        bench_utils::print_recall_results(q_results_knn_100, 100);
     } else {
         if (!gt_file.good()) {
             std::cout << "\nGround truth file not found: " << gt_filename << std::endl;

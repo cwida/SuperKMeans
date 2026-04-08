@@ -38,6 +38,8 @@ class PDXLayout {
     using searcher_t = PDXearch<q, IndexPDXIVF<q>, alpha>;
 
   public:
+    PDXLayout() = default;
+
     /**
      * @brief Constructor
      *

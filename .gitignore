@@ -46,6 +46,8 @@ Thumbs.db
 
 # Cmake and Build
 build/
+build-test/
+build-release/
 .cache/
 cmake-build-*/
 out/

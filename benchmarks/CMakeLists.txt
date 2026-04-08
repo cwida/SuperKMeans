@@ -70,6 +70,8 @@ skmeans_add_benchmark(pareto_hierarchical_superkmeans.out pareto/pareto_hierarch
 skmeans_add_benchmark(ad_hoc_superkmeans.out ad_hoc_superkmeans.cpp)
 skmeans_add_benchmark(ad_hoc_hierarchical_superkmeans.out ad_hoc_hierarchical_superkmeans.cpp)
 skmeans_add_benchmark(ad_hoc_assign.out ad_hoc_assign.cpp)
+skmeans_add_benchmark(ad_hoc_superkmeans_quantized.out ad_hoc_superkmeans_quantized.cpp)
+skmeans_add_benchmark(ad_hoc_assign_quantized.out ad_hoc_assign_quantized.cpp)
 skmeans_add_benchmark(sweet_pruning_spot_superkmeans.out sweet_pruning_spot_superkmeans.cpp)
 skmeans_add_benchmark(microbenchmark_init_positions_array.out microbenchmarks/microbenchmark_init_positions_array.cpp)
 skmeans_add_benchmark(microbenchmark_flip_sign.out microbenchmarks/microbenchmark_flip_sign.cpp)
@@ -78,30 +80,30 @@ skmeans_add_benchmark(cohere_bench_superkmeans.out cohere_bench_superkmeans.cpp)
 
 # ── XNNPACK ──
 # Temporarily disable shared libs — XNNPACK/cpuinfo lack -fPIC for shared builds
-set(_saved_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})
-set(BUILD_SHARED_LIBS OFF)
-set(XNNPACK_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(XNNPACK_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
-set(XNNPACK_BUILD_ALL_MICROKERNELS OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(
-    xnnpack
-    GIT_REPOSITORY https://github.com/google/XNNPACK.git
-    GIT_TAG master
-    GIT_SHALLOW TRUE
-)
-FetchContent_MakeAvailable(xnnpack)
-set(BUILD_SHARED_LIBS ${_saved_BUILD_SHARED_LIBS})
-set(XNNPACK_LINK_LIBRARIES XNNPACK pthreadpool)
+# set(_saved_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})
+# set(BUILD_SHARED_LIBS OFF)
+# set(XNNPACK_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+# set(XNNPACK_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
+# set(XNNPACK_BUILD_ALL_MICROKERNELS OFF CACHE BOOL "" FORCE)
+# FetchContent_Declare(
+#     xnnpack
+#     GIT_REPOSITORY https://github.com/google/XNNPACK.git
+#     GIT_TAG master
+#     GIT_SHALLOW TRUE
+# )
+# FetchContent_MakeAvailable(xnnpack)
+# set(BUILD_SHARED_LIBS ${_saved_BUILD_SHARED_LIBS})
+# set(XNNPACK_LINK_LIBRARIES XNNPACK pthreadpool)
 
-# ── oneDNN (for GEMM benchmarks) ──
-set(DNNL_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(DNNL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(DNNL_GPU_RUNTIME "NONE" CACHE STRING "" FORCE)
-FetchContent_Declare(
-    onednn
-    URL https://github.com/uxlfoundation/oneDNN/archive/refs/tags/v3.11.2.tar.gz
-)
-FetchContent_MakeAvailable(onednn)
+# # ── oneDNN (for GEMM benchmarks) ──
+# set(DNNL_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+# set(DNNL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+# set(DNNL_GPU_RUNTIME "NONE" CACHE STRING "" FORCE)
+# FetchContent_Declare(
+#     onednn
+#     URL https://github.com/uxlfoundation/oneDNN/archive/refs/tags/v3.11.2.tar.gz
+# )
+# FetchContent_MakeAvailable(onednn)
 
 # ── NumKong (for GEMM benchmarks) ──
 FetchContent_Declare(
@@ -122,15 +124,15 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(fork_union)
 
 # GEMM microbenchmarks
-add_executable(gemm_u8_xnn.out gemm/u8/xnn.cpp)
-target_link_libraries(gemm_u8_xnn.out PRIVATE ${XNNPACK_LINK_LIBRARIES})
-target_compile_definitions(gemm_u8_xnn.out PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-target_include_directories(gemm_u8_xnn.out PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# add_executable(gemm_u8_xnn.out gemm/u8/xnn.cpp)
+# target_link_libraries(gemm_u8_xnn.out PRIVATE ${XNNPACK_LINK_LIBRARIES})
+# target_compile_definitions(gemm_u8_xnn.out PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+# target_include_directories(gemm_u8_xnn.out PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
-add_executable(gemm_u8_onednn.out gemm/u8/onednn.cpp)
-target_link_libraries(gemm_u8_onednn.out PRIVATE dnnl OpenMP::OpenMP_CXX)
-target_compile_definitions(gemm_u8_onednn.out PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-target_include_directories(gemm_u8_onednn.out PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# add_executable(gemm_u8_onednn.out gemm/u8/onednn.cpp)
+# target_link_libraries(gemm_u8_onednn.out PRIVATE dnnl OpenMP::OpenMP_CXX)
+# target_compile_definitions(gemm_u8_onednn.out PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+# target_include_directories(gemm_u8_onednn.out PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_executable(gemm_u8_numkong.out gemm/u8/numkong.cpp)
 target_link_libraries(gemm_u8_numkong.out PRIVATE numkong fork_union)
@@ -150,15 +152,15 @@ target_link_libraries(gemm_f32_blas.out PRIVATE ${BENCH_COMMON_LIBS})
 target_compile_definitions(gemm_f32_blas.out PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_include_directories(gemm_f32_blas.out PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
-add_executable(gemm_f32_xnn.out gemm/f32/xnn.cpp)
-target_link_libraries(gemm_f32_xnn.out PRIVATE ${XNNPACK_LINK_LIBRARIES})
-target_compile_definitions(gemm_f32_xnn.out PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-target_include_directories(gemm_f32_xnn.out PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# add_executable(gemm_f32_xnn.out gemm/f32/xnn.cpp)
+# target_link_libraries(gemm_f32_xnn.out PRIVATE ${XNNPACK_LINK_LIBRARIES})
+# target_compile_definitions(gemm_f32_xnn.out PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+# target_include_directories(gemm_f32_xnn.out PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
-add_executable(gemm_f32_onednn.out gemm/f32/onednn.cpp)
-target_link_libraries(gemm_f32_onednn.out PRIVATE dnnl OpenMP::OpenMP_CXX)
-target_compile_definitions(gemm_f32_onednn.out PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-target_include_directories(gemm_f32_onednn.out PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# add_executable(gemm_f32_onednn.out gemm/f32/onednn.cpp)
+# target_link_libraries(gemm_f32_onednn.out PRIVATE dnnl OpenMP::OpenMP_CXX)
+# target_compile_definitions(gemm_f32_onednn.out PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+# target_include_directories(gemm_f32_onednn.out PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_executable(gemm_f32_numkong.out gemm/f32/numkong.cpp)
 target_link_libraries(gemm_f32_numkong.out PRIVATE numkong fork_union)
@@ -196,6 +198,8 @@ add_custom_target(benchmarks
         ad_hoc_superkmeans.out
         ad_hoc_hierarchical_superkmeans.out
         ad_hoc_assign.out
+        ad_hoc_superkmeans_quantized.out
+        ad_hoc_assign_quantized.out
         sweet_pruning_spot_superkmeans.out
         microbenchmark_init_positions_array.out
         microbenchmark_flip_sign.out

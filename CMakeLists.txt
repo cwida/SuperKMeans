@@ -122,6 +122,15 @@ else()
     message(STATUS "GPU disabled")
 endif()
 
+# ── NumKong (header-only SIMD kernels for quantized GEMM) ──
+FetchContent_Declare(
+    numkong
+    GIT_REPOSITORY https://github.com/ashvardanian/NumKong.git
+    GIT_TAG main
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(numkong)
+
 # ── INTERFACE library target ──
 add_library(superkmeans INTERFACE)
 add_library(superkmeans::superkmeans ALIAS superkmeans)
@@ -154,7 +163,7 @@ target_include_directories(superkmeans ${_SKMEANS_SYSTEM} INTERFACE
     ${_SKMEANS_INCLUDE_DIRS}
 )
 
-target_link_libraries(superkmeans INTERFACE ${_SKMEANS_LINK_LIBS})
+target_link_libraries(superkmeans INTERFACE ${_SKMEANS_LINK_LIBS} numkong)
 target_compile_definitions(superkmeans INTERFACE ${_SKMEANS_COMPILE_DEFS})
 target_compile_features(superkmeans INTERFACE cxx_std_17)
 

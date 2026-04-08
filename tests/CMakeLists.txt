@@ -50,6 +50,9 @@ add_executable(test_hierarchical_superkmeans.out test_hierarchical_superkmeans.c
 target_link_libraries(test_hierarchical_superkmeans.out PRIVATE ${TEST_COMMON_LIBS})
 target_compile_definitions(test_hierarchical_superkmeans.out PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
+add_executable(test_quantized.out test_quantized.cpp)
+target_link_libraries(test_quantized.out PRIVATE ${TEST_COMMON_LIBS})
+
 include(GoogleTest)
 gtest_discover_tests(test_rotation.out)
 gtest_discover_tests(test_assign.out)
@@ -58,6 +61,7 @@ gtest_discover_tests(test_wcss.out)
 gtest_discover_tests(test_distance_computers.out)
 gtest_discover_tests(test_pdx_layout.out)
 gtest_discover_tests(test_hierarchical_superkmeans.out)
+gtest_discover_tests(test_quantized.out)
 
 add_custom_target(tests
     DEPENDS
@@ -68,4 +72,5 @@ add_custom_target(tests
         test_distance_computers.out
         test_pdx_layout.out
         test_hierarchical_superkmeans.out
+        test_quantized.out
 )
