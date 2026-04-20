@@ -1,6 +1,6 @@
 #pragma once
 
-#ifdef HAS_FAISS
+// #ifdef HAS_FAISS
 
 #include "superkmeans/common.h"
 #include "superkmeans/distance_computers/base_computers.h"
@@ -8,7 +8,6 @@
 
 #include <algorithm>
 #include <cassert>
-#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -16,6 +15,7 @@
 #include <omp.h>
 #include <vector>
 
+#include <faiss/IndexRaBitQFastScan.h>
 #include <faiss/impl/RaBitQuantizer.h>
 
 namespace skmeans {
@@ -29,15 +29,17 @@ struct RaBitQFactors {
 static_assert(sizeof(RaBitQFactors) == 8, "RaBitQFactors must match FAISS FactorsData");
 
 /**
- * @brief RaBitQ (1-bit) quantizer wrapping faiss::RaBitQuantizer.
+ * @brief RaBitQ (1-bit) quantizer using IndexRaBitQFastScan for distance.
  *
- * RaBitQ sign-quantizes centered vectors to 1 bit per dimension plus 8 bytes
- * of metadata per vector. Distance is asymmetric: one side must be float
- * (the "query" in FAISS terms), the other side is binary codes.
+ * Data points are encoded to 1-bit RaBitQ codes (32x compression).
+ * Distance computation uses FastScan with centroids as the database:
+ * - K centroids indexed in FastScan (sign-quantized, rebuilt each iteration)
+ * - N data points decoded from 1-bit codes to approximate float in streaming
+ *   chunks, then searched as queries (SQ-quantized to qb bits by FastScan)
+ * - FastScan processes 32 centroids at a time with SIMD
  *
- * For k-means we flip the FAISS roles: centroids (small, K) are FAISS "queries"
- * kept as float, data points (large, N) are FAISS "codes" stored as compact
- * binary. This avoids decoding/re-quantizing data points on every iteration.
+ * This gives per-data-point results (correct direction for k-means) while
+ * keeping the N data points stored as compact 1-bit codes.
  */
 template <Quantization q>
 class RaBitQQuantizer : public IQuantizer<q> {
@@ -68,11 +70,9 @@ class RaBitQQuantizer : public IQuantizer<q> {
     }
 
     void Encode(const float* in, quantized_t* out, size_t n, size_t d) const override {
-        std::cout << "RaBitQQuantizer::Encode called with n=" << n << ", d=" << d << std::endl;
         assert(fitted_);
         assert(d == d_);
         faiss_quantizer_->compute_codes(in, reinterpret_cast<uint8_t*>(out), n);
-        std::cout << "RaBitQQuantizer::Encode completed" << std::endl;
     }
 
     void Decode(const quantized_t* in, float* out, size_t n, size_t d) const override {
@@ -98,10 +98,10 @@ class RaBitQQuantizer : public IQuantizer<q> {
     }
 
     /**
-     * @brief Find top-1 nearest neighbor using RaBitQ asymmetric distance.
+     * @brief Find top-1 nearest centroid per data point.
      *
-     * Centroids (y_float) are used directly as FAISS "queries".
-     * Data points (x) stay as compact binary codes (FAISS "codes").
+     * Data points (x) are 1-bit codes decoded in streaming chunks.
+     * Centroids (y_float) are indexed in a FastScan database.
      */
     void FindNearestNeighbor(
         const quantized_t* x,
@@ -124,25 +124,20 @@ class RaBitQQuantizer : public IQuantizer<q> {
         (void)norms_y;
         (void)tmp_buf;
 
-        std::cout << "RaBitQQuantizer::FindNearestNeighbor called with n_x=" << n_x
-                  << ", n_y=" << n_y << ", d=" << d << std::endl;
         CoreDistanceLoop(
             reinterpret_cast<const uint8_t*>(x),
-            y_float,
-            n_x, n_y, d,
+            y_float, n_x, n_y, d,
             out_knn, out_distances
         );
-        std::cout << "RaBitQQuantizer::FindNearestNeighbor completed" << std::endl;
     }
 
     size_t DefaultRerankK() const override { return 0; }
 
     /**
-     * @brief Coarse RaBitQ search + exact f32 reranking.
+     * @brief Coarse RaBitQ search (decoded 1-bit) + exact f32 reranking.
      *
-     * Phase 1: RaBitQ asymmetric distance (float centroid × binary data point)
-     *          to find top rerank_k candidates per data point.
-     * Phase 2: Exact f32 L2² reranking among candidates.
+     * Phase 1: Decode 1-bit codes in chunks → FastScan top-k candidates.
+     * Phase 2: Exact f32 L2² reranking using original float data.
      */
     void FindNearestNeighborWithReranking(
         const quantized_t* x_quantized,
@@ -167,17 +162,13 @@ class RaBitQQuantizer : public IQuantizer<q> {
 
         using f32_computer = DistanceComputer<DistanceFunction::l2, Quantization::f32>;
 
-        // Phase 1: Coarse search — centroids (y_float) as FAISS queries
-        std::vector<uint32_t> topk_indices(n_x * rerank_k, static_cast<uint32_t>(-1));
-        std::vector<float> topk_distances(n_x * rerank_k, std::numeric_limits<float>::max());
-
+        // Phase 1: Decoded chunked FastScan coarse search
+        std::vector<float> topk_distances(n_x * rerank_k);
+        std::vector<faiss::idx_t> topk_labels(n_x * rerank_k);
         CoreDistanceLoopTopK(
             reinterpret_cast<const uint8_t*>(x_quantized),
-            y_float,
-            n_x, n_y, d,
-            rerank_k,
-            topk_indices.data(),
-            topk_distances.data()
+            y_float, n_x, n_y, d,
+            rerank_k, topk_labels.data(), topk_distances.data()
         );
 
         // Phase 2: F32 reranking among top-k candidates
@@ -187,15 +178,15 @@ class RaBitQQuantizer : public IQuantizer<q> {
             uint32_t best_idx = 0;
 
             for (size_t ki = 0; ki < rerank_k; ++ki) {
-                const uint32_t cand_idx = topk_indices[i * rerank_k + ki];
-                if (cand_idx == static_cast<uint32_t>(-1)) break;
+                const faiss::idx_t cand_idx = topk_labels[i * rerank_k + ki];
+                if (cand_idx < 0) break;
 
                 const float dist =
                     f32_computer::Horizontal(x_float + i * d, y_float + cand_idx * d, d);
 
                 if (dist < best_dist) {
                     best_dist = dist;
-                    best_idx = cand_idx;
+                    best_idx = static_cast<uint32_t>(cand_idx);
                 }
             }
 
@@ -211,8 +202,30 @@ class RaBitQQuantizer : public IQuantizer<q> {
     bool IsFitted() const override { return fitted_; }
 
   private:
-    /// Core distance loop: centroids are FAISS "queries" (float), data points
-    /// are FAISS "codes" (binary). Returns top-1 per data point.
+    static constexpr size_t DECODE_CHUNK = 8192;
+
+    /// Build a FastScan index with centroids as the database.
+    faiss::IndexRaBitQFastScan BuildFastScanIndex(
+        const float* y_float_centroids,
+        size_t n_y,
+        size_t d
+    ) const {
+        faiss::IndexRaBitQFastScan fast_index(d, faiss::METRIC_L2, 32, 1);
+        fast_index.qb = qb_;
+
+        // Train on centroids (computes center)
+        fast_index.train(n_y, y_float_centroids);
+
+        // Override center with our full-dataset centroid for consistency
+        fast_index.center = centroid_;
+        fast_index.rabitq.centroid = fast_index.center.data();
+
+        // Add centroids to the index (sign-quantized)
+        fast_index.add(n_y, y_float_centroids);
+        return fast_index;
+    }
+
+    /// Decode 1-bit codes in streaming chunks, search each chunk via FastScan.
     void CoreDistanceLoop(
         const uint8_t* x_codes,
         const float* y_float_centroids,
@@ -222,55 +235,34 @@ class RaBitQQuantizer : public IQuantizer<q> {
         uint32_t* out_knn,
         float* out_distances
     ) const {
-        std::fill_n(out_distances, n_x, std::numeric_limits<float>::max());
-        std::fill_n(out_knn, n_x, 0u);
+        auto fast_index = BuildFastScanIndex(y_float_centroids, n_y, d);
 
-        const uint32_t num_threads = g_n_threads;
+        std::vector<float> decoded(DECODE_CHUNK * d);
+        std::vector<float> chunk_dists(DECODE_CHUNK);
+        std::vector<faiss::idx_t> chunk_labels(DECODE_CHUNK);
 
-        // Per-thread FAISS distance computers (not thread-safe, each thread needs its own)
-        std::vector<std::unique_ptr<faiss::FlatCodesDistanceComputer>> dcs(num_threads);
-        for (uint32_t t = 0; t < num_threads; ++t) {
-            dcs[t].reset(faiss_quantizer_->get_distance_computer(4, centroid_.data()));
-        }
+        for (size_t i = 0; i < n_x; i += DECODE_CHUNK) {
+            const size_t chunk_n = std::min(DECODE_CHUNK, n_x - i);
 
-        size_t total_dist_calls = 0;
-        double total_dist_us = 0.0;
+            // Decode 1-bit codes → approximate float
+            faiss_quantizer_->decode(
+                x_codes + i * faiss_code_size_, decoded.data(), chunk_n
+            );
 
-        for (size_t j = 0; j < n_y; ++j) {
-            // Set centroid j as FAISS query on all thread-local distance computers
-            for (uint32_t t = 0; t < num_threads; ++t) {
-                dcs[t]->set_query(y_float_centroids + j * d);
-            }
+            // Search decoded chunk as queries against centroid database
+            fast_index.search(
+                chunk_n, decoded.data(), 1,
+                chunk_dists.data(), chunk_labels.data()
+            );
 
-            auto t0 = std::chrono::high_resolution_clock::now();
-
-#pragma omp parallel for num_threads(g_n_threads)
-            for (size_t i = 0; i < n_x; ++i) {
-                const int tid = omp_get_thread_num();
-                const float dist =
-                    dcs[tid]->distance_to_code(x_codes + i * faiss_code_size_);
-                if (dist < out_distances[i]) {
-                    out_distances[i] = dist;
-                    out_knn[i] = static_cast<uint32_t>(j);
-                }
-            }
-
-            auto t1 = std::chrono::high_resolution_clock::now();
-            double us = std::chrono::duration<double, std::micro>(t1 - t0).count();
-            total_dist_us += us;
-            total_dist_calls += n_x;
-
-            if (j % 50 == 0 || j == n_y - 1) {
-                std::cout << "[CoreDistanceLoop] centroid " << j << "/" << n_y
-                          << "  batch=" << us / 1000.0 << "ms"
-                          << "  cumulative=" << total_dist_us / 1000.0 << "ms"
-                          << "  avg/call=" << total_dist_us / total_dist_calls << "us"
-                          << std::endl;
+            for (size_t j = 0; j < chunk_n; ++j) {
+                out_knn[i + j] = static_cast<uint32_t>(chunk_labels[j]);
+                out_distances[i + j] = chunk_dists[j];
             }
         }
     }
 
-    /// Core distance loop returning top-k candidates per data point.
+    /// Decode 1-bit codes in streaming chunks, search each chunk for top-k.
     void CoreDistanceLoopTopK(
         const uint8_t* x_codes,
         const float* y_float_centroids,
@@ -278,49 +270,30 @@ class RaBitQQuantizer : public IQuantizer<q> {
         size_t n_y,
         size_t d,
         size_t rerank_k,
-        uint32_t* topk_indices,
+        faiss::idx_t* topk_labels,
         float* topk_distances
     ) const {
-        std::fill_n(topk_distances, n_x * rerank_k, std::numeric_limits<float>::max());
-        std::fill_n(topk_indices, n_x * rerank_k, static_cast<uint32_t>(-1));
+        auto fast_index = BuildFastScanIndex(y_float_centroids, n_y, d);
 
-        const uint32_t num_threads = g_n_threads;
+        std::vector<float> decoded(DECODE_CHUNK * d);
 
-        std::vector<std::unique_ptr<faiss::FlatCodesDistanceComputer>> dcs(num_threads);
-        for (uint32_t t = 0; t < num_threads; ++t) {
-            dcs[t].reset(faiss_quantizer_->get_distance_computer(4, centroid_.data()));
-        }
+        for (size_t i = 0; i < n_x; i += DECODE_CHUNK) {
+            const size_t chunk_n = std::min(DECODE_CHUNK, n_x - i);
 
-        for (size_t j = 0; j < n_y; ++j) {
-            for (uint32_t t = 0; t < num_threads; ++t) {
-                dcs[t]->set_query(y_float_centroids + j * d);
-            }
+            faiss_quantizer_->decode(
+                x_codes + i * faiss_code_size_, decoded.data(), chunk_n
+            );
 
-#pragma omp parallel for num_threads(g_n_threads)
-            for (size_t i = 0; i < n_x; ++i) {
-                const int tid = omp_get_thread_num();
-                const float dist =
-                    dcs[tid]->distance_to_code(x_codes + i * faiss_code_size_);
-
-                float* tk_dist = topk_distances + i * rerank_k;
-                uint32_t* tk_idx = topk_indices + i * rerank_k;
-
-                // Find the worst (largest distance) in current top-k
-                size_t worst_pos = 0;
-                for (size_t ki = 1; ki < rerank_k; ++ki) {
-                    if (tk_dist[ki] > tk_dist[worst_pos]) {
-                        worst_pos = ki;
-                    }
-                }
-
-                if (dist < tk_dist[worst_pos]) {
-                    tk_dist[worst_pos] = dist;
-                    tk_idx[worst_pos] = static_cast<uint32_t>(j);
-                }
-            }
+            fast_index.search(
+                chunk_n, decoded.data(),
+                static_cast<faiss::idx_t>(rerank_k),
+                topk_distances + i * rerank_k,
+                topk_labels + i * rerank_k
+            );
         }
     }
 
+    uint8_t qb_ = 1;
     size_t d_ = 0;
     size_t faiss_code_size_ = 0;
     std::vector<float> centroid_;
@@ -330,4 +303,4 @@ class RaBitQQuantizer : public IQuantizer<q> {
 
 } // namespace skmeans
 
-#endif // HAS_FAISS
+// #endif // HAS_FAISS

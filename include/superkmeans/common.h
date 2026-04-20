@@ -128,7 +128,7 @@ enum class DistanceFunction : uint8_t { l2, dp };
 
 enum class Quantization : uint8_t { f32, u8, f16, bf16 };
 
-enum class QuantizerType : uint8_t { none, sq8, sq4, rabitq };
+enum class QuantizerType : uint8_t { none, sq8, sq4, rabitq, rabitq_gemm };
 
 // Distance type: float for all quantization types.
 // Even u8 GEMM produces integer dot products, but we convert to float L2 distances
