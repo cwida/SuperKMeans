@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -229,14 +230,19 @@ class RaBitQQuantizer : public IQuantizer<q> {
         // Per-thread FAISS distance computers (not thread-safe, each thread needs its own)
         std::vector<std::unique_ptr<faiss::FlatCodesDistanceComputer>> dcs(num_threads);
         for (uint32_t t = 0; t < num_threads; ++t) {
-            dcs[t].reset(faiss_quantizer_->get_distance_computer(0, centroid_.data()));
+            dcs[t].reset(faiss_quantizer_->get_distance_computer(4, centroid_.data()));
         }
+
+        size_t total_dist_calls = 0;
+        double total_dist_us = 0.0;
 
         for (size_t j = 0; j < n_y; ++j) {
             // Set centroid j as FAISS query on all thread-local distance computers
             for (uint32_t t = 0; t < num_threads; ++t) {
                 dcs[t]->set_query(y_float_centroids + j * d);
             }
+
+            auto t0 = std::chrono::high_resolution_clock::now();
 
 #pragma omp parallel for num_threads(g_n_threads)
             for (size_t i = 0; i < n_x; ++i) {
@@ -247,6 +253,19 @@ class RaBitQQuantizer : public IQuantizer<q> {
                     out_distances[i] = dist;
                     out_knn[i] = static_cast<uint32_t>(j);
                 }
+            }
+
+            auto t1 = std::chrono::high_resolution_clock::now();
+            double us = std::chrono::duration<double, std::micro>(t1 - t0).count();
+            total_dist_us += us;
+            total_dist_calls += n_x;
+
+            if (j % 50 == 0 || j == n_y - 1) {
+                std::cout << "[CoreDistanceLoop] centroid " << j << "/" << n_y
+                          << "  batch=" << us / 1000.0 << "ms"
+                          << "  cumulative=" << total_dist_us / 1000.0 << "ms"
+                          << "  avg/call=" << total_dist_us / total_dist_calls << "us"
+                          << std::endl;
             }
         }
     }
@@ -269,7 +288,7 @@ class RaBitQQuantizer : public IQuantizer<q> {
 
         std::vector<std::unique_ptr<faiss::FlatCodesDistanceComputer>> dcs(num_threads);
         for (uint32_t t = 0; t < num_threads; ++t) {
-            dcs[t].reset(faiss_quantizer_->get_distance_computer(0, centroid_.data()));
+            dcs[t].reset(faiss_quantizer_->get_distance_computer(4, centroid_.data()));
         }
 
         for (size_t j = 0; j < n_y; ++j) {
