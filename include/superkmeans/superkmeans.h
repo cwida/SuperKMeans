@@ -13,6 +13,7 @@
 #include "superkmeans/pdx/utils.h"
 #include "superkmeans/profiler.h"
 #include "superkmeans/quantizers/quantizer.h"
+#include "superkmeans/quantizers/sq4.h"
 #include "superkmeans/quantizers/sq8.h"
 
 namespace skmeans {
@@ -247,6 +248,8 @@ class SuperKMeans {
             // Quantize sampled data and initial centroids
             if (config.quantizer_type == QuantizerType::sq8) {
                 quantizer = std::make_unique<SQ8Quantizer<q>>();
+            } else if (config.quantizer_type == QuantizerType::sq4) {
+                quantizer = std::make_unique<SQ4Quantizer<q>>();
             } else {
                 throw std::invalid_argument("Unsupported quantizer type for non-f32 quantization");
             }

@@ -70,7 +70,10 @@ skmeans_add_benchmark(pareto_hierarchical_superkmeans.out pareto/pareto_hierarch
 skmeans_add_benchmark(ad_hoc_superkmeans.out ad_hoc_superkmeans.cpp)
 skmeans_add_benchmark(ad_hoc_hierarchical_superkmeans.out ad_hoc_hierarchical_superkmeans.cpp)
 skmeans_add_benchmark(ad_hoc_assign.out ad_hoc_assign.cpp)
-skmeans_add_benchmark(ad_hoc_superkmeans_quantized.out ad_hoc_superkmeans_quantized.cpp)
+skmeans_add_benchmark(ad_hoc_jlt.out ad_hoc_jlt.cpp)
+skmeans_add_faiss_benchmark(ad_hoc_pca.out ad_hoc_pca.cpp)
+skmeans_add_benchmark(ad_hoc_superkmeans_sq8.out ad_hoc_superkmeans_sq8.cpp)
+skmeans_add_benchmark(ad_hoc_superkmeans_sq4.out ad_hoc_superkmeans_sq4.cpp)
 skmeans_add_benchmark(ad_hoc_assign_quantized.out ad_hoc_assign_quantized.cpp)
 skmeans_add_benchmark(sweet_pruning_spot_superkmeans.out sweet_pruning_spot_superkmeans.cpp)
 skmeans_add_benchmark(microbenchmark_init_positions_array.out microbenchmarks/microbenchmark_init_positions_array.cpp)
@@ -198,7 +201,10 @@ add_custom_target(benchmarks
         ad_hoc_superkmeans.out
         ad_hoc_hierarchical_superkmeans.out
         ad_hoc_assign.out
-        ad_hoc_superkmeans_quantized.out
+        ad_hoc_jlt.out
+        ad_hoc_pca.out
+        ad_hoc_superkmeans_sq8.out
+        ad_hoc_superkmeans_sq4.out
         ad_hoc_assign_quantized.out
         sweet_pruning_spot_superkmeans.out
         microbenchmark_init_positions_array.out
