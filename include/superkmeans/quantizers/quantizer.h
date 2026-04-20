@@ -54,8 +54,10 @@ class IQuantizer {
     /**
      * @brief Find top-1 nearest neighbor for each query vector.
      *
-     * @param x Quantized query vectors (n_x × d, row-major)
-     * @param y Quantized reference vectors (n_y × d, row-major)
+     * @param x Quantized query vectors (n_x × code_size, row-major)
+     * @param y Quantized reference vectors (n_y × code_size, row-major)
+     * @param x_float Original float query vectors (n_x × d, row-major)
+     * @param y_float Original float reference vectors (n_y × d, row-major)
      * @param n_x Number of queries
      * @param n_y Number of references
      * @param d Dimensionality
@@ -68,6 +70,8 @@ class IQuantizer {
     virtual void FindNearestNeighbor(
         const quantized_t* x,
         const quantized_t* y,
+        const float* x_float,
+        const float* y_float,
         size_t n_x,
         size_t n_y,
         size_t d,
@@ -122,6 +126,12 @@ class IQuantizer {
         float* out_distances,
         float* tmp_buf
     ) const = 0;
+
+    /**
+     * @brief Bytes per encoded vector. Default = d (one byte per dimension).
+     * Quantizers with variable-length codes (e.g. RaBitQ) override this.
+     */
+    virtual size_t CodeSize(size_t d) const { return d; }
 
     /**
      * @brief Whether the quantizer has been fitted.

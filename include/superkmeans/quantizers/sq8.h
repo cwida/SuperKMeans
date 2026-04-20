@@ -150,6 +150,8 @@ class SQ8Quantizer : public IQuantizer<q> {
     void FindNearestNeighbor(
         const quantized_t* x,
         const quantized_t* y,
+        const float* x_float,
+        const float* y_float,
         size_t n_x,
         size_t n_y,
         size_t d,
@@ -160,6 +162,8 @@ class SQ8Quantizer : public IQuantizer<q> {
         float* tmp_buf
     ) const override {
         assert(fitted);
+        (void)x_float;
+        (void)y_float;
         (void)norms_x; // nk_euclideans_packed_u8 computes norms internally
         (void)norms_y;
         const float inv_scale_sq =

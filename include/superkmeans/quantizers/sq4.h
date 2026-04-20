@@ -152,6 +152,8 @@ class SQ4Quantizer : public IQuantizer<q> {
     void FindNearestNeighbor(
         const quantized_t* x,
         const quantized_t* y,
+        const float* x_float,
+        const float* y_float,
         size_t n_x,
         size_t n_y,
         size_t d,
@@ -163,6 +165,8 @@ class SQ4Quantizer : public IQuantizer<q> {
     ) const override {
         assert(fitted);
         assert(d % 2 == 0);
+        (void)x_float;
+        (void)y_float;
         (void)norms_x;
         (void)norms_y;
         const float inv_scale_sq =

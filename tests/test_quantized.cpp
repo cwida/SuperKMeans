@@ -8,6 +8,9 @@
 #include "superkmeans/quantizers/quantizer.h"
 #include "superkmeans/quantizers/sq4.h"
 #include "superkmeans/quantizers/sq8.h"
+#ifdef HAS_FAISS
+#include "superkmeans/quantizers/rabitq.h"
+#endif
 #include "superkmeans/superkmeans.h"
 
 using namespace skmeans;
@@ -106,8 +109,12 @@ TEST_F(SQ8QuantizerTest, FindNearestNeighbor_MatchesBruteForce) {
     std::vector<float> distances(n_queries);
     std::vector<float> tmp_buf(X_BATCH_SIZE * Y_BATCH_SIZE);
 
+    const float* queries_float = data.data() + n_centroids * d;
+    const float* centroids_float = data.data();
+
     quantizer.FindNearestNeighbor(
-        queries, centroids, n_queries, n_centroids, d,
+        queries, centroids, queries_float, centroids_float,
+        n_queries, n_centroids, d,
         query_norms, centroid_norms, knn.data(), distances.data(), tmp_buf.data()
     );
 
@@ -386,8 +393,12 @@ TEST_F(SQ4QuantizerTest, FindNearestNeighbor_ReasonableAccuracy) {
     std::vector<float> distances(n_queries);
     std::vector<float> tmp_buf(X_BATCH_SIZE * Y_BATCH_SIZE);
 
+    const float* queries_float = data.data() + n_centroids * d;
+    const float* centroids_float = data.data();
+
     quantizer.FindNearestNeighbor(
-        queries, centroids, n_queries, n_centroids, d,
+        queries, centroids, queries_float, centroids_float,
+        n_queries, n_centroids, d,
         query_norms, centroid_norms, knn.data(), distances.data(), tmp_buf.data()
     );
 
@@ -517,3 +528,179 @@ TEST_F(SuperKMeansU8SQ4Test, WCSSReasonable) {
     EXPECT_LT(wcss_sq4, wcss_f32 * 2.0)
         << "SQ4 WCSS (" << wcss_sq4 << ") is too much worse than f32 WCSS (" << wcss_f32 << ")";
 }
+
+// ── RaBitQ (1-bit) quantizer tests ──
+
+#ifdef HAS_FAISS
+
+class RaBitQQuantizerTest : public ::testing::Test {
+  protected:
+    static constexpr size_t n = 1000;
+    static constexpr size_t d = 128;
+
+    std::vector<float> data;
+
+    void SetUp() override {
+        std::mt19937 rng(42);
+        std::normal_distribution<float> dist(0.0f, 1.0f);
+        data.resize(n * d);
+        for (auto& v : data) {
+            v = dist(rng);
+        }
+    }
+};
+
+TEST_F(RaBitQQuantizerTest, CodeSizeCorrect) {
+    RaBitQQuantizer<Quantization::u8> quantizer;
+    // code_size = ceil(d/8) + 8 bytes of FactorsData
+    EXPECT_EQ(quantizer.CodeSize(128), size_t{24}); // 16 + 8
+    EXPECT_EQ(quantizer.CodeSize(64), size_t{16});  //  8 + 8
+    EXPECT_EQ(quantizer.CodeSize(256), size_t{40}); // 32 + 8
+    EXPECT_EQ(quantizer.CodeSize(130), size_t{25}); // 17 + 8 (non-multiple of 8)
+}
+
+TEST_F(RaBitQQuantizerTest, FitEncodeDecode) {
+    RaBitQQuantizer<Quantization::u8> quantizer;
+    EXPECT_FALSE(quantizer.IsFitted());
+
+    quantizer.Fit(data.data(), n, d);
+    EXPECT_TRUE(quantizer.IsFitted());
+
+    const size_t code_size = quantizer.CodeSize(d);
+    std::vector<uint8_t> encoded(n * code_size);
+    quantizer.Encode(data.data(), encoded.data(), n, d);
+
+    std::vector<float> decoded(n * d);
+    quantizer.Decode(encoded.data(), decoded.data(), n, d);
+
+    // RaBitQ decode is geared towards preserving IP, not L2.
+    // Use a very loose tolerance: just verify the reconstruction is in the right ballpark.
+    double total_l2_err = 0;
+    for (size_t i = 0; i < n; ++i) {
+        double vec_err = 0;
+        for (size_t j = 0; j < d; ++j) {
+            double diff = data[i * d + j] - decoded[i * d + j];
+            vec_err += diff * diff;
+        }
+        total_l2_err += vec_err;
+    }
+    double avg_l2_err = total_l2_err / n;
+    // Average per-vector L2² error should be finite and reasonable
+    EXPECT_GT(avg_l2_err, 0.0) << "Decode produced identical output (suspicious)";
+    EXPECT_LT(avg_l2_err, 1000.0) << "Decode error is unreasonably large";
+}
+
+TEST_F(RaBitQQuantizerTest, ComputeNormsPositive) {
+    RaBitQQuantizer<Quantization::u8> quantizer;
+    quantizer.Fit(data.data(), n, d);
+
+    const size_t code_size = quantizer.CodeSize(d);
+    std::vector<uint8_t> encoded(n * code_size);
+    quantizer.Encode(data.data(), encoded.data(), n, d);
+
+    std::vector<float> norms(n);
+    quantizer.ComputeNorms(encoded.data(), n, d, norms.data());
+
+    for (size_t i = 0; i < n; ++i) {
+        EXPECT_GE(norms[i], 0.0f) << "norm at index " << i << " is negative";
+    }
+}
+
+// ── SuperKMeans<u8> with RaBitQ integration tests ──
+
+class SuperKMeansU8RaBitQTest : public ::testing::Test {
+  protected:
+    void SetUp() override {}
+};
+
+TEST_F(SuperKMeansU8RaBitQTest, BasicTraining) {
+    const size_t n = 2000;
+    const size_t d = 64;
+    const size_t n_clusters = 10;
+
+    std::vector<float> data = MakeBlobs(n, d, n_clusters);
+
+    SuperKMeansConfig config;
+    config.iters = 10;
+    config.verbose = false;
+    config.quantizer_type = QuantizerType::rabitq;
+
+    auto kmeans = SuperKMeans<Quantization::u8, DistanceFunction::l2>(n_clusters, d, config);
+
+    EXPECT_FALSE(kmeans.IsTrained());
+    auto centroids = kmeans.Train(data.data(), n);
+    EXPECT_TRUE(kmeans.IsTrained());
+    EXPECT_EQ(centroids.size(), n_clusters * d);
+}
+
+TEST_F(SuperKMeansU8RaBitQTest, AllClustersUsed) {
+    const size_t n = 5000;
+    const size_t d = 128;
+    const size_t n_clusters = 20;
+
+    std::vector<float> data = MakeBlobs(n, d, n_clusters);
+
+    SuperKMeansConfig config;
+    config.iters = 15;
+    config.verbose = false;
+    config.quantizer_type = QuantizerType::rabitq;
+
+    auto kmeans = SuperKMeans<Quantization::u8, DistanceFunction::l2>(n_clusters, d, config);
+    auto centroids = kmeans.Train(data.data(), n);
+
+    auto assignments = kmeans.Assign(data.data(), centroids.data(), n, n_clusters);
+    std::unordered_set<uint32_t> used_clusters(assignments.begin(), assignments.end());
+
+    EXPECT_EQ(used_clusters.size(), n_clusters)
+        << "Not all clusters were used. Expected " << n_clusters
+        << " but only " << used_clusters.size() << " were assigned.";
+}
+
+TEST_F(SuperKMeansU8RaBitQTest, WCSSReasonable) {
+    const size_t n = 3000;
+    const size_t d = 64;
+    const size_t n_clusters = 10;
+
+    std::vector<float> data = MakeBlobs(n, d, n_clusters);
+
+    // Train f32 baseline
+    SuperKMeansConfig config_f32;
+    config_f32.iters = 15;
+    config_f32.verbose = false;
+    auto kmeans_f32 = SuperKMeans<Quantization::f32, DistanceFunction::l2>(n_clusters, d, config_f32);
+    auto centroids_f32 = kmeans_f32.Train(data.data(), n);
+
+    // Train RaBitQ
+    SuperKMeansConfig config_rbq;
+    config_rbq.iters = 15;
+    config_rbq.verbose = false;
+    config_rbq.quantizer_type = QuantizerType::rabitq;
+    auto kmeans_rbq = SuperKMeans<Quantization::u8, DistanceFunction::l2>(n_clusters, d, config_rbq);
+    auto centroids_rbq = kmeans_rbq.Train(data.data(), n);
+
+    // Compute WCSS for both
+    auto assign_f32 = kmeans_f32.Assign(data.data(), centroids_f32.data(), n, n_clusters);
+    auto assign_rbq = kmeans_rbq.Assign(data.data(), centroids_rbq.data(), n, n_clusters);
+
+    auto compute_wcss = [&](const std::vector<uint32_t>& assignments,
+                            const std::vector<float>& ctrs) {
+        double wcss = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+            uint32_t c = assignments[i];
+            for (size_t j = 0; j < d; ++j) {
+                double diff = data[i * d + j] - ctrs[c * d + j];
+                wcss += diff * diff;
+            }
+        }
+        return wcss;
+    };
+
+    double wcss_f32 = compute_wcss(assign_f32, centroids_f32);
+    double wcss_rbq = compute_wcss(assign_rbq, centroids_rbq);
+
+    // 1-bit quantization is very coarse — allow 3x WCSS vs f32 for well-separated blobs
+    EXPECT_LT(wcss_rbq, wcss_f32 * 3.0)
+        << "RaBitQ WCSS (" << wcss_rbq << ") is too much worse than f32 WCSS (" << wcss_f32 << ")";
+}
+
+#endif // HAS_FAISS

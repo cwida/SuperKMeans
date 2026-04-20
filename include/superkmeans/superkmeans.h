@@ -15,6 +15,9 @@
 #include "superkmeans/quantizers/quantizer.h"
 #include "superkmeans/quantizers/sq4.h"
 #include "superkmeans/quantizers/sq8.h"
+#ifdef HAS_FAISS
+#include "superkmeans/quantizers/rabitq.h"
+#endif
 
 namespace skmeans {
 
@@ -250,6 +253,10 @@ class SuperKMeans {
                 quantizer = std::make_unique<SQ8Quantizer<q>>();
             } else if (config.quantizer_type == QuantizerType::sq4) {
                 quantizer = std::make_unique<SQ4Quantizer<q>>();
+#ifdef HAS_FAISS
+            } else if (config.quantizer_type == QuantizerType::rabitq) {
+                quantizer = std::make_unique<RaBitQQuantizer<q>>();
+#endif
             } else {
                 throw std::invalid_argument("Unsupported quantizer type for non-f32 quantization");
             }
@@ -257,9 +264,10 @@ class SuperKMeans {
             effective_rerank_k = (config.rerank_k >= 0)
                 ? static_cast<size_t>(config.rerank_k)
                 : quantizer->DefaultRerankK();
-            quantized_data.reset(new vector_value_t[n_samples * d]);
+            code_size = quantizer->CodeSize(d);
+            quantized_data.reset(new vector_value_t[n_samples * code_size]);
             quantizer->Encode(data_to_cluster, quantized_data.get(), n_samples, d);
-            quantized_centroids.reset(new vector_value_t[n_clusters * d]);
+            quantized_centroids.reset(new vector_value_t[n_clusters * code_size]);
             quantizer->Encode(prev_centroids.get(), quantized_centroids.get(), n_clusters, d);
             quantizer->ComputeNorms(quantized_data.get(), n_samples, d, data_norms.get());
             quantizer->ComputeNorms(quantized_centroids.get(), n_clusters, d, centroid_norms.get());
@@ -448,8 +456,9 @@ class SuperKMeans {
         std::vector<distance_t> result_distances(n_vectors);
         std::unique_ptr<distance_t[]> tmp_distances_buf(new distance_t[X_BATCH_SIZE * Y_BATCH_SIZE]);
 
-        std::vector<vector_value_t> q_vectors(n_vectors * d);
-        std::vector<vector_value_t> q_centroids(n_centroids * d);
+        const size_t cs = quantizer->CodeSize(d);
+        std::vector<vector_value_t> q_vectors(n_vectors * cs);
+        std::vector<vector_value_t> q_centroids(n_centroids * cs);
         quantizer->Encode(vectors, q_vectors.data(), n_vectors, d);
         quantizer->Encode(centroids, q_centroids.data(), n_centroids, d);
 
@@ -478,6 +487,8 @@ class SuperKMeans {
             quantizer->FindNearestNeighbor(
                 q_vectors.data(),
                 q_centroids.data(),
+                vectors,
+                centroids,
                 n_vectors,
                 n_centroids,
                 d,
@@ -819,6 +830,8 @@ class SuperKMeans {
             quantizer->FindNearestNeighbor(
                 quantized_data.get(),
                 quantized_centroids.get(),
+                data_to_cluster,
+                prev_centroids.get(),
                 n_samples,
                 n_clusters,
                 d,
@@ -1660,6 +1673,7 @@ class SuperKMeans {
     // Quantization state (only used when q != f32)
     std::unique_ptr<IQuantizer<q>> quantizer;
     size_t effective_rerank_k = 0;
+    size_t code_size = 0; // bytes per encoded vector (= d for SQ8/SQ4, variable for RaBitQ)
     std::unique_ptr<vector_value_t[]> quantized_data;
     std::unique_ptr<vector_value_t[]> quantized_centroids;
 
