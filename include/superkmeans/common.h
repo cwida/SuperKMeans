@@ -140,6 +140,19 @@ struct DistanceType {
 template <Quantization q>
 using skmeans_distance_t = typename DistanceType<q>::type;
 
+// PDX-internal distance type: uint32_t for u8 (exact integer accumulation in quantized domain),
+// float for f32. Final distances (out_distances, KNNCandidate) always use float.
+template <Quantization q>
+struct PDXDistanceType {
+    using type = skmeans_distance_t<q>;
+};
+template <>
+struct PDXDistanceType<Quantization::u8> {
+    using type = uint32_t;
+};
+template <Quantization q>
+using pdx_distance_t = typename PDXDistanceType<q>::type;
+
 // Input data type: always float (user provides float data, quantization is internal)
 template <Quantization q>
 using skmeans_input_t = float;

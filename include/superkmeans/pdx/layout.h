@@ -34,7 +34,7 @@ class PDXLayout {
     using index_t = IndexPDXIVF<q>;
     using scalar_t = skmeans_value_t<q>;
     using cluster_t = Cluster<q>;
-    using pruner_t = ADSamplingPruner<q>;
+    using pruner_t = ADSamplingPruner<Quantization::f32>;
     using searcher_t = PDXearch<q, IndexPDXIVF<q>, alpha>;
 
   public:

@@ -2,13 +2,13 @@
 
 #include <cstdint>
 #include <cstdio>
-// #include <limits>
-// #include <vector>
+#include <algorithm>
+#include <limits>
+#include <vector>
 #include <omp.h>
 
 #include "superkmeans/common.h"
 #include "superkmeans/distance_computers/base_computers.h"
-// #include "superkmeans/distance_computers/matmul.h"
 #include "superkmeans/pdx/layout.h"
 #include "superkmeans/profiler.h"
 #include <Eigen/Dense>

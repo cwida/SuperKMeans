@@ -6,6 +6,7 @@
 #include "superkmeans/pdx/utils.h"
 #include <algorithm>
 #include <cassert>
+#include <limits>
 
 namespace skmeans {
 
@@ -27,13 +28,13 @@ template <
     DistanceFunction alpha = DistanceFunction::l2>
 class PDXearch {
   public:
-    using DISTANCES_TYPE = skmeans_distance_t<q>;
+    using DISTANCES_TYPE = pdx_distance_t<q>;
     using DATA_TYPE = skmeans_value_t<q>;
     using INDEX_TYPE = Index;
     using CLUSTER_TYPE = Cluster<q>;
     using KNNCandidate_t = KNNCandidate<q>;
     using VectorComparator_t = VectorComparator<q>;
-    using Pruner = ADSamplingPruner<q>;
+    using Pruner = ADSamplingPruner<Quantization::f32>;
 
     Pruner& pruner;
     INDEX_TYPE& pdx_data;
@@ -53,11 +54,22 @@ class PDXearch {
     template <Quantization Q = q>
     void GetPruningThreshold(
         KNNCandidate<Q>& best_candidate,
-        skmeans_distance_t<Q>& pruning_threshold,
+        DISTANCES_TYPE& pruning_threshold,
         uint32_t current_dimension_idx
     ) {
-        pruning_threshold =
-            pruner.template GetPruningThreshold<Q>(best_candidate, current_dimension_idx);
+        if constexpr (Q == Quantization::u8) {
+            const float float_threshold =
+                pruner.template GetPruningThreshold<Q>(
+                    best_candidate, current_dimension_idx);
+            const float scaled = float_threshold * pdx_data.quantization_scale_squared;
+            pruning_threshold =
+                scaled >= static_cast<float>(std::numeric_limits<DISTANCES_TYPE>::max())
+                    ? std::numeric_limits<DISTANCES_TYPE>::max()
+                    : static_cast<DISTANCES_TYPE>(scaled);
+        } else {
+            pruning_threshold =
+                pruner.template GetPruningThreshold<Q>(best_candidate, current_dimension_idx);
+        }
     }
 
     /**
@@ -68,8 +80,8 @@ class PDXearch {
         size_t n_vectors,
         size_t& n_vectors_not_pruned,
         uint32_t* pruning_positions,
-        skmeans_distance_t<Q> pruning_threshold,
-        skmeans_distance_t<Q>* pruning_distances
+        DISTANCES_TYPE pruning_threshold,
+        DISTANCES_TYPE* pruning_distances
     ) {
         n_vectors_not_pruned = 0;
         for (size_t vector_idx = 0; vector_idx < n_vectors; ++vector_idx) {
@@ -87,8 +99,8 @@ class PDXearch {
         size_t n_vectors,
         size_t& n_vectors_not_pruned,
         uint32_t* pruning_positions,
-        skmeans_distance_t<Q> pruning_threshold,
-        skmeans_distance_t<Q>* pruning_distances
+        DISTANCES_TYPE pruning_threshold,
+        DISTANCES_TYPE* pruning_distances
     ) {
         UtilsComputer<Q>::InitPositionsArray(
             n_vectors, n_vectors_not_pruned, pruning_positions, pruning_threshold, pruning_distances
@@ -120,8 +132,8 @@ class PDXearch {
         const skmeans_value_t<Q>* SKM_RESTRICT data,
         const size_t n_vectors,
         uint32_t* pruning_positions,
-        skmeans_distance_t<Q>* pruning_distances,
-        skmeans_distance_t<Q>& pruning_threshold,
+        DISTANCES_TYPE* pruning_distances,
+        DISTANCES_TYPE& pruning_threshold,
         KNNCandidate<Q>& best_candidate,
         size_t& n_vectors_not_pruned,
         uint32_t& current_dimension_idx,
@@ -224,15 +236,24 @@ class PDXearch {
         const uint32_t* vector_indices,
         size_t n_vectors,
         const uint32_t* pruning_positions,
-        const skmeans_distance_t<Q>* pruning_distances,
+        const DISTANCES_TYPE* pruning_distances,
         KNNCandidate<Q>& best_candidate
     ) {
         for (size_t position_idx = 0; position_idx < n_vectors; ++position_idx) {
             size_t index = pruning_positions[position_idx];
-            skmeans_distance_t<Q> current_distance = pruning_distances[index];
-            if (current_distance < best_candidate.distance) {
-                best_candidate.distance = current_distance;
-                best_candidate.index = vector_indices[index];
+            DISTANCES_TYPE current_distance = pruning_distances[index];
+            if constexpr (Q == Quantization::u8) {
+                float real_distance =
+                    static_cast<float>(current_distance) * pdx_data.inverse_scale_factor_squared;
+                if (real_distance < best_candidate.distance) {
+                    best_candidate.distance = real_distance;
+                    best_candidate.index = vector_indices[index];
+                }
+            } else {
+                if (current_distance < best_candidate.distance) {
+                    best_candidate.distance = current_distance;
+                    best_candidate.index = vector_indices[index];
+                }
             }
         }
     }
@@ -241,12 +262,9 @@ class PDXearch {
      * @brief Converts distances back to original domain (for u8 quantization).
      */
     void BuildResultSet(KNNCandidate_t& best_candidate) {
-        // We return distances in the original domain
-        if constexpr (q == Quantization::u8) {
-            float inverse_scale_factor = 1.0f / pdx_data.scale_factor;
-            inverse_scale_factor = inverse_scale_factor * inverse_scale_factor;
-            best_candidate.distance = best_candidate.distance * inverse_scale_factor;
-        }
+        // For u8, SetBestCandidate already converts to original float domain
+        // via inverse_scale_factor_squared. For f32, no conversion needed.
+        (void) best_candidate;
     }
 
   public:
@@ -264,7 +282,7 @@ class PDXearch {
      * @return Best candidate found (index and distance)
      */
     KNNCandidate_t Top1PartialSearchWithThresholdAndPartialDistances(
-        const float* SKM_RESTRICT query,
+        const DATA_TYPE* SKM_RESTRICT query,
         const float prev_pruning_threshold,
         const uint32_t prev_top_1,
         DISTANCES_TYPE* partial_pruning_distances,
@@ -279,8 +297,16 @@ class PDXearch {
         uint32_t current_dimension_idx = computed_distance_until;
         size_t current_cluster = 0;
 
-        // Setup previous top1
-        pruning_threshold = prev_pruning_threshold;
+        // Setup previous top1 — convert float threshold to DISTANCES_TYPE domain
+        if constexpr (q == Quantization::u8) {
+            const float scaled = prev_pruning_threshold * pdx_data.quantization_scale_squared;
+            pruning_threshold =
+                scaled >= static_cast<float>(std::numeric_limits<DISTANCES_TYPE>::max())
+                    ? std::numeric_limits<DISTANCES_TYPE>::max()
+                    : static_cast<DISTANCES_TYPE>(scaled);
+        } else {
+            pruning_threshold = prev_pruning_threshold;
+        }
         auto top_embedding = KNNCandidate<q>{};
         top_embedding.index = prev_top_1;
         top_embedding.distance = prev_pruning_threshold;

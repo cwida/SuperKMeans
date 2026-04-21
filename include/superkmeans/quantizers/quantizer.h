@@ -6,6 +6,10 @@
 
 namespace skmeans {
 
+// Forward declaration for pruning interface
+template <Quantization q, DistanceFunction alpha>
+class PDXLayout;
+
 /**
  * @brief Abstract quantizer interface.
  *
@@ -137,6 +141,85 @@ class IQuantizer {
      * @brief Whether the quantizer has been fitted.
      */
     virtual bool IsFitted() const = 0;
+
+    /**
+     * @brief Whether this quantizer supports PDX pruning.
+     */
+    virtual bool SupportsPruning() const { return false; }
+
+    /**
+     * @brief Cache partial L2 squared norms for data vectors.
+     *
+     * Precomputes norms over the first partial_d dimensions of the data.
+     * These are used internally by FindNearestNeighborWithPruning.
+     * Must be called before pruning, and again whenever partial_d changes.
+     *
+     * @param data Encoded data vectors (n × code_size, row-major)
+     * @param n Number of vectors
+     * @param d Full dimensionality
+     * @param partial_d Number of leading dimensions to compute norms over
+     */
+    virtual void CacheDataPartialNorms(
+        const quantized_t* data, size_t n, size_t d, uint32_t partial_d
+    ) {
+        (void) data; (void) n; (void) d; (void) partial_d;
+        assert(false && "CacheDataPartialNorms not supported by this quantizer");
+    }
+
+    /**
+     * @brief Cache partial L2 squared norms for centroid vectors.
+     *
+     * Same as CacheDataPartialNorms but for centroids.
+     * Must be called before each pruning iteration (centroids change every iteration).
+     */
+    virtual void CacheCentroidPartialNorms(
+        const quantized_t* centroids, size_t n, size_t d, uint32_t partial_d
+    ) {
+        (void) centroids; (void) n; (void) d; (void) partial_d;
+        assert(false && "CacheCentroidPartialNorms not supported by this quantizer");
+    }
+
+    /**
+     * @brief Find top-1 nearest neighbor with PDX pruning.
+     *
+     * Combines partial GEMM (on first partial_d dimensions) with PDX pruned search
+     * on the remaining dimensions. Final distances are float.
+     * Partial norms must be cached via CacheDataPartialNorms / CacheCentroidPartialNorms
+     * before calling this method.
+     *
+     * @param x Quantized query vectors (n_x × code_size, row-major)
+     * @param y Quantized reference vectors (n_y × code_size, row-major)
+     * @param x_float Original float query vectors (n_x × d, row-major)
+     * @param y_float Original float reference vectors (n_y × d, row-major)
+     * @param n_x Number of queries
+     * @param n_y Number of references
+     * @param d Dimensionality
+     * @param out_knn Output: nearest reference index per query (length n_x)
+     * @param out_distances Output: L2 squared distance to nearest (length n_x, float)
+     * @param pdx_centroids PDXLayout holding the PDXified centroid data
+     * @param partial_d Number of dimensions covered by partial GEMM
+     * @param out_not_pruned_counts Output: count of non-pruned vectors per query (length n_x)
+     */
+    virtual void FindNearestNeighborWithPruning(
+        const quantized_t* x,
+        const quantized_t* y,
+        const float* x_float,
+        const float* y_float,
+        size_t n_x,
+        size_t n_y,
+        size_t d,
+        uint32_t* out_knn,
+        float* out_distances,
+        PDXLayout<q, DistanceFunction::l2>& pdx_centroids,
+        uint32_t partial_d,
+        size_t* out_not_pruned_counts
+    ) const {
+        (void) x; (void) y; (void) x_float; (void) y_float;
+        (void) n_x; (void) n_y; (void) d;
+        (void) out_knn; (void) out_distances;
+        (void) pdx_centroids; (void) partial_d; (void) out_not_pruned_counts;
+        assert(false && "FindNearestNeighborWithPruning not supported by this quantizer");
+    }
 };
 
 } // namespace skmeans

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cassert>
+
 #include "superkmeans/common.h"
 
 namespace skmeans {
@@ -11,7 +13,7 @@ template <>
 class ScalarComputer<DistanceFunction::l2, Quantization::u8> {
 
   public:
-    using distance_t = skmeans_distance_t<Quantization::u8>;
+    using distance_t = pdx_distance_t<Quantization::u8>;
     using data_t = skmeans_value_t<Quantization::u8>;
 
     static distance_t Horizontal(
@@ -114,6 +116,31 @@ class ScalarUtilsComputer<Quantization::f32> {
         for (size_t vector_idx = 0; vector_idx < n_vectors; ++vector_idx) {
             pruning_positions[n_vectors_not_pruned] = vector_idx;
             n_vectors_not_pruned += pruning_distances[vector_idx] < pruning_threshold;
+        }
+    }
+};
+
+template <>
+class ScalarUtilsComputer<Quantization::u8> {
+  public:
+    using data_t = skmeans_value_t<Quantization::u8>;
+    using pdx_dist_t = pdx_distance_t<Quantization::u8>;
+
+    static void FlipSign(const data_t*, data_t*, const uint32_t*, size_t) {
+        assert(false && "FlipSign not supported for u8");
+    }
+
+    static void InitPositionsArray(
+        size_t n_vectors,
+        size_t& n_vectors_not_pruned,
+        uint32_t* pruning_positions,
+        pdx_dist_t pruning_threshold,
+        const pdx_dist_t* pruning_distances
+    ) {
+        n_vectors_not_pruned = 0;
+        for (size_t i = 0; i < n_vectors; ++i) {
+            pruning_positions[n_vectors_not_pruned] = i;
+            n_vectors_not_pruned += pruning_distances[i] < pruning_threshold;
         }
     }
 };

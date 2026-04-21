@@ -2,6 +2,7 @@
 
 #include <immintrin.h>
 
+#include <cassert>
 #include <cstdint>
 #include <cstdio>
 
@@ -16,7 +17,7 @@ class SIMDComputer {};
 template <>
 class SIMDComputer<skmeans::DistanceFunction::l2, skmeans::Quantization::u8> {
 
-    using distance_t = skmeans_distance_t<skmeans::Quantization::u8>;
+    using distance_t = pdx_distance_t<skmeans::Quantization::u8>;
     using data_t = skmeans_value_t<skmeans::Quantization::u8>;
 
     static distance_t Horizontal(
@@ -233,6 +234,53 @@ class SIMDUtilsComputer<skmeans::Quantization::f32> {
             __m256 distances = _mm256_loadu_ps(pruning_distances + vector_idx);
             __m256 cmp_result = _mm256_cmp_ps(distances, threshold_vec, _CMP_LT_OQ);
             int mask = _mm256_movemask_ps(cmp_result);
+            if (SKM_UNLIKELY(mask)) {
+                for (size_t i = 0; i < k_simd_width; ++i) {
+                    pruning_positions[n_vectors_not_pruned] = vector_idx + i;
+                    n_vectors_not_pruned += (mask >> i) & 1;
+                }
+            }
+        }
+        for (; vector_idx < n_vectors; ++vector_idx) {
+            pruning_positions[n_vectors_not_pruned] = vector_idx;
+            n_vectors_not_pruned += pruning_distances[vector_idx] < pruning_threshold;
+        }
+    }
+};
+
+template <>
+class SIMDUtilsComputer<skmeans::Quantization::u8> {
+  public:
+    using data_t = skmeans_value_t<skmeans::Quantization::u8>;
+    using pdx_dist_t = pdx_distance_t<skmeans::Quantization::u8>;
+
+    static void FlipSign(const data_t*, data_t*, const uint32_t*, size_t) {
+        assert(false && "FlipSign not supported for u8");
+    }
+
+    static void InitPositionsArray(
+        size_t n_vectors,
+        size_t& n_vectors_not_pruned,
+        uint32_t* pruning_positions,
+        pdx_dist_t pruning_threshold,
+        const pdx_dist_t* pruning_distances
+    ) {
+        n_vectors_not_pruned = 0;
+        size_t vector_idx = 0;
+        constexpr size_t k_simd_width = 8;
+        const size_t n_vectors_simd = (n_vectors / k_simd_width) * k_simd_width;
+        // AVX2 has no unsigned int32 compare, so bias both operands to signed range
+        const __m256i bias = _mm256_set1_epi32(static_cast<int32_t>(0x80000000u));
+        __m256i threshold_vec = _mm256_sub_epi32(
+            _mm256_set1_epi32(static_cast<int32_t>(pruning_threshold)), bias);
+        for (; vector_idx < n_vectors_simd; vector_idx += k_simd_width) {
+            __m256i distances = _mm256_loadu_si256(
+                reinterpret_cast<const __m256i*>(pruning_distances + vector_idx));
+            __m256i biased = _mm256_sub_epi32(distances, bias);
+            // cmpgt gives us biased > threshold, we want distances < threshold
+            // so we do threshold > biased, i.e., cmpgt(threshold, biased)
+            __m256i cmp_result = _mm256_cmpgt_epi32(threshold_vec, biased);
+            int mask = _mm256_movemask_ps(_mm256_castsi256_ps(cmp_result));
             if (SKM_UNLIKELY(mask)) {
                 for (size_t i = 0; i < k_simd_width; ++i) {
                     pruning_positions[n_vectors_not_pruned] = vector_idx + i;

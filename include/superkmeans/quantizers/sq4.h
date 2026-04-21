@@ -419,7 +419,6 @@ class SQ4Quantizer : public IQuantizer<q> {
 
     const ScalarQuantizationParams& GetParams() const { return params; }
 
-  private:
     /**
      * @brief Convert u8 array (1 value per byte, [0,15]) to nk_u4x2_t (2 nibbles per byte).
      *
@@ -442,6 +441,7 @@ class SQ4Quantizer : public IQuantizer<q> {
         }
     }
 
+  private:
     ScalarQuantizationParams params{};
     bool fitted = false;
 };

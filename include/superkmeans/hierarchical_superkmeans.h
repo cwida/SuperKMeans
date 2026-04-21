@@ -181,14 +181,31 @@ class HierarchicalSuperKMeans : public SuperKMeans<q, alpha> {
             n_mesoclusters,
             !this->hierarchical_config.data_already_rotated
         );
-        this->GetL2NormsRowMajor(data_to_cluster, this->n_samples, this->data_norms.get());
-        this->GetL2NormsRowMajor(
-            this->prev_centroids.get(), n_mesoclusters, this->centroid_norms.get()
+        // Create quantizer (F32Quantizer for f32, delegates to BatchComputer)
+        if constexpr (q == Quantization::f32) {
+            this->quantizer = std::make_unique<F32Quantizer<q>>();
+        } else {
+            throw std::invalid_argument(
+                "HierarchicalSuperKMeans does not yet support non-f32 quantization"
+            );
+        }
+        this->quantizer->Fit(data_to_cluster, this->n_samples, this->d);
+        this->effective_rerank_k = 0;
+        this->code_size = this->quantizer->CodeSize(this->d);
+
+        // For f32, encoded data IS the float data (zero-copy)
+        const vector_value_t* encoded_data_p = data_to_cluster;
+        this->quantized_centroids.reset(
+            new vector_value_t[this->n_clusters * this->code_size]
         );
 
-        // Buffers for RunIteration (needed for function signature even if unused in GEMM-only mode)
-        std::vector<vector_value_t> centroids_partial_norms;
-        centroids_partial_norms.reserve(this->n_clusters);
+        this->quantizer->ComputeNorms(
+            encoded_data_p, this->n_samples, this->d, this->data_norms.get()
+        );
+        this->quantizer->ComputeNorms(
+            this->prev_centroids.get(), n_mesoclusters, this->d, this->centroid_norms.get()
+        );
+
         std::vector<size_t> not_pruned_counts;
         not_pruned_counts.reserve(this->n_samples);
 
@@ -205,7 +222,8 @@ class HierarchicalSuperKMeans : public SuperKMeans<q, alpha> {
 
         bool always_gemm_only = this->d < DIMENSION_THRESHOLD_FOR_PRUNING ||
                                 this->hierarchical_config.use_blas_only ||
-                                n_mesoclusters <= N_CLUSTERS_THRESHOLD_FOR_PRUNING;
+                                n_mesoclusters <= N_CLUSTERS_THRESHOLD_FOR_PRUNING ||
+                                !this->quantizer->SupportsPruning();
         bool partial_norms_computed = false;
         float best_recall = 0.0f;
         size_t iters_without_improvement = 0;
@@ -214,17 +232,17 @@ class HierarchicalSuperKMeans : public SuperKMeans<q, alpha> {
              ++iter_idx) {
             bool use_gemm_only = (iter_idx == 0) || always_gemm_only;
             if (!use_gemm_only && !partial_norms_computed) {
-                this->GetPartialL2NormsRowMajor(
-                    data_to_cluster, this->n_samples, this->data_norms.get(), this->partial_d
+                this->quantizer->CacheDataPartialNorms(
+                    encoded_data_p, this->n_samples, this->d, this->partial_d
                 );
                 partial_norms_computed = true;
             }
             if (use_gemm_only) {
                 this->template RunIteration<true>(
                     data_to_cluster,
+                    encoded_data_p,
                     tmp_distances_buf.data(),
                     centroids_pdx_wrapper,
-                    centroids_partial_norms,
                     not_pruned_counts,
                     nullptr, // queries
                     0,       // n_queries
@@ -237,9 +255,9 @@ class HierarchicalSuperKMeans : public SuperKMeans<q, alpha> {
             } else {
                 this->template RunIteration<false>(
                     data_to_cluster,
+                    encoded_data_p,
                     tmp_distances_buf.data(),
                     centroids_pdx_wrapper,
-                    centroids_partial_norms,
                     not_pruned_counts,
                     nullptr, // queries
                     0,       // n_queries
@@ -340,13 +358,17 @@ class HierarchicalSuperKMeans : public SuperKMeans<q, alpha> {
                 this->horizontal_centroids.get(),
                 sizeof(centroid_value_t) * n_fineclusters * this->d
             );
-            this->GetL2NormsRowMajor(
-                this->prev_centroids.get(), n_fineclusters, this->centroid_norms.get()
+            this->quantizer->ComputeNorms(
+                this->prev_centroids.get(), n_fineclusters, this->d, this->centroid_norms.get()
             );
+
+            // For f32, encoded mesocluster data IS the float data
+            const vector_value_t* mesocluster_encoded_data_p = mesocluster_data_to_cluster;
 
             bool fine_always_gemm_only = this->d < DIMENSION_THRESHOLD_FOR_PRUNING ||
                                          this->hierarchical_config.use_blas_only ||
-                                         n_fineclusters <= N_CLUSTERS_THRESHOLD_FOR_PRUNING;
+                                         n_fineclusters <= N_CLUSTERS_THRESHOLD_FOR_PRUNING ||
+                                         !this->quantizer->SupportsPruning();
             bool fine_partial_norms_computed = false;
             float fine_best_recall = 0.0f;
             iters_without_improvement = 0;
@@ -356,10 +378,10 @@ class HierarchicalSuperKMeans : public SuperKMeans<q, alpha> {
                  ++fine_iter_idx) {
                 bool use_gemm_only = (fine_iter_idx == 0) || fine_always_gemm_only;
                 if (!use_gemm_only && !fine_partial_norms_computed) {
-                    this->GetPartialL2NormsRowMajor(
-                        mesocluster_data_to_cluster,
+                    this->quantizer->CacheDataPartialNorms(
+                        mesocluster_encoded_data_p,
                         this->n_samples,
-                        this->data_norms.get(),
+                        this->d,
                         this->partial_d
                     );
                     fine_partial_norms_computed = true;
@@ -367,9 +389,9 @@ class HierarchicalSuperKMeans : public SuperKMeans<q, alpha> {
                 if (use_gemm_only) {
                     this->template RunIteration<true>(
                         mesocluster_data_to_cluster,
+                        mesocluster_encoded_data_p,
                         tmp_distances_buf.data(),
                         mesocluster_centroids_pdx_wrapper,
-                        centroids_partial_norms,
                         not_pruned_counts,
                         nullptr, // queries
                         0,       // n_queries
@@ -382,9 +404,9 @@ class HierarchicalSuperKMeans : public SuperKMeans<q, alpha> {
                 } else {
                     this->template RunIteration<false>(
                         mesocluster_data_to_cluster,
+                        mesocluster_encoded_data_p,
                         tmp_distances_buf.data(),
                         mesocluster_centroids_pdx_wrapper,
-                        centroids_partial_norms,
                         not_pruned_counts,
                         nullptr, // queries
                         0,       // n_queries
@@ -457,8 +479,8 @@ class HierarchicalSuperKMeans : public SuperKMeans<q, alpha> {
                 sizeof(uint32_t) * this->n_samples
             );
         }
-        this->GetL2NormsRowMajor(
-            this->prev_centroids.get(), this->n_clusters, this->centroid_norms.get()
+        this->quantizer->ComputeNorms(
+            this->prev_centroids.get(), this->n_clusters, this->d, this->centroid_norms.get()
         );
 
         TicToc timer_refinement;
@@ -466,7 +488,8 @@ class HierarchicalSuperKMeans : public SuperKMeans<q, alpha> {
 
         // Refinement iterations
         bool refinement_always_gemm_only = this->d < DIMENSION_THRESHOLD_FOR_PRUNING ||
-                                           this->n_clusters <= N_CLUSTERS_THRESHOLD_FOR_PRUNING;
+                                           this->n_clusters <= N_CLUSTERS_THRESHOLD_FOR_PRUNING ||
+                                           !this->quantizer->SupportsPruning();
         bool refinement_partial_norms_computed = false;
         for (size_t refinement_iter_idx = 0;
              refinement_iter_idx < this->hierarchical_config.iters_refinement;
@@ -476,17 +499,17 @@ class HierarchicalSuperKMeans : public SuperKMeans<q, alpha> {
                 //   is because we are using the same this->data_norms.get() buffer in the
                 //   fineclustering, which replaces the norms that I already calculated before and
                 //   put in this buffer.
-                this->GetPartialL2NormsRowMajor(
-                    data_to_cluster, this->n_samples, this->data_norms.get(), this->partial_d
+                this->quantizer->CacheDataPartialNorms(
+                    encoded_data_p, this->n_samples, this->d, this->partial_d
                 );
                 refinement_partial_norms_computed = true;
             }
             if (refinement_always_gemm_only) {
                 this->template RunIteration<true>(
                     data_to_cluster,
+                    encoded_data_p,
                     tmp_distances_buf.data(),
                     final_refinement_pdx_wrapper,
-                    centroids_partial_norms,
                     not_pruned_counts,
                     nullptr, // queries
                     0,       // n_queries
@@ -499,9 +522,9 @@ class HierarchicalSuperKMeans : public SuperKMeans<q, alpha> {
             } else {
                 this->template RunIteration<false>(
                     data_to_cluster,
+                    encoded_data_p,
                     tmp_distances_buf.data(),
                     final_refinement_pdx_wrapper,
-                    centroids_partial_norms,
                     not_pruned_counts,
                     nullptr, // queries
                     0,       // n_queries

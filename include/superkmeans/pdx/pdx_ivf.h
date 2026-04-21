@@ -36,6 +36,8 @@ class IndexPDXIVF<Quantization::u8> {
 
     float for_base{};
     float scale_factor{};
+    float quantization_scale_squared{};
+    float inverse_scale_factor_squared{};
 };
 
 } // namespace skmeans

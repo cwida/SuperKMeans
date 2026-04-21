@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cassert>
 #include <iostream>
 
 #include "arm_neon.h"
@@ -26,7 +27,7 @@ class SIMDComputer {};
 template <>
 class SIMDComputer<DistanceFunction::l2, Quantization::u8> {
   public:
-    using distance_t = skmeans_distance_t<Quantization::u8>;
+    using distance_t = pdx_distance_t<Quantization::u8>;
     using value_t = skmeans_value_t<Quantization::u8>;
 
     /**
@@ -162,6 +163,48 @@ class SIMDUtilsComputer<Quantization::f32> {
         for (; vector_idx < n_vectors_simd; vector_idx += k_simd_width) {
             float32x4_t distances = vld1q_f32(pruning_distances + vector_idx);
             uint32x4_t cmp_result = vcltq_f32(distances, threshold_vec);
+            uint32_t any_passed = vmaxvq_u32(cmp_result);
+            if (SKM_UNLIKELY(any_passed)) {
+                uint32_t mask[4];
+                vst1q_u32(mask, cmp_result);
+                for (size_t i = 0; i < k_simd_width; ++i) {
+                    pruning_positions[n_vectors_not_pruned] = vector_idx + i;
+                    n_vectors_not_pruned += (mask[i] != 0);
+                }
+            }
+        }
+        for (; vector_idx < n_vectors; ++vector_idx) {
+            pruning_positions[n_vectors_not_pruned] = vector_idx;
+            n_vectors_not_pruned += pruning_distances[vector_idx] < pruning_threshold;
+        }
+    }
+};
+
+template <>
+class SIMDUtilsComputer<Quantization::u8> {
+  public:
+    using data_t = skmeans_value_t<Quantization::u8>;
+    using pdx_dist_t = pdx_distance_t<Quantization::u8>;
+
+    static void FlipSign(const data_t*, data_t*, const uint32_t*, size_t) {
+        assert(false && "FlipSign not supported for u8");
+    }
+
+    static void InitPositionsArray(
+        size_t n_vectors,
+        size_t& n_vectors_not_pruned,
+        uint32_t* pruning_positions,
+        pdx_dist_t pruning_threshold,
+        const pdx_dist_t* pruning_distances
+    ) {
+        n_vectors_not_pruned = 0;
+        size_t vector_idx = 0;
+        constexpr size_t k_simd_width = 4;
+        const size_t n_vectors_simd = (n_vectors / k_simd_width) * k_simd_width;
+        uint32x4_t threshold_vec = vdupq_n_u32(pruning_threshold);
+        for (; vector_idx < n_vectors_simd; vector_idx += k_simd_width) {
+            uint32x4_t distances = vld1q_u32(pruning_distances + vector_idx);
+            uint32x4_t cmp_result = vcltq_u32(distances, threshold_vec);
             uint32_t any_passed = vmaxvq_u32(cmp_result);
             if (SKM_UNLIKELY(any_passed)) {
                 uint32_t mask[4];
