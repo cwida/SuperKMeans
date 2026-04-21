@@ -3,6 +3,7 @@
 #include "superkmeans/common.h"
 #include "superkmeans/distance_computers/base_computers.h"
 #include "superkmeans/pdx/layout.h"
+#include "superkmeans/profiler.h"
 #include "superkmeans/quantizers/quantizer.h"
 
 #include <algorithm>
