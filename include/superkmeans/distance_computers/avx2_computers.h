@@ -14,7 +14,45 @@ template <DistanceFunction alpha, Quantization q>
 class SIMDComputer {};
 
 template <>
-class SIMDComputer<skmeans::DistanceFunction::l2, skmeans::Quantization::u8> {};
+class SIMDComputer<skmeans::DistanceFunction::l2, skmeans::Quantization::u8> {
+
+    using distance_t = skmeans_distance_t<skmeans::Quantization::u8>;
+    using data_t = skmeans_value_t<skmeans::Quantization::u8>;
+
+    static distance_t Horizontal(
+        const data_t* SKM_RESTRICT vector1,
+        const data_t* SKM_RESTRICT vector2,
+        size_t num_dimensions
+    ) {
+        __m256i d2_vec = _mm256_setzero_si256();
+        __m256i zeros = _mm256_setzero_si256();
+        size_t i = 0;
+        for (; i + 32 <= num_dimensions; i += 32) {
+            __m256i a_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(vector1 + i));
+            __m256i b_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(vector2 + i));
+            __m256i diff =
+                _mm256_or_si256(_mm256_subs_epu8(a_vec, b_vec), _mm256_subs_epu8(b_vec, a_vec));
+            __m256i lo16 = _mm256_unpacklo_epi8(diff, zeros);
+            __m256i hi16 = _mm256_unpackhi_epi8(diff, zeros);
+            d2_vec = _mm256_add_epi32(d2_vec, _mm256_madd_epi16(lo16, lo16));
+            d2_vec = _mm256_add_epi32(d2_vec, _mm256_madd_epi16(hi16, hi16));
+        }
+        // Reduce 8 x i32 to scalar (simsimd_reduce_i32x8_haswell)
+        __m128i lo = _mm256_castsi256_si128(d2_vec);
+        __m128i hi = _mm256_extracti128_si256(d2_vec, 1);
+        __m128i sum128 = _mm_add_epi32(lo, hi);
+        sum128 = _mm_hadd_epi32(sum128, sum128);
+        sum128 = _mm_hadd_epi32(sum128, sum128);
+        distance_t distance = _mm_cvtsi128_si32(sum128);
+        // Scalar tail.
+        for (; i < num_dimensions; ++i) {
+            int n = static_cast<int>(vector1[i]) - static_cast<int>(vector2[i]);
+            distance += n * n;
+        }
+        return distance;
+    };
+
+};
 
 template <>
 class SIMDComputer<skmeans::DistanceFunction::l2, skmeans::Quantization::f32> {

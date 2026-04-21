@@ -8,7 +8,26 @@ template <DistanceFunction alpha, Quantization q>
 class ScalarComputer {};
 
 template <>
-class ScalarComputer<DistanceFunction::l2, Quantization::u8> {};
+class ScalarComputer<DistanceFunction::l2, Quantization::u8> {
+
+  public:
+    using distance_t = skmeans_distance_t<Quantization::u8>;
+    using data_t = skmeans_value_t<Quantization::u8>;
+
+    static distance_t Horizontal(
+        const data_t* SKM_RESTRICT vector1,
+        const data_t* SKM_RESTRICT vector2,
+        size_t num_dimensions
+    ) {
+        distance_t distance = 0;
+        SKM_VECTORIZE_LOOP
+        for (size_t i = 0; i < num_dimensions; ++i) {
+            int diff = static_cast<int>(vector1[i]) - static_cast<int>(vector2[i]);
+            distance += diff * diff;
+        }
+        return distance;
+    };
+};
 
 template <>
 class ScalarComputer<DistanceFunction::l2, Quantization::f32> {

@@ -38,7 +38,8 @@ class SIMDComputer<skmeans::DistanceFunction::l2, Quantization::u8> {
 
     simsimd_l2sq_u8_ice_cycle:
         if (num_dimensions < 64) {
-            const __mmask64 mask = (__mmask64) _bzhi_u64(0xFFFFFFFFFFFFFFFF, num_dimensions);
+            const __mmask64 mask =
+                static_cast<__mmask64>(_bzhi_u64(0xFFFFFFFFFFFFFFFF, num_dimensions));
             a_u8_vec = _mm512_maskz_loadu_epi8(mask, vector1);
             b_u8_vec = _mm512_maskz_loadu_epi8(mask, vector2);
             num_dimensions = 0;

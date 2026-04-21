@@ -35,12 +35,17 @@ class DistanceComputer<DistanceFunction::l2, Quantization::f32> {
     constexpr static auto Horizontal = computer::Horizontal;
 };
 
-// template <>
-// class DistanceComputer<DistanceFunction::l2, Quantization::u8> {
-//     using computer = SIMDComputer<DistanceFunction::l2, Quantization::u8>;
-//   public:
-//     constexpr static auto Horizontal = computer::Horizontal;
-// };
+template <>
+class DistanceComputer<DistanceFunction::l2, Quantization::u8> {
+#if !defined(__ARM_NEON) && !defined(__AVX2__) && !defined(__AVX512F__)
+    using computer = ScalarComputer<DistanceFunction::l2, Quantization::u8>;
+#else
+    using computer = SIMDComputer<DistanceFunction::l2, Quantization::u8>;
+#endif
+
+  public:
+    constexpr static auto Horizontal = computer::Horizontal;
+};
 
 template <Quantization q>
 class UtilsComputer {

@@ -40,6 +40,7 @@ class RaBitQGemmQuantizer : public IQuantizer<q> {
     using quantized_t = typename IQuantizer<q>::quantized_t;
 
     void Fit(const float* data, size_t n, size_t d) override {
+        SKM_PROFILE_SCOPE("RaBitQ::Fit");
         d_ = d;
         binary_bytes_ = (d + 7) / 8;
         centroid_.resize(d, 0.0f);
@@ -62,12 +63,14 @@ class RaBitQGemmQuantizer : public IQuantizer<q> {
     }
 
     void Encode(const float* in, quantized_t* out, size_t n, size_t d) const override {
+        SKM_PROFILE_SCOPE("RaBitQ::Encode");
         assert(fitted_);
         assert(d == d_);
         faiss_quantizer_->compute_codes(in, reinterpret_cast<uint8_t*>(out), n);
     }
 
     void Decode(const quantized_t* in, float* out, size_t n, size_t d) const override {
+        SKM_PROFILE_SCOPE("RaBitQ::Decode");
         assert(fitted_);
         assert(d == d_);
         faiss_quantizer_->decode(reinterpret_cast<const uint8_t*>(in), out, n);
@@ -76,6 +79,8 @@ class RaBitQGemmQuantizer : public IQuantizer<q> {
     void ComputeNorms(
         const quantized_t* data, size_t n, size_t d, float* out_norms
     ) const override {
+        SKM_PROFILE_SCOPE("RaBitQ::ComputeNorms");
+
         assert(fitted_);
 
 #pragma omp parallel for num_threads(g_n_threads)
@@ -145,6 +150,7 @@ class RaBitQGemmQuantizer : public IQuantizer<q> {
                 std::memset(dot_qo_buf.data(), 0, batch_nx * batch_ny * sizeof(uint32_t));
 
                 for (int b = 0; b < qb_; ++b) {
+                    SKM_PROFILE_SCOPE("RaBitQ::BinaryGEMM");
                     // Pack centroid bit plane b for this Y batch
                     const uint8_t* plane_b = query_planes.data() +
                         b * n_y * binary_bytes_ + j * binary_bytes_;
@@ -188,25 +194,28 @@ class RaBitQGemmQuantizer : public IQuantizer<q> {
                     }
                 }
 
-                // Apply RaBitQ corrections + update argmin
+                // Apply RaBitQ corrections + update 
+                {
+                    SKM_PROFILE_SCOPE("RaBitQ::ApplyCorrections");
 #pragma omp parallel for num_threads(g_n_threads)
-                for (size_t r = 0; r < batch_nx; ++r) {
-                    const size_t idx = i + r;
-                    const uint32_t* dq_row = dot_qo_buf.data() + r * batch_ny;
+                    for (size_t r = 0; r < batch_nx; ++r) {
+                        const size_t idx = i + r;
+                        const uint32_t* dq_row = dot_qo_buf.data() + r * batch_ny;
 
-                    for (size_t c = 0; c < batch_ny; ++c) {
-                        const size_t cidx = j + c;
-                        const float final_dot =
-                            c1[cidx] * static_cast<float>(dq_row[c]) +
-                            c2[cidx] * static_cast<float>(sum_q[idx]) -
-                            c34[cidx];
-                        const float dist =
-                            or_c_l2sqr[idx] + qr_to_c_l2sqr[cidx] -
-                            2.0f * dp_mult[idx] * final_dot;
+                        for (size_t c = 0; c < batch_ny; ++c) {
+                            const size_t cidx = j + c;
+                            const float final_dot =
+                                c1[cidx] * static_cast<float>(dq_row[c]) +
+                                c2[cidx] * static_cast<float>(sum_q[idx]) -
+                                c34[cidx];
+                            const float dist =
+                                or_c_l2sqr[idx] + qr_to_c_l2sqr[cidx] -
+                                2.0f * dp_mult[idx] * final_dot;
 
-                        if (dist < out_distances[idx]) {
-                            out_distances[idx] = dist;
-                            out_knn[idx] = static_cast<uint32_t>(cidx);
+                            if (dist < out_distances[idx]) {
+                                out_distances[idx] = dist;
+                                out_knn[idx] = static_cast<uint32_t>(cidx);
+                            }
                         }
                     }
                 }
@@ -410,6 +419,7 @@ class RaBitQGemmQuantizer : public IQuantizer<q> {
         const uint8_t* codes, size_t n,
         uint32_t* sum_q, float* or_c_l2sqr, float* dp_mult
     ) const {
+        SKM_PROFILE_SCOPE("RaBitQ::PrecomputeCodeFactors");
 #pragma omp parallel for num_threads(g_n_threads)
         for (size_t i = 0; i < n; ++i) {
             const uint8_t* code = codes + i * faiss_code_size_;
@@ -439,6 +449,7 @@ class RaBitQGemmQuantizer : public IQuantizer<q> {
         uint8_t* query_planes,
         float* c1, float* c2, float* c34, float* qr_to_c_l2sqr
     ) const {
+        SKM_PROFILE_SCOPE("RaBitQ::QuantizeCentroids");
         const float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(d));
         const float max_val = static_cast<float>((1 << qb_) - 1);
 
