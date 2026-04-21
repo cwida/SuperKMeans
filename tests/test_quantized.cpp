@@ -294,6 +294,92 @@ TEST_F(SuperKMeansU8Test, RerankingMatchesOrImproves) {
         << ") is unexpectedly worse than non-reranked (" << wcss_no_rerank << ")";
 }
 
+// ── SuperKMeans<u8> SQ8 pruning integration tests ──
+// These tests require d >= 128 and k > 256 to enter the pruning code path
+// (RunIteration<false> via quantizer->FindNearestNeighborWithPruning).
+
+class SuperKMeansU8PruningTest : public ::testing::Test {
+  protected:
+    void SetUp() override {}
+};
+
+TEST_F(SuperKMeansU8PruningTest, SLOW_PruningConverges) {
+    const size_t n = 10000;
+    const size_t d = 128;
+    const size_t n_clusters = 300;
+
+    std::vector<float> data = MakeBlobs(n, d, n_clusters);
+
+    SuperKMeansConfig config;
+    config.iters = 5;
+    config.verbose = false;
+    config.quantizer_type = QuantizerType::sq8;
+    config.use_blas_only = false;
+
+    auto kmeans = SuperKMeans<Quantization::u8, DistanceFunction::l2>(n_clusters, d, config);
+    auto centroids = kmeans.Train(data.data(), n);
+
+    EXPECT_TRUE(kmeans.IsTrained());
+    EXPECT_EQ(centroids.size(), n_clusters * d);
+
+    auto stats = kmeans.GetIterationStats();
+    ASSERT_GE(stats.size(), 2u);
+    // First iteration is always GEMM-only, subsequent should use pruning
+    EXPECT_TRUE(stats[0].is_gemm_only);
+    EXPECT_FALSE(stats[1].is_gemm_only);
+    // Objective should improve (decrease) across iterations
+    EXPECT_LT(stats.back().objective, stats.front().objective);
+}
+
+TEST_F(SuperKMeansU8PruningTest, SLOW_PruningMatchesGemmOnly) {
+    const size_t n = 10000;
+    const size_t d = 128;
+    const size_t n_clusters = 300;
+
+    std::vector<float> data = MakeBlobs(n, d, n_clusters);
+
+    // Train with GEMM-only (no pruning)
+    SuperKMeansConfig config_gemm;
+    config_gemm.iters = 5;
+    config_gemm.verbose = false;
+    config_gemm.quantizer_type = QuantizerType::sq8;
+    config_gemm.use_blas_only = true;
+    auto kmeans_gemm = SuperKMeans<Quantization::u8, DistanceFunction::l2>(n_clusters, d, config_gemm);
+    auto centroids_gemm = kmeans_gemm.Train(data.data(), n);
+
+    // Train with pruning
+    SuperKMeansConfig config_prune;
+    config_prune.iters = 5;
+    config_prune.verbose = false;
+    config_prune.quantizer_type = QuantizerType::sq8;
+    config_prune.use_blas_only = false;
+    auto kmeans_prune = SuperKMeans<Quantization::u8, DistanceFunction::l2>(n_clusters, d, config_prune);
+    auto centroids_prune = kmeans_prune.Train(data.data(), n);
+
+    auto compute_wcss = [&](SuperKMeans<Quantization::u8, DistanceFunction::l2>& km,
+                            const std::vector<float>& ctrs) {
+        auto assignments = km.Assign(data.data(), ctrs.data(), n, n_clusters);
+        double wcss = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+            uint32_t c = assignments[i];
+            for (size_t j = 0; j < d; ++j) {
+                double diff = data[i * d + j] - ctrs[c * d + j];
+                wcss += diff * diff;
+            }
+        }
+        return wcss;
+    };
+
+    double wcss_gemm = compute_wcss(kmeans_gemm, centroids_gemm);
+    double wcss_prune = compute_wcss(kmeans_prune, centroids_prune);
+
+    // Pruning should give comparable WCSS (within 20% of GEMM-only)
+    EXPECT_LT(wcss_prune, wcss_gemm * 1.2)
+        << "Pruning WCSS (" << wcss_prune
+        << ") is too much worse than GEMM-only WCSS (" << wcss_gemm << ")";
+    EXPECT_GT(wcss_prune, 0.0);
+}
+
 // ── SQ4Quantizer unit tests ──
 
 class SQ4QuantizerTest : public ::testing::Test {

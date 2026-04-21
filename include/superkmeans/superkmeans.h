@@ -726,6 +726,11 @@ class SuperKMeans {
     /** @brief Returns the sampling fraction used during training. */
     [[nodiscard]] float GetSamplingFraction() const noexcept { return config.sampling_fraction; }
 
+    /** @brief Returns the per-iteration statistics collected during training. */
+    [[nodiscard]] const std::vector<SuperKMeansIterationStats>& GetIterationStats() const noexcept {
+        return iteration_stats;
+    }
+
     /** @brief Returns a pointer to the distances array. */
     [[nodiscard]] distance_t* GetDistancesPointer() { return distances.get(); }
 
@@ -782,135 +787,6 @@ class SuperKMeans {
     }
 
   protected:
-    /**
-     * @brief Performs first assignment and centroid update using FULL GEMM.
-     *
-     * Used for the first iteration where full distance computation via GEMM is used
-     * (no pruning). Assigns each data point to its nearest centroid, then updates
-     * centroid positions.
-     *
-     * @param data Data matrix (row-major, n_samples × d)
-     * @param rotated_initial_centroids Initial centroids (row-major, n_clusters × d)
-     * @param tmp_distances_buf Workspace buffer for distance computations
-     * @param n_samples Number of vectors in the data
-     * @param n_clusters Number of centroids
-     */
-    void FirstAssignAndUpdateCentroids(
-        const float* SKM_RESTRICT data,
-        const float* SKM_RESTRICT rotated_initial_centroids,
-        distance_t* SKM_RESTRICT tmp_distances_buf,
-        const size_t n_samples,
-        const size_t n_clusters
-    ) {
-        batch_computer::FindNearestNeighbor(
-            data,
-            rotated_initial_centroids,
-            n_samples,
-            n_clusters,
-            d,
-            data_norms.get(),
-            centroid_norms.get(),
-            assignments.get(),
-            distances.get(),
-            tmp_distances_buf
-        );
-        ResetCentroids(n_clusters);
-    }
-
-    /**
-     * @brief Quantized assignment using the quantizer's GEMM kernel.
-     *
-     * Encodes current centroids to quantized form, computes norms via the quantizer,
-     * and finds nearest neighbors in the quantized domain.
-     *
-     * @param tmp_distances_buf Workspace buffer for distance computations
-     * @param n_samples Number of vectors in the data
-     * @param n_clusters Number of centroids
-     */
-    void QuantizedFirstAssignAndUpdateCentroids(
-        const float* SKM_RESTRICT data_to_cluster,
-        distance_t* SKM_RESTRICT tmp_distances_buf,
-        const size_t n_samples,
-        const size_t n_clusters
-    ) {
-        quantizer->Encode(prev_centroids.get(), quantized_centroids.get(), n_clusters, d);
-        quantizer->ComputeNorms(quantized_centroids.get(), n_clusters, d, centroid_norms.get());
-        if (effective_rerank_k > 0) {
-            quantizer->FindNearestNeighborWithReranking(
-                quantized_data.get(),
-                quantized_centroids.get(),
-                data_to_cluster,
-                prev_centroids.get(),
-                n_samples,
-                n_clusters,
-                d,
-                data_norms.get(),
-                centroid_norms.get(),
-                effective_rerank_k,
-                assignments.get(),
-                distances.get(),
-                tmp_distances_buf
-            );
-        } else {
-            quantizer->FindNearestNeighbor(
-                quantized_data.get(),
-                quantized_centroids.get(),
-                data_to_cluster,
-                prev_centroids.get(),
-                n_samples,
-                n_clusters,
-                d,
-                data_norms.get(),
-                centroid_norms.get(),
-                assignments.get(),
-                distances.get(),
-                tmp_distances_buf
-            );
-        }
-        ResetCentroids(n_clusters);
-    }
-
-    /**
-     * @brief Performs assignment and centroid update using GEMM+PRUNING.
-     *
-     * Uses GEMM for partial distance computation (first partial_d dimensions),
-     * then PRUNING for completing distances for remaining candidates.
-     *
-     * @param data Data matrix (row-major, n_samples × d)
-     * @param centroids Centroids to use for GEMM distance computation (row-major)
-     * @param partial_centroid_norms Partial norms of centroids (first partial_d dims)
-     * @param tmp_distances_buf Workspace buffer for distance computations
-     * @param pdx_centroids PDX-layout centroids for PRUNING
-     * @param out_not_pruned_counts Output for pruning statistics
-     */
-    void AssignAndUpdateCentroids(
-        const float* SKM_RESTRICT data,
-        const float* SKM_RESTRICT centroids,
-        const float* SKM_RESTRICT partial_centroid_norms,
-        distance_t* SKM_RESTRICT tmp_distances_buf,
-        const layout_t& pdx_centroids,
-        size_t* out_not_pruned_counts,
-        const size_t n_samples,
-        const size_t n_clusters
-    ) {
-        batch_computer::FindNearestNeighborWithPruning(
-            data,
-            centroids,
-            n_samples,
-            n_clusters,
-            d,
-            data_norms.get(),
-            partial_centroid_norms,
-            assignments.get(),
-            distances.get(),
-            tmp_distances_buf,
-            pdx_centroids,
-            partial_d,
-            out_not_pruned_counts
-        );
-        ResetCentroids(n_clusters);
-    }
-
     /**
      * @brief Updates centroids by accumulating assigned vectors.
      *
@@ -972,8 +848,8 @@ class SuperKMeans {
      * @brief Runs a single K-Means iteration with either GEMM-only or GEMM+PRUNING strategy.
      *
      *
-     * @tparam GEMM_ONLY If true, uses full GEMM (FirstAssignAndUpdateCentroids).
-     *                   If false, uses GEMM+PRUNING (AssignAndUpdateCentroids with TunePartialD).
+     * @tparam GEMM_ONLY If true, uses full GEMM 
+     *                   If false, uses GEMM+PRUNING (with TunePartialD).
      *
      * @param data_to_cluster Training data (rotated, row-major)
      * @param tmp_distances_buf Workspace buffer for distance computations

@@ -289,7 +289,7 @@ TEST_P(WCSSTest, BlasOnly_MonotonicallyDecreases_AndMatchesGroundTruth) {
     }
 
     // Verify that all iterations after the first use GEMM-only when use_blas_only=true
-    // (First iteration uses FirstAssignAndUpdateCentroids which doesn't set is_gemm_only)
+    // (First iteration doesn't set is_gemm_only)
     if (stats.size() > 1) {
         for (size_t i = 1; i < stats.size(); ++i) {
             EXPECT_TRUE(stats[i].is_gemm_only)
