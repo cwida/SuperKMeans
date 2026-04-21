@@ -166,6 +166,8 @@ class SQ8Quantizer : public IQuantizer<q> {
         float* out_distances,
         float* tmp_buf
     ) const override {
+        SKM_PROFILE_SCOPE("search");
+        SKM_PROFILE_SCOPE("search/1st_blas");
         assert(fitted);
         (void)x_float;
         (void)y_float;
@@ -260,6 +262,8 @@ class SQ8Quantizer : public IQuantizer<q> {
         float* out_distances,
         float* tmp_buf
     ) const override {
+        SKM_PROFILE_SCOPE("search");
+        SKM_PROFILE_SCOPE("search/rerank");
         assert(fitted);
         (void)norms_x;
         (void)norms_y;
@@ -439,6 +443,7 @@ class SQ8Quantizer : public IQuantizer<q> {
         uint32_t partial_d,
         size_t* out_not_pruned_counts
     ) const override {
+        SKM_PROFILE_SCOPE("search");
         assert(fitted);
         (void) x_float;
         (void) y_float;
@@ -466,82 +471,89 @@ class SQ8Quantizer : public IQuantizer<q> {
             for (size_t j = 0; j < n_y; j += Y_BATCH_SIZE) {
                 const size_t batch_n_y = std::min(Y_BATCH_SIZE, n_y - j);
 
-                // Pack y for partial_d dimensions (stride = d for full vectors)
-                const size_t packed_size = nk_dots_packed_size_u8(batch_n_y, partial_d);
-                if (packed_size > packed_buf.size()) packed_buf.resize(packed_size);
-                nk_dots_pack_u8(y + j * d, batch_n_y, partial_d, d, packed_buf.data());
-
-                const size_t c_stride = batch_n_y * sizeof(uint32_t);
-
-                // Compute partial u8 dot products via NumKong
-#pragma omp parallel num_threads(g_n_threads)
                 {
-                    nk_configure_thread(nk_capabilities());
-                    int tid = omp_get_thread_num();
-                    int nt = omp_get_num_threads();
-                    size_t rows_per_t = (batch_n_x + nt - 1) / nt;
-                    size_t start = tid * rows_per_t;
-                    size_t count = std::min(rows_per_t, batch_n_x - start);
-                    if (start < batch_n_x && count > 0) {
-                        nk_dots_packed_u8(
-                            x + (i + start) * d,
-                            packed_buf.data(),
-                            pruning_dots_buf.data() + start * batch_n_y,
-                            count,
-                            batch_n_y,
-                            partial_d,
-                            d,
-                            c_stride
-                        );
+                    SKM_PROFILE_SCOPE("search/blas");
+                    // Pack y for partial_d dimensions (stride = d for full vectors)
+                    const size_t packed_size = nk_dots_packed_size_u8(batch_n_y, partial_d);
+                    if (packed_size > packed_buf.size()) packed_buf.resize(packed_size);
+                    nk_dots_pack_u8(y + j * d, batch_n_y, partial_d, d, packed_buf.data());
+
+                    const size_t c_stride = batch_n_y * sizeof(uint32_t);
+
+                    // Compute partial u8 dot products via NumKong
+#pragma omp parallel num_threads(g_n_threads)
+                    {
+                        nk_configure_thread(nk_capabilities());
+                        int tid = omp_get_thread_num();
+                        int nt = omp_get_num_threads();
+                        size_t rows_per_t = (batch_n_x + nt - 1) / nt;
+                        size_t start = tid * rows_per_t;
+                        size_t count = std::min(rows_per_t, batch_n_x - start);
+                        if (start < batch_n_x && count > 0) {
+                            nk_dots_packed_u8(
+                                x + (i + start) * d,
+                                packed_buf.data(),
+                                pruning_dots_buf.data() + start * batch_n_y,
+                                count,
+                                batch_n_y,
+                                partial_d,
+                                d,
+                                c_stride
+                            );
+                        }
                     }
                 }
 
-                // Convert dots to L2² and run PDXearch per query vector
+                {
+                    SKM_PROFILE_SCOPE("search/pdx");
+                    // Convert dots to L2² and run PDXearch per query vector
 #if defined(__clang__)
 #pragma omp parallel for num_threads(g_n_threads) schedule(dynamic, 8)
 #else
 #pragma omp parallel for num_threads(g_n_threads)
 #endif
-                for (size_t r = 0; r < batch_n_x; ++r) {
-                    const size_t i_idx = i + r;
-                    uint32_t* dots_row = pruning_dots_buf.data() + r * batch_n_y;
+                    for (size_t r = 0; r < batch_n_x; ++r) {
+                        const size_t i_idx = i + r;
+                        uint32_t* dots_row = pruning_dots_buf.data() + r * batch_n_y;
 
-                    // Convert dot products to L2²: l2 = norm_x + norm_y - 2*dot
-                    const uint32_t nx = cached_data_partial_norms[i_idx];
-                    SKM_VECTORIZE_LOOP
-                    for (size_t c = 0; c < batch_n_y; ++c) {
-                        dots_row[c] = nx + cached_centroid_partial_norms[j + c] - 2 * dots_row[c];
-                    }
+                        // Convert dot products to L2²: l2 = norm_x + norm_y - 2*dot
+                        const uint32_t nx = cached_data_partial_norms[i_idx];
+                        SKM_VECTORIZE_LOOP
+                        for (size_t c = 0; c < batch_n_y; ++c) {
+                            dots_row[c] =
+                                nx + cached_centroid_partial_norms[j + c] - 2 * dots_row[c];
+                        }
 
-                    // Initial threshold: compute u8 L2² to previous assignment, scale to float
-                    const auto prev_assignment = out_knn[i_idx];
-                    float dist_to_prev_centroid;
-                    if (j == 0) {
-                        uint32_t u8_dist = u8_computer::Horizontal(
-                            x + i_idx * d, y + prev_assignment * d, d
-                        );
-                        dist_to_prev_centroid = static_cast<float>(u8_dist) * inv_scale_sq;
-                    } else {
-                        dist_to_prev_centroid = out_distances[i_idx];
-                    }
-
-                    // PDXearch with uint32_t partial distances
-                    size_t local_not_pruned = 0;
-                    auto assignment =
-                        pdx_centroids.searcher
-                            ->Top1PartialSearchWithThresholdAndPartialDistances(
-                                x + i_idx * d,
-                                dist_to_prev_centroid,
-                                prev_assignment,
-                                dots_row,
-                                partial_d,
-                                j / VECTOR_CHUNK_SIZE,
-                                (j + Y_BATCH_SIZE) / VECTOR_CHUNK_SIZE,
-                                local_not_pruned
+                        // Initial threshold: compute u8 L2² to previous assignment, scale to float
+                        const auto prev_assignment = out_knn[i_idx];
+                        float dist_to_prev_centroid;
+                        if (j == 0) {
+                            uint32_t u8_dist = u8_computer::Horizontal(
+                                x + i_idx * d, y + prev_assignment * d, d
                             );
-                    out_not_pruned_counts[i_idx] += local_not_pruned;
-                    out_knn[i_idx] = assignment.index;
-                    out_distances[i_idx] = assignment.distance;
+                            dist_to_prev_centroid = static_cast<float>(u8_dist) * inv_scale_sq;
+                        } else {
+                            dist_to_prev_centroid = out_distances[i_idx];
+                        }
+
+                        // PDXearch with uint32_t partial distances
+                        size_t local_not_pruned = 0;
+                        auto assignment =
+                            pdx_centroids.searcher
+                                ->Top1PartialSearchWithThresholdAndPartialDistances(
+                                    x + i_idx * d,
+                                    dist_to_prev_centroid,
+                                    prev_assignment,
+                                    dots_row,
+                                    partial_d,
+                                    j / VECTOR_CHUNK_SIZE,
+                                    (j + Y_BATCH_SIZE) / VECTOR_CHUNK_SIZE,
+                                    local_not_pruned
+                                );
+                        out_not_pruned_counts[i_idx] += local_not_pruned;
+                        out_knn[i_idx] = assignment.index;
+                        out_distances[i_idx] = assignment.distance;
+                    }
                 }
             }
         }
