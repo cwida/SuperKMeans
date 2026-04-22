@@ -75,7 +75,7 @@ int main(int argc, char* argv[]) {
     config.early_termination = false;
     config.sampling_fraction = sampling_fraction;
     config.tol = 1e-3f;
-    config.quantizer_type = skmeans::QuantizerType::sq4;
+    config.use_blas_only = false;
 
     auto is_angular = std::find(
         bench_utils::ANGULAR_DATASETS.begin(), bench_utils::ANGULAR_DATASETS.end(), dataset
@@ -86,7 +86,7 @@ int main(int argc, char* argv[]) {
     }
 
     auto kmeans =
-        skmeans::SuperKMeans<skmeans::Quantization::u8, skmeans::DistanceFunction::l2>(
+        skmeans::SuperKMeans<skmeans::Quantization::u4, skmeans::DistanceFunction::l2>(
             n_clusters, d, config
         );
     bench_utils::TicToc timer;
@@ -108,13 +108,13 @@ int main(int argc, char* argv[]) {
 
     std::cout << "\n--- Assign() cluster balance ---" << std::endl;
     auto balance_stats =
-        skmeans::SuperKMeans<skmeans::Quantization::u8, skmeans::DistanceFunction::l2>::
+        skmeans::SuperKMeans<skmeans::Quantization::u4, skmeans::DistanceFunction::l2>::
             GetClustersBalanceStats(assignments.data(), n, n_clusters);
     balance_stats.print();
 
     std::cout << "--- QuantizedAssign() cluster balance ---" << std::endl;
     auto q_balance_stats =
-        skmeans::SuperKMeans<skmeans::Quantization::u8, skmeans::DistanceFunction::l2>::
+        skmeans::SuperKMeans<skmeans::Quantization::u4, skmeans::DistanceFunction::l2>::
             GetClustersBalanceStats(q_assignments.data(), n, n_clusters);
     q_balance_stats.print();
 

@@ -108,6 +108,8 @@ static inline constexpr size_t Y_BATCH_SIZE = 1024;
 
 static inline constexpr size_t VECTOR_CHUNK_SIZE = Y_BATCH_SIZE;
 
+static inline constexpr size_t SKM_MAX_DIMS = 16384;
+
 static inline constexpr size_t RECALL_CONVERGENCE_PATIENCE = 2;
 static inline constexpr float CENTROID_PERTURBATION_EPS = 1.0f / 1024.0f;
 // Epsilon parameter of ADSampling (Reference: https://dl.acm.org/doi/abs/10.1145/3589282)
@@ -126,7 +128,7 @@ static constexpr uint32_t AlignValue(T n) {
 
 enum class DistanceFunction : uint8_t { l2, dp };
 
-enum class Quantization : uint8_t { f32, u8, f16, bf16 };
+enum class Quantization : uint8_t { f32, u8, u4, f16, bf16 };
 
 enum class QuantizerType : uint8_t { none, sq8, sq4, rabitq, rabitq_gemm };
 
@@ -148,6 +150,10 @@ struct PDXDistanceType {
 };
 template <>
 struct PDXDistanceType<Quantization::u8> {
+    using type = uint32_t;
+};
+template <>
+struct PDXDistanceType<Quantization::u4> {
     using type = uint32_t;
 };
 template <Quantization q>
@@ -196,8 +202,8 @@ template <Quantization q>
 struct Cluster {
     uint32_t num_embeddings{};
     uint32_t* indices = nullptr;
-    skmeans_value_t<Quantization::u8>* data = nullptr;
-    skmeans_value_t<Quantization::u8>* aux_vertical_dimensions_in_horizontal_layout =
+    skmeans_value_t<q>* data = nullptr;
+    skmeans_value_t<q>* aux_vertical_dimensions_in_horizontal_layout =
         nullptr; // Contains the vertical dimensions minus partial_d in a horizontal layout, aka the
                  // ones not visited by GEMM
 };

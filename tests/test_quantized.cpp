@@ -35,7 +35,7 @@ class SQ8QuantizerTest : public ::testing::Test {
 };
 
 TEST_F(SQ8QuantizerTest, FitEncodeDecode_Roundtrip) {
-    SQ8Quantizer<Quantization::u8> quantizer;
+    SQ8Quantizer quantizer;
     EXPECT_FALSE(quantizer.IsFitted());
 
     quantizer.Fit(data.data(), n, d);
@@ -57,7 +57,7 @@ TEST_F(SQ8QuantizerTest, FitEncodeDecode_Roundtrip) {
 }
 
 TEST_F(SQ8QuantizerTest, Norms_ConsistentWithDistances) {
-    SQ8Quantizer<Quantization::u8> quantizer;
+    SQ8Quantizer quantizer;
     quantizer.Fit(data.data(), n, d);
 
     std::vector<uint8_t> encoded(n * d);
@@ -87,7 +87,7 @@ TEST_F(SQ8QuantizerTest, Norms_ConsistentWithDistances) {
 }
 
 TEST_F(SQ8QuantizerTest, FindNearestNeighbor_MatchesBruteForce) {
-    SQ8Quantizer<Quantization::u8> quantizer;
+    SQ8Quantizer quantizer;
     quantizer.Fit(data.data(), n, d);
 
     // Use first 50 vectors as "centroids", rest as queries
@@ -400,13 +400,16 @@ class SQ4QuantizerTest : public ::testing::Test {
 };
 
 TEST_F(SQ4QuantizerTest, FitEncodeDecode_Roundtrip) {
-    SQ4Quantizer<Quantization::u8> quantizer;
+    SQ4Quantizer quantizer;
     EXPECT_FALSE(quantizer.IsFitted());
 
     quantizer.Fit(data.data(), n, d);
     EXPECT_TRUE(quantizer.IsFitted());
 
-    std::vector<uint8_t> encoded(n * d);
+    const size_t code_size = quantizer.CodeSize(d); // d/2
+    EXPECT_EQ(code_size, d / 2);
+
+    std::vector<uint8_t> encoded(n * code_size);
     quantizer.Encode(data.data(), encoded.data(), n, d);
 
     std::vector<float> decoded(n * d);
@@ -421,56 +424,74 @@ TEST_F(SQ4QuantizerTest, FitEncodeDecode_Roundtrip) {
     }
 }
 
-TEST_F(SQ4QuantizerTest, EncodedValuesInRange) {
-    SQ4Quantizer<Quantization::u8> quantizer;
+TEST_F(SQ4QuantizerTest, EncodedNibblesInRange) {
+    SQ4Quantizer quantizer;
     quantizer.Fit(data.data(), n, d);
 
-    std::vector<uint8_t> encoded(n * d);
+    const size_t code_size = quantizer.CodeSize(d);
+    std::vector<uint8_t> encoded(n * code_size);
     quantizer.Encode(data.data(), encoded.data(), n, d);
 
-    for (size_t i = 0; i < n * d; ++i) {
-        EXPECT_LE(encoded[i], 15u) << "encoded value out of [0,15] range at index " << i;
+    // Each byte contains two packed nibbles, both must be in [0,15]
+    for (size_t i = 0; i < n * code_size; ++i) {
+        uint8_t lo = encoded[i] & 0x0F;
+        uint8_t hi = (encoded[i] >> 4) & 0x0F;
+        EXPECT_LE(lo, 15u) << "low nibble out of range at packed index " << i;
+        EXPECT_LE(hi, 15u) << "high nibble out of range at packed index " << i;
     }
 }
 
-TEST_F(SQ4QuantizerTest, PackToU4x2_Roundtrip) {
-    SQ4Quantizer<Quantization::u8> quantizer;
+TEST_F(SQ4QuantizerTest, EncodeProducesValidU4x2) {
+    SQ4Quantizer quantizer;
     quantizer.Fit(data.data(), n, d);
 
-    std::vector<uint8_t> encoded(n * d);
+    const size_t code_size = quantizer.CodeSize(d);
+    std::vector<uint8_t> encoded(n * code_size);
     quantizer.Encode(data.data(), encoded.data(), n, d);
 
-    const size_t d_packed = d / 2;
-    std::vector<nk_u4x2_t> packed(n * d_packed);
-    SQ4Quantizer<Quantization::u8>::PackToU4x2(encoded.data(), packed.data(), n, d);
-
-    // Verify packing: low nibble = even dim, high nibble = odd dim
+    // Manually quantize a few rows and verify packed nibbles match
+    const auto& params = quantizer.GetParams();
     for (size_t row = 0; row < std::min(n, size_t{100}); ++row) {
-        for (size_t k = 0; k < d_packed; ++k) {
-            uint8_t lo = packed[row * d_packed + k] & 0x0F;
-            uint8_t hi = (packed[row * d_packed + k] >> 4) & 0x0F;
-            EXPECT_EQ(lo, encoded[row * d + 2 * k])
+        for (size_t k = 0; k < code_size; ++k) {
+            uint8_t lo = encoded[row * code_size + k] & 0x0F;
+            uint8_t hi = (encoded[row * code_size + k] >> 4) & 0x0F;
+
+            // Manually compute expected quantized values
+            float val_even = data[row * d + 2 * k];
+            float val_odd = data[row * d + 2 * k + 1];
+            int expected_lo = static_cast<int>(
+                std::round((val_even - params.quantization_base) * params.quantization_scale)
+            );
+            int expected_hi = static_cast<int>(
+                std::round((val_odd - params.quantization_base) * params.quantization_scale)
+            );
+            expected_lo = std::clamp(expected_lo, 0, 15);
+            expected_hi = std::clamp(expected_hi, 0, 15);
+
+            EXPECT_EQ(lo, static_cast<uint8_t>(expected_lo))
                 << "low nibble mismatch at row=" << row << " k=" << k;
-            EXPECT_EQ(hi, encoded[row * d + 2 * k + 1])
+            EXPECT_EQ(hi, static_cast<uint8_t>(expected_hi))
                 << "high nibble mismatch at row=" << row << " k=" << k;
         }
     }
 }
 
 TEST_F(SQ4QuantizerTest, FindNearestNeighbor_ReasonableAccuracy) {
-    SQ4Quantizer<Quantization::u8> quantizer;
+    SQ4Quantizer quantizer;
     quantizer.Fit(data.data(), n, d);
 
     size_t n_centroids = 50;
     size_t n_queries = 200;
 
-    std::vector<uint8_t> encoded_data(n * d);
+    const size_t code_size = quantizer.CodeSize(d); // d/2
+
+    std::vector<uint8_t> encoded_data(n * code_size);
     quantizer.Encode(data.data(), encoded_data.data(), n, d);
 
     std::vector<float> q_norms(n);
     quantizer.ComputeNorms(encoded_data.data(), n, d, q_norms.data());
 
-    const uint8_t* queries = encoded_data.data() + n_centroids * d;
+    const uint8_t* queries = encoded_data.data() + n_centroids * code_size;
     const uint8_t* centroids = encoded_data.data();
     const float* query_norms = q_norms.data() + n_centroids;
     const float* centroid_norms = q_norms.data();
@@ -518,14 +539,14 @@ TEST_F(SQ4QuantizerTest, FindNearestNeighbor_ReasonableAccuracy) {
         << ") is too low vs brute-force decoded reference";
 }
 
-// ── SuperKMeans<u8> with SQ4 integration tests ──
+// ── SuperKMeans<u4> with SQ4 integration tests ──
 
-class SuperKMeansU8SQ4Test : public ::testing::Test {
+class SuperKMeansU4SQ4Test : public ::testing::Test {
   protected:
     void SetUp() override {}
 };
 
-TEST_F(SuperKMeansU8SQ4Test, BasicTraining) {
+TEST_F(SuperKMeansU4SQ4Test, BasicTraining) {
     const size_t n = 2000;
     const size_t d = 64;
     const size_t n_clusters = 10;
@@ -535,9 +556,8 @@ TEST_F(SuperKMeansU8SQ4Test, BasicTraining) {
     SuperKMeansConfig config;
     config.iters = 10;
     config.verbose = false;
-    config.quantizer_type = QuantizerType::sq4;
 
-    auto kmeans = SuperKMeans<Quantization::u8, DistanceFunction::l2>(n_clusters, d, config);
+    auto kmeans = SuperKMeans<Quantization::u4, DistanceFunction::l2>(n_clusters, d, config);
 
     EXPECT_FALSE(kmeans.IsTrained());
     auto centroids = kmeans.Train(data.data(), n);
@@ -545,7 +565,7 @@ TEST_F(SuperKMeansU8SQ4Test, BasicTraining) {
     EXPECT_EQ(centroids.size(), n_clusters * d);
 }
 
-TEST_F(SuperKMeansU8SQ4Test, AllClustersUsed) {
+TEST_F(SuperKMeansU4SQ4Test, AllClustersUsed) {
     const size_t n = 5000;
     const size_t d = 128;
     const size_t n_clusters = 20;
@@ -555,9 +575,8 @@ TEST_F(SuperKMeansU8SQ4Test, AllClustersUsed) {
     SuperKMeansConfig config;
     config.iters = 15;
     config.verbose = false;
-    config.quantizer_type = QuantizerType::sq4;
 
-    auto kmeans = SuperKMeans<Quantization::u8, DistanceFunction::l2>(n_clusters, d, config);
+    auto kmeans = SuperKMeans<Quantization::u4, DistanceFunction::l2>(n_clusters, d, config);
     auto centroids = kmeans.Train(data.data(), n);
 
     auto assignments = kmeans.Assign(data.data(), centroids.data(), n, n_clusters);
@@ -568,7 +587,7 @@ TEST_F(SuperKMeansU8SQ4Test, AllClustersUsed) {
         << " but only " << used_clusters.size() << " were assigned.";
 }
 
-TEST_F(SuperKMeansU8SQ4Test, WCSSReasonable) {
+TEST_F(SuperKMeansU4SQ4Test, WCSSReasonable) {
     const size_t n = 3000;
     const size_t d = 64;
     const size_t n_clusters = 10;
@@ -586,8 +605,7 @@ TEST_F(SuperKMeansU8SQ4Test, WCSSReasonable) {
     SuperKMeansConfig config_sq4;
     config_sq4.iters = 15;
     config_sq4.verbose = false;
-    config_sq4.quantizer_type = QuantizerType::sq4;
-    auto kmeans_sq4 = SuperKMeans<Quantization::u8, DistanceFunction::l2>(n_clusters, d, config_sq4);
+    auto kmeans_sq4 = SuperKMeans<Quantization::u4, DistanceFunction::l2>(n_clusters, d, config_sq4);
     auto centroids_sq4 = kmeans_sq4.Train(data.data(), n);
 
     // Compute WCSS for both using f32 assignments
@@ -615,6 +633,87 @@ TEST_F(SuperKMeansU8SQ4Test, WCSSReasonable) {
         << "SQ4 WCSS (" << wcss_sq4 << ") is too much worse than f32 WCSS (" << wcss_f32 << ")";
 }
 
+// ── SuperKMeans<u4> SQ4 pruning integration tests ──
+
+class SuperKMeansU4PruningTest : public ::testing::Test {
+  protected:
+    void SetUp() override {}
+};
+
+TEST_F(SuperKMeansU4PruningTest, SLOW_PruningConverges) {
+    const size_t n = 10000;
+    const size_t d = 128;
+    const size_t n_clusters = 300;
+
+    std::vector<float> data = MakeBlobs(n, d, n_clusters);
+
+    SuperKMeansConfig config;
+    config.iters = 5;
+    config.verbose = false;
+    config.use_blas_only = false;
+
+    auto kmeans = SuperKMeans<Quantization::u4, DistanceFunction::l2>(n_clusters, d, config);
+    auto centroids = kmeans.Train(data.data(), n);
+
+    EXPECT_TRUE(kmeans.IsTrained());
+    EXPECT_EQ(centroids.size(), n_clusters * d);
+
+    auto stats = kmeans.GetIterationStats();
+    ASSERT_GE(stats.size(), 2u);
+    // First iteration is always GEMM-only, subsequent should use pruning
+    EXPECT_TRUE(stats[0].is_gemm_only);
+    EXPECT_FALSE(stats[1].is_gemm_only);
+    // Objective should improve (decrease) across iterations
+    EXPECT_LT(stats.back().objective, stats.front().objective);
+}
+
+TEST_F(SuperKMeansU4PruningTest, SLOW_PruningMatchesGemmOnly) {
+    const size_t n = 10000;
+    const size_t d = 128;
+    const size_t n_clusters = 300;
+
+    std::vector<float> data = MakeBlobs(n, d, n_clusters);
+
+    // Train with GEMM-only (no pruning)
+    SuperKMeansConfig config_gemm;
+    config_gemm.iters = 5;
+    config_gemm.verbose = false;
+    config_gemm.use_blas_only = true;
+    auto kmeans_gemm = SuperKMeans<Quantization::u4, DistanceFunction::l2>(n_clusters, d, config_gemm);
+    auto centroids_gemm = kmeans_gemm.Train(data.data(), n);
+
+    // Train with pruning
+    SuperKMeansConfig config_prune;
+    config_prune.iters = 5;
+    config_prune.verbose = false;
+    config_prune.use_blas_only = false;
+    auto kmeans_prune = SuperKMeans<Quantization::u4, DistanceFunction::l2>(n_clusters, d, config_prune);
+    auto centroids_prune = kmeans_prune.Train(data.data(), n);
+
+    auto compute_wcss = [&](SuperKMeans<Quantization::u4, DistanceFunction::l2>& km,
+                            const std::vector<float>& ctrs) {
+        auto assignments = km.Assign(data.data(), ctrs.data(), n, n_clusters);
+        double wcss = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+            uint32_t c = assignments[i];
+            for (size_t j = 0; j < d; ++j) {
+                double diff = data[i * d + j] - ctrs[c * d + j];
+                wcss += diff * diff;
+            }
+        }
+        return wcss;
+    };
+
+    double wcss_gemm = compute_wcss(kmeans_gemm, centroids_gemm);
+    double wcss_prune = compute_wcss(kmeans_prune, centroids_prune);
+
+    // Pruning should give comparable WCSS (within 20% of GEMM-only)
+    EXPECT_LT(wcss_prune, wcss_gemm * 1.2)
+        << "Pruning WCSS (" << wcss_prune
+        << ") is too much worse than GEMM-only WCSS (" << wcss_gemm << ")";
+    EXPECT_GT(wcss_prune, 0.0);
+}
+
 // ── RaBitQ (1-bit) quantizer tests ──
 
 #ifdef HAS_FAISS
@@ -637,7 +736,7 @@ class RaBitQQuantizerTest : public ::testing::Test {
 };
 
 TEST_F(RaBitQQuantizerTest, CodeSizeCorrect) {
-    RaBitQQuantizer<Quantization::u8> quantizer;
+    RaBitQQuantizer quantizer;
     // code_size = ceil(d/8) + 8 bytes of FactorsData
     EXPECT_EQ(quantizer.CodeSize(128), size_t{24}); // 16 + 8
     EXPECT_EQ(quantizer.CodeSize(64), size_t{16});  //  8 + 8
@@ -646,7 +745,7 @@ TEST_F(RaBitQQuantizerTest, CodeSizeCorrect) {
 }
 
 TEST_F(RaBitQQuantizerTest, FitEncodeDecode) {
-    RaBitQQuantizer<Quantization::u8> quantizer;
+    RaBitQQuantizer quantizer;
     EXPECT_FALSE(quantizer.IsFitted());
 
     quantizer.Fit(data.data(), n, d);
@@ -677,7 +776,7 @@ TEST_F(RaBitQQuantizerTest, FitEncodeDecode) {
 }
 
 TEST_F(RaBitQQuantizerTest, ComputeNormsPositive) {
-    RaBitQQuantizer<Quantization::u8> quantizer;
+    RaBitQQuantizer quantizer;
     quantizer.Fit(data.data(), n, d);
 
     const size_t code_size = quantizer.CodeSize(d);

@@ -112,6 +112,64 @@ class SIMDComputer<skmeans::DistanceFunction::l2, Quantization::f32> {
     };
 };
 
+template <>
+class SIMDComputer<skmeans::DistanceFunction::l2, Quantization::u4> {
+  public:
+    using distance_t = pdx_distance_t<Quantization::u4>;
+    using data_t = skmeans_value_t<Quantization::u4>;
+
+    /**
+     * @brief Computes L2² distance between two packed u4x2 vectors using AVX-512.
+     * Adapted from nk_sqeuclidean_u4_icelake in NumKong.
+     * @param vector1 Packed u4x2 input vector 1
+     * @param vector2 Packed u4x2 input vector 2
+     * @param num_packed_bytes Number of packed bytes (each byte = 2 dims)
+     * @return L2² distance as uint32_t
+     */
+    static distance_t Horizontal(
+        const data_t* SKM_RESTRICT vector1,
+        const data_t* SKM_RESTRICT vector2,
+        size_t num_packed_bytes
+    ) {
+        const __m512i nibble_mask = _mm512_set1_epi8(0x0F);
+        __m512i d2_i32x16 = _mm512_setzero_si512();
+        __m512i a_vec, b_vec;
+        __m512i a_lo, a_hi, b_lo, b_hi, diff_lo, diff_hi;
+
+    simsimd_l2sq_u4_ice_cycle:
+        if (num_packed_bytes < 64) {
+            const __mmask64 mask =
+                static_cast<__mmask64>(_bzhi_u64(0xFFFFFFFFFFFFFFFF, num_packed_bytes));
+            a_vec = _mm512_maskz_loadu_epi8(mask, vector1);
+            b_vec = _mm512_maskz_loadu_epi8(mask, vector2);
+            num_packed_bytes = 0;
+        } else {
+            a_vec = _mm512_loadu_si512(vector1);
+            b_vec = _mm512_loadu_si512(vector2);
+            vector1 += 64, vector2 += 64, num_packed_bytes -= 64;
+        }
+        // Extract nibbles
+        a_lo = _mm512_and_si512(a_vec, nibble_mask);
+        a_hi = _mm512_and_si512(_mm512_srli_epi16(a_vec, 4), nibble_mask);
+        b_lo = _mm512_and_si512(b_vec, nibble_mask);
+        b_hi = _mm512_and_si512(_mm512_srli_epi16(b_vec, 4), nibble_mask);
+        // Absolute diff via saturating sub: |a-b| = (a⊖b) | (b⊖a)
+        diff_lo = _mm512_or_si512(
+            _mm512_subs_epu8(a_lo, b_lo), _mm512_subs_epu8(b_lo, a_lo)
+        );
+        diff_hi = _mm512_or_si512(
+            _mm512_subs_epu8(a_hi, b_hi), _mm512_subs_epu8(b_hi, a_hi)
+        );
+        // Square and accumulate using DPBUSD (VNNI)
+        d2_i32x16 = _mm512_dpbusd_epi32(d2_i32x16, diff_lo, diff_lo);
+        d2_i32x16 = _mm512_dpbusd_epi32(d2_i32x16, diff_hi, diff_hi);
+        if (num_packed_bytes)
+            goto simsimd_l2sq_u4_ice_cycle;
+
+        return static_cast<distance_t>(_mm512_reduce_add_epi32(d2_i32x16));
+    };
+};
+
 template <Quantization q>
 class SIMDUtilsComputer {};
 
@@ -193,6 +251,10 @@ class SIMDUtilsComputer<Quantization::f32> {
             n_vectors_not_pruned += pruning_distances[vector_idx] < pruning_threshold;
         }
     }
+
+    static void PackU8ToU4x2(const uint8_t*, uint8_t*, size_t) {
+        assert(false && "PackU8ToU4x2 not applicable for f32");
+    }
 };
 
 template <>
@@ -234,6 +296,91 @@ class SIMDUtilsComputer<Quantization::u8> {
         for (; vector_idx < n_vectors; ++vector_idx) {
             pruning_positions[n_vectors_not_pruned] = vector_idx;
             n_vectors_not_pruned += pruning_distances[vector_idx] < pruning_threshold;
+        }
+    }
+
+    static void PackU8ToU4x2(const uint8_t*, uint8_t*, size_t) {
+        assert(false && "PackU8ToU4x2 not applicable for u8");
+    }
+};
+
+template <>
+class SIMDUtilsComputer<Quantization::u4> {
+  public:
+    using data_t = skmeans_value_t<Quantization::u4>;
+    using pdx_dist_t = pdx_distance_t<Quantization::u4>;
+
+    static void FlipSign(const data_t*, data_t*, const uint32_t*, size_t) {
+        assert(false && "FlipSign not supported for u4");
+    }
+
+    static void InitPositionsArray(
+        size_t n_vectors,
+        size_t& n_vectors_not_pruned,
+        uint32_t* pruning_positions,
+        pdx_dist_t pruning_threshold,
+        const pdx_dist_t* pruning_distances
+    ) {
+        n_vectors_not_pruned = 0;
+        size_t vector_idx = 0;
+        constexpr size_t k_simd_width = 16;
+        const size_t n_vectors_simd = (n_vectors / k_simd_width) * k_simd_width;
+        __m512i threshold_vec = _mm512_set1_epi32(static_cast<int32_t>(pruning_threshold));
+        for (; vector_idx < n_vectors_simd; vector_idx += k_simd_width) {
+            __m512i distances = _mm512_loadu_si512(pruning_distances + vector_idx);
+            __mmask16 cmp_mask = _mm512_cmplt_epu32_mask(distances, threshold_vec);
+            if (SKM_UNLIKELY(cmp_mask)) {
+                __m512i indices = _mm512_add_epi32(
+                    _mm512_set1_epi32(vector_idx),
+                    _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0)
+                );
+                _mm512_mask_compressstoreu_epi32(
+                    pruning_positions + n_vectors_not_pruned, cmp_mask, indices
+                );
+                n_vectors_not_pruned += _mm_popcnt_u32(cmp_mask);
+            }
+        }
+        for (; vector_idx < n_vectors; ++vector_idx) {
+            pruning_positions[n_vectors_not_pruned] = vector_idx;
+            n_vectors_not_pruned += pruning_distances[vector_idx] < pruning_threshold;
+        }
+    }
+
+    /**
+     * @brief Pack u8 values [0,15] into u4x2 format using AVX-512.
+     *
+     * Same maddubs approach as AVX2 but 512-bit wide.
+     * Processes 64 input bytes (32 output bytes) per iteration.
+     */
+    static void PackU8ToU4x2(const uint8_t* src, uint8_t* dst, size_t count) {
+        assert(count % 2 == 0);
+        size_t i = 0;
+        const __m512i mul = _mm512_set1_epi16(0x1001);
+        for (; i + 64 <= count; i += 64) {
+            __m512i v = _mm512_loadu_si512(src + i);
+            __m512i sum16 = _mm512_maddubs_epi16(v, mul);
+            __m512i packed = _mm512_packus_epi16(sum16, _mm512_setzero_si512());
+            packed = _mm512_permutexvar_epi64(
+                _mm512_set_epi64(7, 5, 3, 1, 6, 4, 2, 0), packed
+            );
+            _mm256_storeu_si256(
+                reinterpret_cast<__m256i*>(dst + i / 2),
+                _mm512_castsi512_si256(packed)
+            );
+        }
+        const __m256i mul256 = _mm256_set1_epi16(0x1001);
+        for (; i + 32 <= count; i += 32) {
+            __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
+            __m256i sum16 = _mm256_maddubs_epi16(v, mul256);
+            __m256i packed = _mm256_packus_epi16(sum16, _mm256_setzero_si256());
+            packed = _mm256_permute4x64_epi64(packed, 0b00001000);
+            _mm_storeu_si128(
+                reinterpret_cast<__m128i*>(dst + i / 2),
+                _mm256_castsi256_si128(packed)
+            );
+        }
+        for (; i + 2 <= count; i += 2) {
+            dst[i / 2] = (src[i] & 0x0F) | ((src[i + 1] & 0x0F) << 4);
         }
     }
 };

@@ -40,4 +40,19 @@ class IndexPDXIVF<Quantization::u8> {
     float inverse_scale_factor_squared{};
 };
 
+template <>
+class IndexPDXIVF<Quantization::u4> {
+  public:
+    using CLUSTER_TYPE = Cluster<Quantization::u4>;
+
+    uint32_t num_dimensions{};
+    uint32_t num_clusters{};
+    uint32_t num_horizontal_dimensions{};
+    uint32_t num_vertical_dimensions{};
+    std::vector<Cluster<Quantization::u4>> clusters;
+
+    float quantization_scale_squared{};
+    float inverse_scale_factor_squared{};
+};
+
 } // namespace skmeans

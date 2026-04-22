@@ -57,10 +57,14 @@ class PDXearch {
         DISTANCES_TYPE& pruning_threshold,
         uint32_t current_dimension_idx
     ) {
-        if constexpr (Q == Quantization::u8) {
+        // For u4, PDX operates in packed bytes (d/2). The pruner expects real
+        // dimension indices, so convert back to real 4-bit dimension count.
+        const uint32_t pruner_dim_idx =
+            (Q == Quantization::u4) ? current_dimension_idx * 2 : current_dimension_idx;
+        if constexpr (Q == Quantization::u8 || Q == Quantization::u4) {
             const float float_threshold =
                 pruner.template GetPruningThreshold<Q>(
-                    best_candidate, current_dimension_idx);
+                    best_candidate, pruner_dim_idx);
             const float scaled = float_threshold * pdx_data.quantization_scale_squared;
             pruning_threshold =
                 scaled >= static_cast<float>(std::numeric_limits<DISTANCES_TYPE>::max())
@@ -242,7 +246,7 @@ class PDXearch {
         for (size_t position_idx = 0; position_idx < n_vectors; ++position_idx) {
             size_t index = pruning_positions[position_idx];
             DISTANCES_TYPE current_distance = pruning_distances[index];
-            if constexpr (Q == Quantization::u8) {
+            if constexpr (Q == Quantization::u8 || Q == Quantization::u4) {
                 float real_distance =
                     static_cast<float>(current_distance) * pdx_data.inverse_scale_factor_squared;
                 if (real_distance < best_candidate.distance) {
@@ -298,7 +302,7 @@ class PDXearch {
         size_t current_cluster = 0;
 
         // Setup previous top1 — convert float threshold to DISTANCES_TYPE domain
-        if constexpr (q == Quantization::u8) {
+        if constexpr (q == Quantization::u8 || q == Quantization::u4) {
             const float scaled = prev_pruning_threshold * pdx_data.quantization_scale_squared;
             pruning_threshold =
                 scaled >= static_cast<float>(std::numeric_limits<DISTANCES_TYPE>::max())

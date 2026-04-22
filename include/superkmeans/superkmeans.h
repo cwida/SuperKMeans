@@ -124,6 +124,19 @@ class SuperKMeans {
     using VectorR = Eigen::VectorXf;
     using batch_computer = BatchComputer<alpha, q>;
 
+    /**
+     * @brief Converts a real dimension count to the packed dimension count used for PDX.
+     * For u4, two 4-bit values are packed per byte, so PDX operates on d/2 elements.
+     * For all other quantizations, dimensions map 1:1 to storage elements.
+     */
+    static constexpr size_t PDXDim(size_t dim) {
+        if constexpr (q == Quantization::u4) {
+            return dim / 2;
+        } else {
+            return dim;
+        }
+    }
+
   public:
     /**
      * @brief Constructor with custom configuration
@@ -140,6 +153,20 @@ class SuperKMeans {
         SKMEANS_ENSURE_POSITIVE(config.sampling_fraction);
         if (config.sampling_fraction > 1.0) {
             throw std::invalid_argument("sampling_fraction must be <= 1.0");
+        }
+        if (dimensionality > SKM_MAX_DIMS) {
+            throw std::invalid_argument(
+                "dimensionality exceeds SKM_MAX_DIMS (" + std::to_string(SKM_MAX_DIMS) +
+                "), got " + std::to_string(dimensionality)
+            );
+        }
+        if constexpr (q == Quantization::u4) {
+            if (dimensionality % 2 != 0) {
+                throw std::invalid_argument(
+                    "Quantization::u4 requires even dimensionality (got " +
+                    std::to_string(dimensionality) + ")"
+                );
+            }
         }
         n_threads = (config.n_threads == 0) ? omp_get_max_threads() : config.n_threads;
         g_n_threads = n_threads;
@@ -215,11 +242,19 @@ class SuperKMeans {
         not_pruned_counts.reserve(n_samples);
         std::vector<distance_t> tmp_distances_buf;
         tmp_distances_buf.reserve(X_BATCH_SIZE * Y_BATCH_SIZE);
-        vertical_d = PDXLayout<q, alpha>::GetDimensionSplit(d).vertical_d;
+        // For u4, PDX operates on d/2 packed bytes; convert split back to real dims
+        vertical_d = PDXLayout<q, alpha>::GetDimensionSplit(PDXDim(d)).vertical_d;
+        if constexpr (q == Quantization::u4) {
+            vertical_d *= 2;
+            assert(vertical_d % 2 == 0 && "vertical_d must be even for u4");
+        }
         partial_horizontal_centroids.reset(new centroid_value_t[n_clusters * vertical_d]);
 
         // Set partial_d (d') dynamically as half of vertical_d (around 12% of d)
         partial_d = std::max<uint32_t>(MIN_PARTIAL_D, vertical_d / 2);
+        if constexpr (q == Quantization::u4) {
+            partial_d = (partial_d + 1) & ~1u;
+        }
         if (partial_d > vertical_d) {
             partial_d = vertical_d;
         }
@@ -247,19 +282,19 @@ class SuperKMeans {
             !config.data_already_rotated
         );
 
-        // Create quantizer for all q types (F32Quantizer for f32, SQ8/SQ4/etc for u8)
+        // Create quantizer for all q types
         if constexpr (q == Quantization::f32) {
-            quantizer = std::make_unique<F32Quantizer<q>>();
+            quantizer = std::make_unique<F32Quantizer>();
+        } else if constexpr (q == Quantization::u4) {
+            quantizer = std::make_unique<SQ4Quantizer>();
         } else {
             if (config.quantizer_type == QuantizerType::sq8) {
-                quantizer = std::make_unique<SQ8Quantizer<q>>();
-            } else if (config.quantizer_type == QuantizerType::sq4) {
-                quantizer = std::make_unique<SQ4Quantizer<q>>();
+                quantizer = std::make_unique<SQ8Quantizer>();
 #ifdef HAS_FAISS
             } else if (config.quantizer_type == QuantizerType::rabitq) {
-                quantizer = std::make_unique<RaBitQQuantizer<q>>();
+                quantizer = std::make_unique<RaBitQQuantizer>();
             } else if (config.quantizer_type == QuantizerType::rabitq_gemm) {
-                quantizer = std::make_unique<RaBitQGemmQuantizer<q>>();
+                quantizer = std::make_unique<RaBitQGemmQuantizer>();
 #endif
             } else {
                 throw std::invalid_argument("Unsupported quantizer type for non-f32 quantization");
@@ -292,17 +327,22 @@ class SuperKMeans {
         // Setup quantized PDX layout for pruning (f32 PDX is set up in GenerateCentroids)
         if constexpr (q != Quantization::f32) {
             if (quantizer->SupportsPruning()) {
-                pdxified_quantized_centroids.reset(new vector_value_t[n_clusters * d]);
-                partial_hor_quantized_centroids.reset(new vector_value_t[n_clusters * vertical_d]);
+                pdxified_quantized_centroids.reset(new vector_value_t[n_clusters * PDXDim(d)]);
+                partial_hor_quantized_centroids.reset(
+                    new vector_value_t[n_clusters * PDXDim(vertical_d)]
+                );
                 PDXLayout<q, alpha>::template PDXify<false>(
-                    quantized_centroids.get(), pdxified_quantized_centroids.get(), n_clusters, d
+                    quantized_centroids.get(),
+                    pdxified_quantized_centroids.get(),
+                    n_clusters,
+                    PDXDim(d)
                 );
                 QuantizedCentroidsToAuxiliaryHorizontal(n_clusters);
                 centroids_pdx_wrapper = layout_t(
                     pdxified_quantized_centroids.get(),
                     *pruner,
                     n_clusters,
-                    d,
+                    PDXDim(d),
                     partial_hor_quantized_centroids.get()
                 );
             }
@@ -577,6 +617,9 @@ class SuperKMeans {
         std::vector<distance_t> tmp_distances_buf(X_BATCH_SIZE * Y_BATCH_SIZE);
 
         partial_d = std::max<uint32_t>(MIN_PARTIAL_D, vertical_d / 2);
+        if constexpr (q == Quantization::u4) {
+            partial_d = std::min((partial_d + 1) & ~1u, vertical_d);
+        }
 
         std::vector<size_t> not_pruned_counts;
         not_pruned_counts.reserve(n_vectors);
@@ -1069,7 +1112,10 @@ class SuperKMeans {
                     horizontal_centroids.get(), quantized_centroids.get(), n_clusters, d
                 );
                 PDXLayout<q, alpha>::template PDXify<false>(
-                    quantized_centroids.get(), pdxified_quantized_centroids.get(), n_clusters, d
+                    quantized_centroids.get(),
+                    pdxified_quantized_centroids.get(),
+                    n_clusters,
+                    PDXDim(d)
                 );
                 QuantizedCentroidsToAuxiliaryHorizontal(n_clusters);
             }
@@ -1327,11 +1373,13 @@ class SuperKMeans {
      * for the auxiliary horizontal layout used by PDXearch.
      */
     void QuantizedCentroidsToAuxiliaryHorizontal(const size_t n_clusters) {
+        const size_t row_stride = PDXDim(d);
+        const size_t copy_size = PDXDim(vertical_d);
         for (size_t i = 0; i < n_clusters; ++i) {
             memcpy(
-                partial_hor_quantized_centroids.get() + i * vertical_d,
-                quantized_centroids.get() + i * d,
-                vertical_d * sizeof(vector_value_t)
+                partial_hor_quantized_centroids.get() + i * copy_size,
+                quantized_centroids.get() + i * row_stride,
+                copy_size * sizeof(vector_value_t)
             );
         }
     }
@@ -1377,6 +1425,11 @@ class SuperKMeans {
             auto decrease =
                 static_cast<uint32_t>(partial_d * config.adjustment_factor_for_partial_d);
             partial_d = std::max(partial_d - std::max(decrease, 1u), MIN_PARTIAL_D);
+        }
+        // u4 packs two 4-bit values per byte; partial_d must be even
+        if constexpr (q == Quantization::u4) {
+            partial_d = (partial_d + 1) & ~1u;
+            partial_d = std::min(partial_d, vertical_d);
         }
         partial_d_changed = (old_partial_d != partial_d);
         return avg_not_pruned_pct;

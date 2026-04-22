@@ -31,16 +31,14 @@ struct ScalarQuantizationParams {
  * Global min/max quantization: q[i] = round((val[i] - base) * scale), clamped to [0, MAX_VALUE].
  * For L2 distance the base cancels: ||x-y||² = inv_scale² * Σ(x_q - y_q)².
  */
-template <Quantization q>
-class SQ8Quantizer : public IQuantizer<q> {
-    static_assert(q == Quantization::u8, "SQ8Quantizer only supports u8");
-
+class SQ8Quantizer : public IQuantizer<Quantization::u8> {
   public:
-    using quantized_t = typename IQuantizer<q>::quantized_t;
+    using quantized_t = IQuantizer::quantized_t;
 
     static constexpr uint8_t MAX_VALUE = 255;
 
     void Fit(const float* embeddings, size_t n, size_t d) override {
+        SKM_PROFILE_SCOPE("fitting");
         const size_t total_elements = n * d;
         params = ComputeQuantizationParams(embeddings, total_elements);
         // Pre-allocate scratch buffers (avoids expensive per-call allocation)
@@ -75,6 +73,7 @@ class SQ8Quantizer : public IQuantizer<q> {
         size_t n,
         size_t d
     ) const override {
+        SKM_PROFILE_SCOPE("encoding");
         assert(fitted);
         const float quantization_base = params.quantization_base;
         const float quantization_scale = params.quantization_scale;
@@ -104,6 +103,7 @@ class SQ8Quantizer : public IQuantizer<q> {
         size_t n,
         size_t d
     ) const override {
+        SKM_PROFILE_SCOPE("decoding");
         assert(fitted);
         const float quantization_base = params.quantization_base;
         const float inv_quantization_scale = params.inv_quantization_scale;
@@ -440,7 +440,7 @@ class SQ8Quantizer : public IQuantizer<q> {
         size_t d,
         uint32_t* out_knn,
         float* out_distances,
-        PDXLayout<q, DistanceFunction::l2>& pdx_centroids,
+        PDXLayout<Quantization::u8, DistanceFunction::l2>& pdx_centroids,
         uint32_t partial_d,
         size_t* out_not_pruned_counts
     ) const override {
@@ -454,7 +454,7 @@ class SQ8Quantizer : public IQuantizer<q> {
             "CacheCentroidPartialNorms must be called first"
         );
 
-        using u8_computer = DistanceComputer<DistanceFunction::l2, q>;
+        using u8_computer = DistanceComputer<DistanceFunction::l2, Quantization::u8>;
         const float inv_scale_sq =
             params.inv_quantization_scale * params.inv_quantization_scale;
 

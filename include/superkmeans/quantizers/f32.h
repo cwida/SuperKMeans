@@ -18,12 +18,9 @@ namespace skmeans {
  * enabling a unified code path for f32 and quantized types in SuperKMeans.
  * Encode/Decode are identity operations (memcpy when src != dst).
  */
-template <Quantization q>
-class F32Quantizer : public IQuantizer<q> {
-    static_assert(q == Quantization::f32, "F32Quantizer only supports f32");
-
+class F32Quantizer : public IQuantizer<Quantization::f32> {
   public:
-    using quantized_t = typename IQuantizer<q>::quantized_t; // float
+    using quantized_t = IQuantizer::quantized_t; // float
 
     using batch_computer = BatchComputer<DistanceFunction::l2, Quantization::f32>;
     using layout_t = PDXLayout<Quantization::f32, DistanceFunction::l2>;

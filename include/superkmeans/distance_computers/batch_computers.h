@@ -22,6 +22,9 @@ template <>
 class BatchComputer<DistanceFunction::l2, Quantization::u8> {};
 
 template <>
+class BatchComputer<DistanceFunction::l2, Quantization::u4> {};
+
+template <>
 class BatchComputer<DistanceFunction::l2, Quantization::f32> {
 
     using distance_t = skmeans_distance_t<Quantization::f32>;

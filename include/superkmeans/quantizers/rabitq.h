@@ -41,12 +41,9 @@ static_assert(sizeof(RaBitQFactors) == 8, "RaBitQFactors must match FAISS Factor
  * This gives per-data-point results (correct direction for k-means) while
  * keeping the N data points stored as compact 1-bit codes.
  */
-template <Quantization q>
-class RaBitQQuantizer : public IQuantizer<q> {
-    static_assert(q == Quantization::u8, "RaBitQQuantizer only supports u8");
-
+class RaBitQQuantizer : public IQuantizer<Quantization::u8> {
   public:
-    using quantized_t = typename IQuantizer<q>::quantized_t;
+    using quantized_t = IQuantizer::quantized_t;
 
     void Fit(const float* data, size_t n, size_t d) override {
         d_ = d;

@@ -47,6 +47,18 @@ class DistanceComputer<DistanceFunction::l2, Quantization::u8> {
     constexpr static auto Horizontal = computer::Horizontal;
 };
 
+template <>
+class DistanceComputer<DistanceFunction::l2, Quantization::u4> {
+#if !defined(__ARM_NEON) && !defined(__AVX2__) && !defined(__AVX512F__)
+    using computer = ScalarComputer<DistanceFunction::l2, Quantization::u4>;
+#else
+    using computer = SIMDComputer<DistanceFunction::l2, Quantization::u4>;
+#endif
+
+  public:
+    constexpr static auto Horizontal = computer::Horizontal;
+};
+
 template <Quantization q>
 class UtilsComputer {
 #if !defined(__ARM_NEON) && !defined(__AVX2__) && !defined(__AVX512F__)
@@ -58,6 +70,21 @@ class UtilsComputer {
   public:
     constexpr static auto FlipSign = computer::FlipSign;
     constexpr static auto InitPositionsArray = computer::InitPositionsArray;
+    constexpr static auto PackU8ToU4x2 = computer::PackU8ToU4x2;
+};
+
+template <>
+class UtilsComputer<Quantization::u4> {
+#if !defined(__ARM_NEON) && !defined(__AVX2__) && !defined(__AVX512F__)
+    using computer = ScalarUtilsComputer<Quantization::u4>;
+#else
+    using computer = SIMDUtilsComputer<Quantization::u4>;
+#endif
+
+  public:
+    constexpr static auto FlipSign = computer::FlipSign;
+    constexpr static auto InitPositionsArray = computer::InitPositionsArray;
+    constexpr static auto PackU8ToU4x2 = computer::PackU8ToU4x2;
 };
 
 } // namespace skmeans

@@ -32,12 +32,9 @@ namespace skmeans {
  * The binary GEMM computes popcount(code AND centroid_plane) for all N×K
  * pairs, then applies the RaBitQ correction formula.
  */
-template <Quantization q>
-class RaBitQGemmQuantizer : public IQuantizer<q> {
-    static_assert(q == Quantization::u8, "RaBitQGemmQuantizer only supports u8");
-
+class RaBitQGemmQuantizer : public IQuantizer<Quantization::u8> {
   public:
-    using quantized_t = typename IQuantizer<q>::quantized_t;
+    using quantized_t = IQuantizer::quantized_t;
 
     void Fit(const float* data, size_t n, size_t d) override {
         SKM_PROFILE_SCOPE("RaBitQ::Fit");

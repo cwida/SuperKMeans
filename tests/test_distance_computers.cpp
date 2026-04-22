@@ -350,4 +350,155 @@ TEST_F(DistanceComputerTest, InitPositionsArray_SIMD_MatchesScalar) {
     }
 }
 
+/**
+ * @brief Test that SIMD u8 L2 distance computation matches scalar reference
+ */
+TEST_F(DistanceComputerTest, SIMD_MatchesScalar_L2_U8) {
+    std::vector<size_t> dimensions = {1, 7, 8, 15, 16, 31, 32, 63, 64, 128, 256, 512, 1024};
+    const size_t n_pairs = 100;
+
+    std::mt19937 rng(42);
+    std::uniform_int_distribution<int> dist(0, 255);
+
+    for (size_t d : dimensions) {
+        SCOPED_TRACE("Testing d=" + std::to_string(d));
+
+        std::vector<uint8_t> vectors1(n_pairs * d), vectors2(n_pairs * d);
+        for (auto& v : vectors1) v = static_cast<uint8_t>(dist(rng));
+        for (auto& v : vectors2) v = static_cast<uint8_t>(dist(rng));
+
+        for (size_t i = 0; i < n_pairs; ++i) {
+            const uint8_t* v1 = vectors1.data() + i * d;
+            const uint8_t* v2 = vectors2.data() + i * d;
+
+            uint32_t scalar_dist =
+                skmeans::ScalarComputer<skmeans::DistanceFunction::l2, skmeans::Quantization::u8>::
+                    Horizontal(v1, v2, d);
+
+            uint32_t simd_dist = skmeans::DistanceComputer<
+                skmeans::DistanceFunction::l2,
+                skmeans::Quantization::u8>::Horizontal(v1, v2, d);
+
+            EXPECT_EQ(scalar_dist, simd_dist)
+                << "SIMD/Scalar mismatch at d=" << d << ", pair " << i;
+        }
+    }
+}
+
+/**
+ * @brief Test that SIMD u4 L2 distance computation matches scalar reference
+ */
+TEST_F(DistanceComputerTest, SIMD_MatchesScalar_L2_U4) {
+    std::vector<size_t> packed_byte_counts = {1, 2, 8, 15, 16, 31, 32, 63, 64, 128, 256, 512};
+    const size_t n_pairs = 100;
+
+    std::mt19937 rng(42);
+    std::uniform_int_distribution<int> dist(0, 255);
+
+    for (size_t num_packed_bytes : packed_byte_counts) {
+        SCOPED_TRACE("Testing num_packed_bytes=" + std::to_string(num_packed_bytes));
+
+        std::vector<uint8_t> vectors1(n_pairs * num_packed_bytes);
+        std::vector<uint8_t> vectors2(n_pairs * num_packed_bytes);
+        for (auto& v : vectors1) v = static_cast<uint8_t>(dist(rng));
+        for (auto& v : vectors2) v = static_cast<uint8_t>(dist(rng));
+
+        for (size_t i = 0; i < n_pairs; ++i) {
+            const uint8_t* v1 = vectors1.data() + i * num_packed_bytes;
+            const uint8_t* v2 = vectors2.data() + i * num_packed_bytes;
+
+            uint32_t scalar_dist =
+                skmeans::ScalarComputer<skmeans::DistanceFunction::l2, skmeans::Quantization::u4>::
+                    Horizontal(v1, v2, num_packed_bytes);
+
+            uint32_t simd_dist = skmeans::DistanceComputer<
+                skmeans::DistanceFunction::l2,
+                skmeans::Quantization::u4>::Horizontal(v1, v2, num_packed_bytes);
+
+            EXPECT_EQ(scalar_dist, simd_dist)
+                << "SIMD/Scalar mismatch at num_packed_bytes=" << num_packed_bytes << ", pair " << i;
+        }
+    }
+}
+
+/**
+ * @brief Test that SIMD u4 InitPositionsArray matches scalar reference
+ */
+TEST_F(DistanceComputerTest, InitPositionsArray_SIMD_MatchesScalar_U4) {
+    std::vector<size_t> vector_counts = {32, 64, 128, 256, 512, 1024};
+    std::vector<float> selectivities = {0.01f, 0.05f, 0.10f, 0.25f, 0.50f};
+    const uint32_t threshold = 100000;
+
+    std::mt19937 rng(42);
+
+    for (size_t n : vector_counts) {
+        for (float selectivity : selectivities) {
+            SCOPED_TRACE(
+                "Testing n=" + std::to_string(n) + ", selectivity=" + std::to_string(selectivity)
+            );
+
+            // Generate uint32_t distances with approximately `selectivity` fraction below threshold
+            std::vector<uint32_t> pruning_distances(n);
+            std::uniform_int_distribution<uint32_t> dist_above(threshold, threshold * 10);
+            std::uniform_int_distribution<uint32_t> dist_below(0, threshold - 1);
+            std::bernoulli_distribution below_thresh(selectivity);
+            for (size_t i = 0; i < n; ++i) {
+                pruning_distances[i] = below_thresh(rng) ? dist_below(rng) : dist_above(rng);
+            }
+
+            std::vector<uint32_t> scalar_positions(n), simd_positions(n);
+            size_t scalar_count = 0, simd_count = 0;
+
+            skmeans::ScalarUtilsComputer<skmeans::Quantization::u4>::InitPositionsArray(
+                n, scalar_count, scalar_positions.data(), threshold, pruning_distances.data()
+            );
+            skmeans::UtilsComputer<skmeans::Quantization::u4>::InitPositionsArray(
+                n, simd_count, simd_positions.data(), threshold, pruning_distances.data()
+            );
+
+            EXPECT_EQ(scalar_count, simd_count)
+                << "Count mismatch for n=" << n << ", selectivity=" << selectivity;
+
+            for (size_t i = 0; i < scalar_count; ++i) {
+                EXPECT_EQ(scalar_positions[i], simd_positions[i])
+                    << "Position mismatch at index " << i;
+            }
+        }
+    }
+}
+
+/**
+ * @brief Test that SIMD PackU8ToU4x2 matches scalar reference
+ */
+TEST_F(DistanceComputerTest, PackU8ToU4x2_SIMD_MatchesScalar) {
+    const std::vector<size_t> sizes = {2, 4, 14, 16, 30, 32, 62, 64, 100, 128, 256, 1024};
+
+    std::mt19937 rng(123);
+    std::uniform_int_distribution<int> dist(0, 15);
+
+    for (size_t count : sizes) {
+        SCOPED_TRACE("Testing count=" + std::to_string(count));
+
+        std::vector<uint8_t> src(count);
+        for (auto& v : src) v = static_cast<uint8_t>(dist(rng));
+
+        // Scalar reference
+        std::vector<uint8_t> expected(count / 2);
+        skmeans::ScalarUtilsComputer<skmeans::Quantization::u4>::PackU8ToU4x2(
+            src.data(), expected.data(), count
+        );
+
+        // SIMD kernel
+        std::vector<uint8_t> actual(count / 2, 0xFF);
+        skmeans::UtilsComputer<skmeans::Quantization::u4>::PackU8ToU4x2(
+            src.data(), actual.data(), count
+        );
+
+        for (size_t i = 0; i < count / 2; ++i) {
+            EXPECT_EQ(actual[i], expected[i])
+                << "mismatch at byte " << i << " for count=" << count;
+        }
+    }
+}
+
 } // anonymous namespace

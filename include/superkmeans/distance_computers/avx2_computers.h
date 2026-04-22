@@ -177,6 +177,72 @@ class SIMDComputer<skmeans::DistanceFunction::dp, skmeans::Quantization::f32> {
     };
 };
 
+template <>
+class SIMDComputer<skmeans::DistanceFunction::l2, skmeans::Quantization::u4> {
+  public:
+    using distance_t = pdx_distance_t<skmeans::Quantization::u4>;
+    using data_t = skmeans_value_t<skmeans::Quantization::u4>;
+
+    /**
+     * @brief Computes L2² distance between two packed u4x2 vectors using AVX2.
+     * @param vector1 Packed u4x2 input vector 1
+     * @param vector2 Packed u4x2 input vector 2
+     * @param num_packed_bytes Number of packed bytes (each byte = 2 dims)
+     * @return L2² distance as uint32_t
+     */
+    static distance_t Horizontal(
+        const data_t* SKM_RESTRICT vector1,
+        const data_t* SKM_RESTRICT vector2,
+        size_t num_packed_bytes
+    ) {
+        __m256i d2_vec = _mm256_setzero_si256();
+        const __m256i nibble_mask = _mm256_set1_epi8(0x0F);
+        const __m256i ones_16 = _mm256_set1_epi16(1);
+        size_t i = 0;
+        for (; i + 32 <= num_packed_bytes; i += 32) {
+            __m256i a_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(vector1 + i));
+            __m256i b_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(vector2 + i));
+            // Extract low nibbles
+            __m256i a_lo = _mm256_and_si256(a_vec, nibble_mask);
+            __m256i b_lo = _mm256_and_si256(b_vec, nibble_mask);
+            // Extract high nibbles
+            __m256i a_hi = _mm256_and_si256(_mm256_srli_epi16(a_vec, 4), nibble_mask);
+            __m256i b_hi = _mm256_and_si256(_mm256_srli_epi16(b_vec, 4), nibble_mask);
+            // Absolute diff via saturating subtraction: |a-b| = (a⊖b) | (b⊖a)
+            __m256i diff_lo = _mm256_or_si256(
+                _mm256_subs_epu8(a_lo, b_lo), _mm256_subs_epu8(b_lo, a_lo)
+            );
+            __m256i diff_hi = _mm256_or_si256(
+                _mm256_subs_epu8(a_hi, b_hi), _mm256_subs_epu8(b_hi, a_hi)
+            );
+            // Square: maddubs treats first arg as unsigned, second as signed.
+            // Since diff values are in [0,15], signed interpretation is fine.
+            __m256i sq_lo = _mm256_maddubs_epi16(diff_lo, diff_lo); // u16 sums of pairs
+            __m256i sq_hi = _mm256_maddubs_epi16(diff_hi, diff_hi);
+            // Accumulate u16 → u32
+            d2_vec = _mm256_add_epi32(d2_vec, _mm256_madd_epi16(sq_lo, ones_16));
+            d2_vec = _mm256_add_epi32(d2_vec, _mm256_madd_epi16(sq_hi, ones_16));
+        }
+        // Horizontal reduce 8 × i32
+        __m128i lo = _mm256_castsi256_si128(d2_vec);
+        __m128i hi = _mm256_extracti128_si256(d2_vec, 1);
+        __m128i sum128 = _mm_add_epi32(lo, hi);
+        sum128 = _mm_hadd_epi32(sum128, sum128);
+        sum128 = _mm_hadd_epi32(sum128, sum128);
+        distance_t distance = static_cast<distance_t>(_mm_cvtsi128_si32(sum128));
+        // Scalar tail
+        for (; i < num_packed_bytes; ++i) {
+            int32_t a_lo = vector1[i] & 0x0F;
+            int32_t b_lo = vector2[i] & 0x0F;
+            int32_t a_hi = (vector1[i] >> 4) & 0x0F;
+            int32_t b_hi = (vector2[i] >> 4) & 0x0F;
+            int32_t d_lo = a_lo - b_lo, d_hi = a_hi - b_hi;
+            distance += static_cast<uint32_t>(d_lo * d_lo + d_hi * d_hi);
+        }
+        return distance;
+    };
+};
+
 template <Quantization q>
 class SIMDUtilsComputer {};
 
@@ -246,6 +312,10 @@ class SIMDUtilsComputer<skmeans::Quantization::f32> {
             n_vectors_not_pruned += pruning_distances[vector_idx] < pruning_threshold;
         }
     }
+
+    static void PackU8ToU4x2(const uint8_t*, uint8_t*, size_t) {
+        assert(false && "PackU8ToU4x2 not applicable for f32");
+    }
 };
 
 template <>
@@ -291,6 +361,80 @@ class SIMDUtilsComputer<skmeans::Quantization::u8> {
         for (; vector_idx < n_vectors; ++vector_idx) {
             pruning_positions[n_vectors_not_pruned] = vector_idx;
             n_vectors_not_pruned += pruning_distances[vector_idx] < pruning_threshold;
+        }
+    }
+
+    static void PackU8ToU4x2(const uint8_t*, uint8_t*, size_t) {
+        assert(false && "PackU8ToU4x2 not applicable for u8");
+    }
+};
+
+template <>
+class SIMDUtilsComputer<skmeans::Quantization::u4> {
+  public:
+    using data_t = skmeans_value_t<skmeans::Quantization::u4>;
+    using pdx_dist_t = pdx_distance_t<skmeans::Quantization::u4>;
+
+    static void FlipSign(const data_t*, data_t*, const uint32_t*, size_t) {
+        assert(false && "FlipSign not supported for u4");
+    }
+
+    static void InitPositionsArray(
+        size_t n_vectors,
+        size_t& n_vectors_not_pruned,
+        uint32_t* pruning_positions,
+        pdx_dist_t pruning_threshold,
+        const pdx_dist_t* pruning_distances
+    ) {
+        n_vectors_not_pruned = 0;
+        size_t vector_idx = 0;
+        constexpr size_t k_simd_width = 8;
+        const size_t n_vectors_simd = (n_vectors / k_simd_width) * k_simd_width;
+        const __m256i bias = _mm256_set1_epi32(static_cast<int32_t>(0x80000000u));
+        __m256i threshold_vec = _mm256_sub_epi32(
+            _mm256_set1_epi32(static_cast<int32_t>(pruning_threshold)), bias);
+        for (; vector_idx < n_vectors_simd; vector_idx += k_simd_width) {
+            __m256i distances = _mm256_loadu_si256(
+                reinterpret_cast<const __m256i*>(pruning_distances + vector_idx));
+            __m256i biased = _mm256_sub_epi32(distances, bias);
+            __m256i cmp_result = _mm256_cmpgt_epi32(threshold_vec, biased);
+            int mask = _mm256_movemask_ps(_mm256_castsi256_ps(cmp_result));
+            if (SKM_UNLIKELY(mask)) {
+                for (size_t i = 0; i < k_simd_width; ++i) {
+                    pruning_positions[n_vectors_not_pruned] = vector_idx + i;
+                    n_vectors_not_pruned += (mask >> i) & 1;
+                }
+            }
+        }
+        for (; vector_idx < n_vectors; ++vector_idx) {
+            pruning_positions[n_vectors_not_pruned] = vector_idx;
+            n_vectors_not_pruned += pruning_distances[vector_idx] < pruning_threshold;
+        }
+    }
+
+    /**
+     * @brief Pack u8 values [0,15] into u4x2 format using AVX2.
+     *
+     * Uses _mm256_maddubs_epi16 with [1, 16] multiplier to compute
+     * src[2k] + src[2k+1]*16 == src[2k] | (src[2k+1] << 4) when values in [0,15].
+     * Processes 32 input bytes (16 output bytes) per iteration.
+     */
+    static void PackU8ToU4x2(const uint8_t* src, uint8_t* dst, size_t count) {
+        assert(count % 2 == 0);
+        size_t i = 0;
+        const __m256i mul = _mm256_set1_epi16(0x1001);
+        for (; i + 32 <= count; i += 32) {
+            __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + i));
+            __m256i sum16 = _mm256_maddubs_epi16(v, mul);
+            __m256i packed = _mm256_packus_epi16(sum16, _mm256_setzero_si256());
+            packed = _mm256_permute4x64_epi64(packed, 0b00001000);
+            _mm_storeu_si128(
+                reinterpret_cast<__m128i*>(dst + i / 2),
+                _mm256_castsi256_si128(packed)
+            );
+        }
+        for (; i + 2 <= count; i += 2) {
+            dst[i / 2] = (src[i] & 0x0F) | ((src[i + 1] & 0x0F) << 4);
         }
     }
 };

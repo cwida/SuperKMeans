@@ -183,7 +183,7 @@ class HierarchicalSuperKMeans : public SuperKMeans<q, alpha> {
         );
         // Create quantizer (F32Quantizer for f32, delegates to BatchComputer)
         if constexpr (q == Quantization::f32) {
-            this->quantizer = std::make_unique<F32Quantizer<q>>();
+            this->quantizer = std::make_unique<F32Quantizer>();
         } else {
             throw std::invalid_argument(
                 "HierarchicalSuperKMeans does not yet support non-f32 quantization"
