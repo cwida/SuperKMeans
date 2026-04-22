@@ -18,7 +18,13 @@ namespace skmeans {
  * In this lightweight version, we optimize for top-1 search.
  * Reference: https://dl.acm.org/doi/abs/10.1145/3725333
  *
- * @tparam q Quantization type (f32 or u8)
+ * NOTE: All dimension indices and block sizes (current_dimension_idx, H_DIM_SIZE,
+ * num_dimensions, num_vertical_dimensions, num_horizontal_dimensions) are in the
+ * units of the PDX index — i.e. packed bytes for u4 (real_d / 2), real dims otherwise.
+ * The only boundary where conversion to real dimensions is needed is GetPruningThreshold,
+ * since the ADSampling pruner's ratios array is indexed by real dimension count.
+ *
+ * @tparam q Quantization type (f32, u8, or u4)
  * @tparam Index
  * @tparam alpha Distance function (l2 or dp)
  */

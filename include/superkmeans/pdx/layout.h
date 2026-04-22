@@ -61,9 +61,15 @@ class PDXLayout {
      * Partitions the data into clusters of VECTOR_CHUNK_SIZE vectors each,
      * setting up the index structure for PDXearch.
      *
+     * NOTE: For u4 quantization, the caller must pass d = packed byte count (real_d / 2),
+     * not the real 4-bit dimension count. All index fields (num_dimensions,
+     * num_vertical_dimensions, num_horizontal_dimensions) will be in packed byte units.
+     * PDXearch operates entirely in these units; only the ADSampling pruner boundary
+     * requires conversion back to real dimensions (see GetPruningThreshold in pdxearch.h).
+     *
      * @param pdx_data Pointer to PDX-formatted data
      * @param n_points Number of data points
-     * @param d Number of dimensions
+     * @param d Number of dimensions (packed byte count for u4, real dims otherwise)
      * @param hor_data Optional auxiliary horizontal data for the vertical dimensions
      */
     void FromBufferToPDXIndex(

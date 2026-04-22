@@ -21,14 +21,63 @@ class SIMDComputer<skmeans::DistanceFunction::l2, Quantization::u8> {
     using data_t = skmeans_value_t<Quantization::u8>;
 
     /**
-     * @brief Computes the L2 distance between two uint8 vectors using AVX-512.
-     * Taken from SimSimd library: https://github.com/ashvardanian/SimSIMD
-     * @param vector1 Input vector 1
-     * @param vector2 Input vector 2
-     * @param num_dimensions Number of dimensions
-     * @return L2 distance between the two uint8 vectors
+     * @brief Computes the squared L2 distance between two uint8 vectors using AVX-512.
+     *
+     * Adapted from NumKong nk_sqeuclidean_u8_icelake. Widens u8 absolute differences
+     * to i16 before squaring via _mm512_dpwssd_epi32 (VNNI i16×i16→i32).
+     * This avoids the dpbusds signed-interpretation bug where abs differences > 127
+     * would be misinterpreted as negative in the second operand.
+     *
+     * Processes 64 bytes per iteration using two i16 accumulators (low/high halves).
      */
     static distance_t Horizontal(
+        const data_t* SKM_RESTRICT vector1,
+        const data_t* SKM_RESTRICT vector2,
+        size_t num_dimensions
+    ) {
+        __m512i d2_low_i32 = _mm512_setzero_si512();
+        __m512i d2_high_i32 = _mm512_setzero_si512();
+        __m512i const zeros = _mm512_setzero_si512();
+        __m512i a_u8, b_u8, diff_u8, diff_low_i16, diff_high_i16;
+
+    nk_sqeuclidean_u8_ice_cycle:
+        if (num_dimensions < 64) {
+            __mmask64 mask =
+                static_cast<__mmask64>(_bzhi_u64(0xFFFFFFFFFFFFFFFF, num_dimensions));
+            a_u8 = _mm512_maskz_loadu_epi8(mask, vector1);
+            b_u8 = _mm512_maskz_loadu_epi8(mask, vector2);
+            num_dimensions = 0;
+        } else {
+            a_u8 = _mm512_loadu_si512(vector1);
+            b_u8 = _mm512_loadu_si512(vector2);
+            vector1 += 64, vector2 += 64, num_dimensions -= 64;
+        }
+
+        // Absolute difference via saturating subtraction
+        diff_u8 = _mm512_or_si512(
+            _mm512_subs_epu8(a_u8, b_u8), _mm512_subs_epu8(b_u8, a_u8)
+        );
+        // Widen u8 -> i16 (zero-extend) to avoid signed misinterpretation
+        diff_low_i16 = _mm512_unpacklo_epi8(diff_u8, zeros);
+        diff_high_i16 = _mm512_unpackhi_epi8(diff_u8, zeros);
+        // Square and accumulate at i16 level into i32
+        d2_low_i32 = _mm512_dpwssd_epi32(d2_low_i32, diff_low_i16, diff_low_i16);
+        d2_high_i32 = _mm512_dpwssd_epi32(d2_high_i32, diff_high_i16, diff_high_i16);
+        if (num_dimensions)
+            goto nk_sqeuclidean_u8_ice_cycle;
+
+        return _mm512_reduce_add_epi32(_mm512_add_epi32(d2_low_i32, d2_high_i32));
+    };
+
+    /**
+     * @brief Asymmetric squared L2 using VNNI dpbusds.
+     *
+     * Only correct when absolute differences fit in 7 bits (max 127), e.g. when
+     * one operand's range is restricted. Uses saturating u8 subtraction for abs diff,
+     * then VNNI dot-product to square and accumulate.
+     * Adapted from SimSIMD: https://github.com/ashvardanian/SimSIMD
+     */
+    static distance_t HorizontalAsymmetric(
         const data_t* SKM_RESTRICT vector1,
         const data_t* SKM_RESTRICT vector2,
         size_t num_dimensions
@@ -49,13 +98,13 @@ class SIMDComputer<skmeans::DistanceFunction::l2, Quantization::u8> {
             vector1 += 64, vector2 += 64, num_dimensions -= 64;
         }
 
-        // Substracting unsigned vectors in AVX-512 is done by saturating subtraction:
+        // Subtracting unsigned vectors via saturating subtraction:
         __m512i d_u8_vec = _mm512_or_si512(
             _mm512_subs_epu8(a_u8_vec, b_u8_vec), _mm512_subs_epu8(b_u8_vec, a_u8_vec)
         );
 
-        // Multiply and accumulate at `int8` level which are actually uint7, accumulate at `int32`
-        // level:
+        // Multiply and accumulate — second operand interpreted as signed int8,
+        // so only correct when abs differences <= 127:
         d2_i32_vec = _mm512_dpbusds_epi32(d2_i32_vec, d_u8_vec, d_u8_vec);
         if (num_dimensions)
             goto simsimd_l2sq_u8_ice_cycle;
