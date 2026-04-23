@@ -143,6 +143,31 @@ class IQuantizer {
     virtual bool IsFitted() const = 0;
 
     /**
+     * @brief Average quantized centroid accumulators into quantized output.
+     *
+     * Divides uint32 per-dimension accumulators by cluster sizes (with rounding)
+     * and writes the result directly in the quantized domain.
+     * Only applicable for scalar quantizers (SQ8, SQ4). Other quantizers assert false.
+     *
+     * @param accumulators Per-centroid per-dimension uint32 sums [n_clusters × d]
+     * @param cluster_sizes Number of vectors assigned to each centroid [n_clusters]
+     * @param out Quantized centroid output [n_clusters × code_size]
+     * @param n_clusters Number of centroids
+     * @param d Real dimensionality (not packed)
+     */
+    virtual void AverageCentroids(
+        const uint32_t* accumulators,
+        const uint32_t* cluster_sizes,
+        quantized_t* out,
+        size_t n_clusters,
+        size_t d
+    ) const {
+        (void) accumulators; (void) cluster_sizes; (void) out;
+        (void) n_clusters; (void) d;
+        assert(false && "AverageCentroids not supported by this quantizer");
+    }
+
+    /**
      * @brief Whether this quantizer supports PDX pruning.
      */
     virtual bool SupportsPruning() const { return false; }

@@ -889,3 +889,172 @@ TEST_F(SuperKMeansU8RaBitQTest, WCSSReasonable) {
 }
 
 #endif // HAS_FAISS
+
+// ── AverageCentroids unit tests ──
+
+TEST(AverageCentroidsTest, SQ8_CorrectAverage) {
+    SQ8Quantizer quantizer;
+    const size_t d = 8;
+    const size_t n_clusters = 3;
+
+    // Fit on dummy data to mark as fitted
+    std::vector<float> dummy(100 * d, 0.5f);
+    quantizer.Fit(dummy.data(), 100, d);
+
+    // Cluster 0: 2 vectors, each dim = 100 → avg = 100
+    // Cluster 1: 4 vectors, dims alternate 10 and 14 → avg = 12 (truncated from 12.0)
+    // Cluster 2: 0 vectors (empty — should be skipped)
+    std::vector<uint32_t> accumulators(n_clusters * d, 0);
+    std::vector<uint32_t> cluster_sizes = {2, 4, 0};
+
+    for (size_t j = 0; j < d; ++j) accumulators[0 * d + j] = 200;
+    for (size_t j = 0; j < d; ++j) accumulators[1 * d + j] = 48;
+
+    std::vector<uint8_t> out(n_clusters * d, 0xFF);
+    quantizer.AverageCentroids(
+        accumulators.data(), cluster_sizes.data(), out.data(), n_clusters, d
+    );
+
+    for (size_t j = 0; j < d; ++j) {
+        EXPECT_EQ(out[0 * d + j], 100) << "cluster 0, dim " << j;
+        EXPECT_EQ(out[1 * d + j], 12) << "cluster 1, dim " << j;
+    }
+    // Cluster 2 should be untouched (0xFF)
+    for (size_t j = 0; j < d; ++j) {
+        EXPECT_EQ(out[2 * d + j], 0xFF) << "cluster 2 (empty) should be untouched, dim " << j;
+    }
+}
+
+TEST(AverageCentroidsTest, SQ4_CorrectAverage) {
+    SQ4Quantizer quantizer;
+    const size_t d = 8; // real dims
+    const size_t d_packed = d / 2;
+    const size_t n_clusters = 2;
+
+    std::vector<float> dummy(100 * d, 0.5f);
+    quantizer.Fit(dummy.data(), 100, d);
+
+    // Cluster 0: 3 vectors, all nibbles sum to 30 → avg = 10
+    // Cluster 1: 5 vectors, all nibbles sum to 50 → avg = 10
+    std::vector<uint32_t> accumulators(n_clusters * d, 0);
+    std::vector<uint32_t> cluster_sizes = {3, 5};
+
+    for (size_t j = 0; j < d; ++j) accumulators[0 * d + j] = 30;
+    for (size_t j = 0; j < d; ++j) accumulators[1 * d + j] = 50;
+
+    std::vector<uint8_t> out(n_clusters * d_packed, 0xFF);
+    quantizer.AverageCentroids(
+        accumulators.data(), cluster_sizes.data(), out.data(), n_clusters, d
+    );
+
+    for (size_t k = 0; k < d_packed; ++k) {
+        uint8_t lo = out[0 * d_packed + k] & 0x0F;
+        uint8_t hi = (out[0 * d_packed + k] >> 4) & 0x0F;
+        EXPECT_EQ(lo, 10) << "cluster 0, packed " << k << " lo";
+        EXPECT_EQ(hi, 10) << "cluster 0, packed " << k << " hi";
+    }
+    for (size_t k = 0; k < d_packed; ++k) {
+        uint8_t lo = out[1 * d_packed + k] & 0x0F;
+        uint8_t hi = (out[1 * d_packed + k] >> 4) & 0x0F;
+        EXPECT_EQ(lo, 10) << "cluster 1, packed " << k << " lo";
+        EXPECT_EQ(hi, 10) << "cluster 1, packed " << k << " hi";
+    }
+}
+
+// ── Quantized centroid update integration tests ──
+
+TEST_F(SuperKMeansU8Test, QuantizedCentroidUpdate_Converges) {
+    const size_t n = 3000;
+    const size_t d = 64;
+    const size_t n_clusters = 10;
+
+    std::vector<float> data = MakeBlobs(n, d, n_clusters);
+
+    SuperKMeansConfig config;
+    config.iters = 10;
+    config.verbose = false;
+    config.quantizer_type = QuantizerType::sq8;
+    config.quantized_centroid_update = true;
+
+    auto kmeans = SuperKMeans<Quantization::u8, DistanceFunction::l2>(n_clusters, d, config);
+    auto centroids = kmeans.Train(data.data(), n);
+
+    EXPECT_TRUE(kmeans.IsTrained());
+    EXPECT_EQ(centroids.size(), n_clusters * d);
+
+    auto stats = kmeans.GetIterationStats();
+    ASSERT_GE(stats.size(), 2u);
+    EXPECT_LT(stats.back().objective, stats.front().objective);
+}
+
+TEST_F(SuperKMeansU4SQ4Test, QuantizedCentroidUpdate_Converges) {
+    const size_t n = 3000;
+    const size_t d = 64;
+    const size_t n_clusters = 10;
+
+    std::vector<float> data = MakeBlobs(n, d, n_clusters);
+
+    SuperKMeansConfig config;
+    config.iters = 10;
+    config.verbose = false;
+    config.quantized_centroid_update = true;
+
+    auto kmeans = SuperKMeans<Quantization::u4, DistanceFunction::l2>(n_clusters, d, config);
+    auto centroids = kmeans.Train(data.data(), n);
+
+    EXPECT_TRUE(kmeans.IsTrained());
+    EXPECT_EQ(centroids.size(), n_clusters * d);
+
+    auto stats = kmeans.GetIterationStats();
+    ASSERT_GE(stats.size(), 2u);
+    EXPECT_LT(stats.back().objective, stats.front().objective);
+}
+
+TEST_F(SuperKMeansU8Test, QuantizedCentroidUpdate_WCSSComparable) {
+    const size_t n = 3000;
+    const size_t d = 64;
+    const size_t n_clusters = 10;
+
+    std::vector<float> data = MakeBlobs(n, d, n_clusters);
+
+    // Train with float centroid update
+    SuperKMeansConfig config_float;
+    config_float.iters = 15;
+    config_float.verbose = false;
+    config_float.quantizer_type = QuantizerType::sq8;
+    auto kmeans_float = SuperKMeans<Quantization::u8, DistanceFunction::l2>(n_clusters, d, config_float);
+    auto centroids_float = kmeans_float.Train(data.data(), n);
+
+    // Train with quantized centroid update
+    SuperKMeansConfig config_quant;
+    config_quant.iters = 15;
+    config_quant.verbose = false;
+    config_quant.quantizer_type = QuantizerType::sq8;
+    config_quant.quantized_centroid_update = true;
+    auto kmeans_quant = SuperKMeans<Quantization::u8, DistanceFunction::l2>(n_clusters, d, config_quant);
+    auto centroids_quant = kmeans_quant.Train(data.data(), n);
+
+    auto assign_float = kmeans_float.Assign(data.data(), centroids_float.data(), n, n_clusters);
+    auto assign_quant = kmeans_quant.Assign(data.data(), centroids_quant.data(), n, n_clusters);
+
+    auto compute_wcss = [&](const std::vector<uint32_t>& assignments,
+                            const std::vector<float>& ctrs) {
+        double wcss = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+            uint32_t c = assignments[i];
+            for (size_t j = 0; j < d; ++j) {
+                double diff = data[i * d + j] - ctrs[c * d + j];
+                wcss += diff * diff;
+            }
+        }
+        return wcss;
+    };
+
+    double wcss_float = compute_wcss(assign_float, centroids_float);
+    double wcss_quant = compute_wcss(assign_quant, centroids_quant);
+
+    // Quantized centroid update should be within 2x of float centroid update
+    EXPECT_LT(wcss_quant, wcss_float * 2.0)
+        << "Quantized centroid update WCSS (" << wcss_quant
+        << ") is too much worse than float centroid update (" << wcss_float << ")";
+}

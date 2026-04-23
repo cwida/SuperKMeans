@@ -621,6 +621,32 @@ class SQ4Quantizer : public IQuantizer<Quantization::u4> {
         }
     }
 
+    void AverageCentroids(
+        const uint32_t* accumulators,
+        const uint32_t* cluster_sizes,
+        quantized_t* out,
+        size_t n_clusters,
+        size_t d
+    ) const override {
+        assert(fitted);
+        assert(d % 2 == 0);
+        const size_t d_packed = d / 2;
+#pragma omp parallel for num_threads(g_n_threads)
+        for (size_t i = 0; i < n_clusters; ++i) {
+            if (cluster_sizes[i] == 0) continue;
+            const uint32_t* acc = accumulators + i * d;
+            quantized_t* row = out + i * d_packed;
+            const uint32_t half = cluster_sizes[i] / 2;
+            const float inv_size = 1.0f / static_cast<float>(cluster_sizes[i]);
+            SKM_VECTORIZE_LOOP
+            for (size_t k = 0; k < d_packed; ++k) {
+                uint8_t lo = static_cast<uint8_t>(static_cast<float>(acc[2 * k] + half) * inv_size);
+                uint8_t hi = static_cast<uint8_t>(static_cast<float>(acc[2 * k + 1] + half) * inv_size);
+                row[k] = lo | (hi << 4);
+            }
+        }
+    }
+
     size_t CodeSize(size_t d) const override {
         assert(d % 2 == 0);
         return d / 2;

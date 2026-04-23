@@ -76,6 +76,7 @@ int main(int argc, char* argv[]) {
     config.sampling_fraction = sampling_fraction;
     config.tol = 1e-3f;
     config.use_blas_only = false;
+    // config.quantized_centroid_update = true;
 
     auto is_angular = std::find(
         bench_utils::ANGULAR_DATASETS.begin(), bench_utils::ANGULAR_DATASETS.end(), dataset

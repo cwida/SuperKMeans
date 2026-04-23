@@ -560,6 +560,28 @@ class SQ8Quantizer : public IQuantizer<Quantization::u8> {
         }
     }
 
+    void AverageCentroids(
+        const uint32_t* accumulators,
+        const uint32_t* cluster_sizes,
+        quantized_t* out,
+        size_t n_clusters,
+        size_t d
+    ) const override {
+        assert(fitted);
+#pragma omp parallel for num_threads(g_n_threads)
+        for (size_t i = 0; i < n_clusters; ++i) {
+            if (cluster_sizes[i] == 0) continue;
+            const uint32_t* acc = accumulators + i * d;
+            quantized_t* row = out + i * d;
+            const uint32_t half = cluster_sizes[i] / 2;
+            const float inv_size = 1.0f / static_cast<float>(cluster_sizes[i]);
+            SKM_VECTORIZE_LOOP
+            for (size_t j = 0; j < d; ++j) {
+                row[j] = static_cast<uint8_t>(static_cast<float>(acc[j] + half) * inv_size);
+            }
+        }
+    }
+
     const ScalarQuantizationParams& GetParams() const { return params; }
 
   private:
