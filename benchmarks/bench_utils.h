@@ -122,6 +122,13 @@ const std::vector<int> FAISS_EARLY_TERM_ITERS = {10};
 const int SCIKIT_EARLY_TERM_MAX_ITERS = 300;
 const float SCIKIT_EARLY_TERM_TOL = 1e-8f;
 
+// Target dimensionalities for PCA/JLT preprocessing (multiples of 64 up to 2048)
+const std::vector<size_t> TARGET_D_VALUES = {
+    64, 128, 192, 256, 320, 384, 448, 512, 576, 640, 704, 768,
+    832, 896, 960, 1024, 1088, 1152, 1216, 1280, 1344, 1408, 1472, 1536,
+    1600, 1664, 1728, 1792, 1856, 1920, 1984, 2048
+};
+
 // Sampling fraction values for sampling experiment
 const std::vector<float> SAMPLING_FRACTION_VALUES = {
     1.0f,  0.9f,  0.8f, 0.7f,  0.6f,    0.5f,   0.4f,    0.3f,   0.2f,    0.1f,   0.05f,
@@ -557,6 +564,182 @@ inline void write_results_to_csv(
         pos += 2;
     }
     csv_file << ",\"" << escaped_config << "\"\n";
+
+    csv_file.close();
+    std::cout << "Results written to: " << csv_path << std::endl;
+}
+
+using recall_results_t = std::vector<std::tuple<int, float, float, float, float>>;
+
+/**
+ * @brief Build a JSON object string from recall result tuples.
+ *
+ * Produces keys like recall@10@nprobe1, recall@10@0.10, etc.
+ */
+inline std::string build_recall_stats_json(
+    const recall_results_t& results_knn_10,
+    const recall_results_t& results_knn_100
+) {
+    std::ostringstream ss;
+    ss << std::fixed;
+    bool first_entry = true;
+    ss << "{";
+
+    auto emit_results = [&](int knn, const recall_results_t& results) {
+        size_t abs_idx = 0;
+        for (const auto& [centroids_to_explore, explore_frac, recall, std_recall, avg_vectors] :
+             results) {
+            if (!first_entry) ss << ",";
+            first_entry = false;
+
+            std::string suffix;
+            if (abs_idx < ABSOLUTE_EXPLORE_COUNTS.size()) {
+                suffix = "nprobe" + std::to_string(ABSOLUTE_EXPLORE_COUNTS[abs_idx]);
+                abs_idx++;
+            } else {
+                std::ostringstream frac_ss;
+                frac_ss << std::fixed << std::setprecision(2) << (explore_frac * 100.0f);
+                suffix = frac_ss.str();
+            }
+
+            ss << "\"recall@" << knn << "@" << suffix << "\":" << std::setprecision(6) << recall;
+            ss << ",\"recall_std@" << knn << "@" << suffix << "\":" << std::setprecision(6)
+               << std_recall;
+            ss << ",\"centroids_explored@" << knn << "@" << suffix << "\":"
+               << centroids_to_explore;
+            ss << ",\"vectors_explored@" << knn << "@" << suffix << "\":" << std::setprecision(2)
+               << avg_vectors;
+        }
+    };
+
+    emit_results(10, results_knn_10);
+    emit_results(100, results_knn_100);
+    ss << "}";
+    return ss.str();
+}
+
+/**
+ * @brief Write results to CSV with recall stats packed into a single JSON column.
+ *
+ * Same core columns as write_results_to_csv, but instead of one column per
+ * recall measurement, all recall/std/centroids/vectors stats are stored in a
+ * single ``clustering_quality_stats`` JSON column with the structure:
+ *
+ *   {
+ *     "assign": { "recall@10@nprobe1": ..., "recall_std@10@nprobe1": ..., ... },
+ *     "quantized_assign": { ... }   // only present when provided
+ *   }
+ */
+inline void write_results_to_csv_v2(
+    const std::string& experiment_name,
+    const std::string& algorithm,
+    const std::string& dataset,
+    int n_iters,
+    int actual_iterations,
+    int dimensionality,
+    size_t data_size,
+    int n_clusters,
+    double construction_time_ms,
+    int threads,
+    double final_objective,
+    const std::unordered_map<std::string, std::string>& config_dict,
+    const recall_results_t& assign_results_knn_10,
+    const recall_results_t& assign_results_knn_100,
+    const recall_results_t& quantized_assign_results_knn_10 = {},
+    const recall_results_t& quantized_assign_results_knn_100 = {},
+    const std::string& balance_stats_json = "",
+    const std::string& iteration_stats_json = ""
+) {
+    const char* arch_env = std::getenv("SKM_ARCH");
+    std::string arch = arch_env ? std::string(arch_env) : "default";
+    std::string results_dir = std::string(CMAKE_SOURCE_DIR) + "/benchmarks/results/" + arch;
+    create_directory_recursive(results_dir);
+    std::string csv_path = results_dir + "/" + experiment_name + ".csv";
+    bool file_exists = (std::ifstream(csv_path).good());
+    std::ofstream csv_file(csv_path, std::ios::app);
+    if (!csv_file.is_open()) {
+        std::cerr << "Failed to open CSV file: " << csv_path << std::endl;
+        return;
+    }
+
+    if (!file_exists) {
+        csv_file << "timestamp,algorithm,dataset,n_iters,actual_iterations,dimensionality,"
+                    "data_size,n_clusters,construction_time_ms,threads,final_objective,"
+                    "clustering_quality_stats,balance_stats,iteration_stats,config\n";
+    }
+
+    // Timestamp
+    auto now = std::chrono::system_clock::now();
+    auto now_time_t = std::chrono::system_clock::to_time_t(now);
+    std::tm now_tm;
+    localtime_r(&now_time_t, &now_tm);
+    char timestamp[32];
+    std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &now_tm);
+
+    csv_file << timestamp << "," << algorithm << "," << dataset << "," << n_iters << ","
+             << actual_iterations << "," << dimensionality << "," << data_size << "," << n_clusters
+             << "," << std::fixed << std::setprecision(2) << construction_time_ms << "," << threads
+             << "," << std::setprecision(6) << final_objective;
+
+    // Build clustering_quality_stats JSON
+    std::ostringstream quality_ss;
+    quality_ss << "{";
+    bool has_assign = !assign_results_knn_10.empty() || !assign_results_knn_100.empty();
+    bool has_quantized =
+        !quantized_assign_results_knn_10.empty() || !quantized_assign_results_knn_100.empty();
+
+    if (has_assign) {
+        quality_ss << "\"assign\":" << build_recall_stats_json(
+            assign_results_knn_10, assign_results_knn_100);
+    }
+    if (has_quantized) {
+        if (has_assign) quality_ss << ",";
+        quality_ss << "\"quantized_assign\":" << build_recall_stats_json(
+            quantized_assign_results_knn_10, quantized_assign_results_knn_100);
+    }
+    quality_ss << "}";
+
+    auto escape_csv_json = [](const std::string& json) -> std::string {
+        std::string escaped = json;
+        size_t p = 0;
+        while ((p = escaped.find("\"", p)) != std::string::npos) {
+            escaped.replace(p, 1, "\"\"");
+            p += 2;
+        }
+        return "\"" + escaped + "\"";
+    };
+
+    if (has_assign || has_quantized) {
+        csv_file << "," << escape_csv_json(quality_ss.str());
+    } else {
+        csv_file << ",";
+    }
+
+    // balance_stats
+    if (!balance_stats_json.empty()) {
+        csv_file << "," << escape_csv_json(balance_stats_json);
+    } else {
+        csv_file << ",";
+    }
+
+    // iteration_stats
+    if (!iteration_stats_json.empty()) {
+        csv_file << "," << escape_csv_json(iteration_stats_json);
+    } else {
+        csv_file << ",";
+    }
+
+    // config
+    std::ostringstream config_json_ss;
+    config_json_ss << "{";
+    bool first = true;
+    for (const auto& [key, value] : config_dict) {
+        if (!first) config_json_ss << ",";
+        config_json_ss << "\"" << key << "\":" << value;
+        first = false;
+    }
+    config_json_ss << "}";
+    csv_file << "," << escape_csv_json(config_json_ss.str()) << "\n";
 
     csv_file.close();
     std::cout << "Results written to: " << csv_path << std::endl;
