@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cassert>
+#include <cstring>
 #include <iostream>
 
 #include "arm_neon.h"
@@ -157,8 +158,81 @@ class SIMDComputer<DistanceFunction::l2, Quantization::u4> {
     };
 };
 
+template <>
+class SIMDComputer<DistanceFunction::l2, Quantization::b8> {
+  public:
+    using distance_t = pdx_distance_t<Quantization::b8>;
+    using data_t = skmeans_value_t<Quantization::b8>;
+
+    /**
+     * @brief Computes popcount(a AND b) — binary inner product using NEON.
+     * Uses vcntq_u8 for per-byte popcount.
+     */
+    static distance_t Horizontal(
+        const data_t* SKM_RESTRICT vector1,
+        const data_t* SKM_RESTRICT vector2,
+        size_t num_bytes
+    ) {
+        uint32_t count = 0;
+        size_t i = 0;
+        for (; i + 16 <= num_bytes; i += 16) {
+            uint8x16_t va = vld1q_u8(vector1 + i);
+            uint8x16_t vb = vld1q_u8(vector2 + i);
+            uint8x16_t cnt = vcntq_u8(vandq_u8(va, vb));
+            count += vaddvq_u8(cnt);
+        }
+        for (; i < num_bytes; ++i) {
+            count += static_cast<uint32_t>(__builtin_popcount(vector1[i] & vector2[i]));
+        }
+        return count;
+    };
+};
+
 template <Quantization q>
-class SIMDUtilsComputer {};
+class SIMDUtilsComputer {
+  public:
+    using data_t = skmeans_value_t<q>;
+    using pdx_dist_t = pdx_distance_t<q>;
+
+    static void FlipSign(const data_t*, data_t*, const uint32_t*, size_t) {
+        assert(false && "FlipSign not supported");
+    }
+
+    static void InitPositionsArray(
+        size_t n_vectors,
+        size_t& n_vectors_not_pruned,
+        uint32_t* pruning_positions,
+        pdx_dist_t pruning_threshold,
+        const pdx_dist_t* pruning_distances
+    ) {
+        n_vectors_not_pruned = 0;
+        size_t vector_idx = 0;
+        constexpr size_t k_simd_width = 4;
+        const size_t n_vectors_simd = (n_vectors / k_simd_width) * k_simd_width;
+        uint32x4_t threshold_vec = vdupq_n_u32(pruning_threshold);
+        for (; vector_idx < n_vectors_simd; vector_idx += k_simd_width) {
+            uint32x4_t distances = vld1q_u32(pruning_distances + vector_idx);
+            uint32x4_t cmp_result = vcltq_u32(distances, threshold_vec);
+            uint32_t any_passed = vmaxvq_u32(cmp_result);
+            if (SKM_UNLIKELY(any_passed)) {
+                uint32_t mask[4];
+                vst1q_u32(mask, cmp_result);
+                for (size_t i = 0; i < k_simd_width; ++i) {
+                    pruning_positions[n_vectors_not_pruned] = vector_idx + i;
+                    n_vectors_not_pruned += (mask[i] != 0);
+                }
+            }
+        }
+        for (; vector_idx < n_vectors; ++vector_idx) {
+            pruning_positions[n_vectors_not_pruned] = vector_idx;
+            n_vectors_not_pruned += pruning_distances[vector_idx] < pruning_threshold;
+        }
+    }
+
+    static void PackU8ToU4x2(const uint8_t*, uint8_t*, size_t) {
+        assert(false && "PackU8ToU4x2 not applicable");
+    }
+};
 
 template <>
 class SIMDUtilsComputer<Quantization::f32> {
@@ -236,52 +310,6 @@ class SIMDUtilsComputer<Quantization::f32> {
 };
 
 template <>
-class SIMDUtilsComputer<Quantization::u8> {
-  public:
-    using data_t = skmeans_value_t<Quantization::u8>;
-    using pdx_dist_t = pdx_distance_t<Quantization::u8>;
-
-    static void FlipSign(const data_t*, data_t*, const uint32_t*, size_t) {
-        assert(false && "FlipSign not supported for u8");
-    }
-
-    static void InitPositionsArray(
-        size_t n_vectors,
-        size_t& n_vectors_not_pruned,
-        uint32_t* pruning_positions,
-        pdx_dist_t pruning_threshold,
-        const pdx_dist_t* pruning_distances
-    ) {
-        n_vectors_not_pruned = 0;
-        size_t vector_idx = 0;
-        constexpr size_t k_simd_width = 4;
-        const size_t n_vectors_simd = (n_vectors / k_simd_width) * k_simd_width;
-        uint32x4_t threshold_vec = vdupq_n_u32(pruning_threshold);
-        for (; vector_idx < n_vectors_simd; vector_idx += k_simd_width) {
-            uint32x4_t distances = vld1q_u32(pruning_distances + vector_idx);
-            uint32x4_t cmp_result = vcltq_u32(distances, threshold_vec);
-            uint32_t any_passed = vmaxvq_u32(cmp_result);
-            if (SKM_UNLIKELY(any_passed)) {
-                uint32_t mask[4];
-                vst1q_u32(mask, cmp_result);
-                for (size_t i = 0; i < k_simd_width; ++i) {
-                    pruning_positions[n_vectors_not_pruned] = vector_idx + i;
-                    n_vectors_not_pruned += (mask[i] != 0);
-                }
-            }
-        }
-        for (; vector_idx < n_vectors; ++vector_idx) {
-            pruning_positions[n_vectors_not_pruned] = vector_idx;
-            n_vectors_not_pruned += pruning_distances[vector_idx] < pruning_threshold;
-        }
-    }
-
-    static void PackU8ToU4x2(const uint8_t*, uint8_t*, size_t) {
-        assert(false && "PackU8ToU4x2 not applicable for u8");
-    }
-};
-
-template <>
 class SIMDUtilsComputer<Quantization::u4> {
   public:
     using data_t = skmeans_value_t<Quantization::u4>;
@@ -339,6 +367,79 @@ class SIMDUtilsComputer<Quantization::u4> {
         }
         for (; i + 2 <= count; i += 2) {
             dst[i / 2] = (src[i] & 0x0F) | ((src[i + 1] & 0x0F) << 4);
+        }
+    }
+};
+
+class SIMDFastScanComputer {
+  public:
+    static constexpr size_t kBlockSize = 32;
+
+    static void ScanBlock(
+        const uint8_t* packed,
+        const uint8_t* lut,
+        size_t binary_bytes,
+        uint16_t* out_dot,
+        size_t blk_count
+    ) {
+        if (blk_count == kBlockSize) {
+            ScanBlockNeon(packed, lut, binary_bytes, out_dot);
+            return;
+        }
+        ScanBlockScalar(packed, lut, binary_bytes, out_dot, blk_count);
+    }
+
+  private:
+    static void ScanBlockScalar(
+        const uint8_t* packed,
+        const uint8_t* lut,
+        size_t binary_bytes,
+        uint16_t* out_dot,
+        size_t blk_count
+    ) {
+        std::memset(out_dot, 0, kBlockSize * sizeof(uint16_t));
+        for (size_t b = 0; b < binary_bytes; ++b) {
+            const uint8_t* lut_lo = lut + (2 * b) * 16;
+            const uint8_t* lut_hi = lut + (2 * b + 1) * 16;
+            const uint8_t* row = packed + b * kBlockSize;
+            for (size_t k = 0; k < blk_count; ++k) {
+                uint8_t byte = row[k];
+                out_dot[k] += static_cast<uint16_t>(lut_lo[byte & 0x0F])
+                            + static_cast<uint16_t>(lut_hi[byte >> 4]);
+            }
+        }
+    }
+
+    static void ScanBlockNeon(
+        const uint8_t* packed,
+        const uint8_t* lut,
+        size_t binary_bytes,
+        uint16_t* out_dot
+    ) {
+        const uint8x16_t mask_0f = vdupq_n_u8(0x0F);
+
+        for (int half = 0; half < 2; ++half) {
+            uint16x8_t acc_lo = vdupq_n_u16(0);
+            uint16x8_t acc_hi = vdupq_n_u16(0);
+
+            for (size_t b = 0; b < binary_bytes; ++b) {
+                uint8x16_t lut_lo_vec = vld1q_u8(lut + (2 * b) * 16);
+                uint8x16_t lut_hi_vec = vld1q_u8(lut + (2 * b + 1) * 16);
+                uint8x16_t data = vld1q_u8(packed + b * kBlockSize + half * 16);
+
+                uint8x16_t lo_idx = vandq_u8(data, mask_0f);
+                uint8x16_t hi_idx = vshrq_n_u8(data, 4);
+
+                uint8x16_t res_lo = vqtbl1q_u8(lut_lo_vec, lo_idx);
+                uint8x16_t res_hi = vqtbl1q_u8(lut_hi_vec, hi_idx);
+                uint8x16_t partial = vaddq_u8(res_lo, res_hi);
+
+                acc_lo = vaddw_u8(acc_lo, vget_low_u8(partial));
+                acc_hi = vaddw_u8(acc_hi, vget_high_u8(partial));
+            }
+
+            vst1q_u16(out_dot + half * 16, acc_lo);
+            vst1q_u16(out_dot + half * 16 + 8, acc_hi);
         }
     }
 };

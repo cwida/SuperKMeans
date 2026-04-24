@@ -219,8 +219,88 @@ class SIMDComputer<skmeans::DistanceFunction::l2, Quantization::u4> {
     };
 };
 
+template <>
+class SIMDComputer<skmeans::DistanceFunction::l2, Quantization::b8> {
+  public:
+    using distance_t = pdx_distance_t<Quantization::b8>;
+    using data_t = skmeans_value_t<Quantization::b8>;
+
+    /**
+     * @brief Computes popcount(a AND b) — binary inner product using AVX-512.
+     * Uses VPOPCNTQ when available, otherwise falls back to scalar.
+     */
+    static distance_t Horizontal(
+        const data_t* SKM_RESTRICT vector1,
+        const data_t* SKM_RESTRICT vector2,
+        size_t num_bytes
+    ) {
+#ifdef __AVX512VPOPCNTDQ__
+        __m512i acc = _mm512_setzero_si512();
+        size_t i = 0;
+        for (; i + 64 <= num_bytes; i += 64) {
+            __m512i va = _mm512_loadu_si512(vector1 + i);
+            __m512i vb = _mm512_loadu_si512(vector2 + i);
+            acc = _mm512_add_epi64(acc, _mm512_popcnt_epi64(_mm512_and_si512(va, vb)));
+        }
+        uint32_t count = static_cast<uint32_t>(_mm512_reduce_add_epi64(acc));
+        for (; i < num_bytes; ++i) {
+            count += static_cast<uint32_t>(__builtin_popcount(vector1[i] & vector2[i]));
+        }
+        return count;
+#else
+        return ScalarComputer<DistanceFunction::l2, Quantization::b8>::Horizontal(
+            vector1, vector2, num_bytes
+        );
+#endif
+    };
+};
+
 template <Quantization q>
-class SIMDUtilsComputer {};
+class SIMDUtilsComputer {
+  public:
+    using data_t = skmeans_value_t<q>;
+    using pdx_dist_t = pdx_distance_t<q>;
+
+    static void FlipSign(const data_t*, data_t*, const uint32_t*, size_t) {
+        assert(false && "FlipSign not supported");
+    }
+
+    static void InitPositionsArray(
+        size_t n_vectors,
+        size_t& n_vectors_not_pruned,
+        uint32_t* pruning_positions,
+        pdx_dist_t pruning_threshold,
+        const pdx_dist_t* pruning_distances
+    ) {
+        n_vectors_not_pruned = 0;
+        size_t vector_idx = 0;
+        constexpr size_t k_simd_width = 16;
+        const size_t n_vectors_simd = (n_vectors / k_simd_width) * k_simd_width;
+        __m512i threshold_vec = _mm512_set1_epi32(static_cast<int32_t>(pruning_threshold));
+        for (; vector_idx < n_vectors_simd; vector_idx += k_simd_width) {
+            __m512i distances = _mm512_loadu_si512(pruning_distances + vector_idx);
+            __mmask16 cmp_mask = _mm512_cmplt_epu32_mask(distances, threshold_vec);
+            if (SKM_UNLIKELY(cmp_mask)) {
+                __m512i indices = _mm512_add_epi32(
+                    _mm512_set1_epi32(vector_idx),
+                    _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0)
+                );
+                _mm512_mask_compressstoreu_epi32(
+                    pruning_positions + n_vectors_not_pruned, cmp_mask, indices
+                );
+                n_vectors_not_pruned += _mm_popcnt_u32(cmp_mask);
+            }
+        }
+        for (; vector_idx < n_vectors; ++vector_idx) {
+            pruning_positions[n_vectors_not_pruned] = vector_idx;
+            n_vectors_not_pruned += pruning_distances[vector_idx] < pruning_threshold;
+        }
+    }
+
+    static void PackU8ToU4x2(const uint8_t*, uint8_t*, size_t) {
+        assert(false && "PackU8ToU4x2 not applicable");
+    }
+};
 
 template <>
 class SIMDUtilsComputer<Quantization::f32> {
@@ -307,53 +387,6 @@ class SIMDUtilsComputer<Quantization::f32> {
 };
 
 template <>
-class SIMDUtilsComputer<Quantization::u8> {
-  public:
-    using data_t = skmeans_value_t<Quantization::u8>;
-    using pdx_dist_t = pdx_distance_t<Quantization::u8>;
-
-    static void FlipSign(const data_t*, data_t*, const uint32_t*, size_t) {
-        assert(false && "FlipSign not supported for u8");
-    }
-
-    static void InitPositionsArray(
-        size_t n_vectors,
-        size_t& n_vectors_not_pruned,
-        uint32_t* pruning_positions,
-        pdx_dist_t pruning_threshold,
-        const pdx_dist_t* pruning_distances
-    ) {
-        n_vectors_not_pruned = 0;
-        size_t vector_idx = 0;
-        constexpr size_t k_simd_width = 16;
-        const size_t n_vectors_simd = (n_vectors / k_simd_width) * k_simd_width;
-        __m512i threshold_vec = _mm512_set1_epi32(static_cast<int32_t>(pruning_threshold));
-        for (; vector_idx < n_vectors_simd; vector_idx += k_simd_width) {
-            __m512i distances = _mm512_loadu_si512(pruning_distances + vector_idx);
-            __mmask16 cmp_mask = _mm512_cmplt_epu32_mask(distances, threshold_vec);
-            if (SKM_UNLIKELY(cmp_mask)) {
-                __m512i indices = _mm512_add_epi32(
-                    _mm512_set1_epi32(vector_idx),
-                    _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0)
-                );
-                _mm512_mask_compressstoreu_epi32(
-                    pruning_positions + n_vectors_not_pruned, cmp_mask, indices
-                );
-                n_vectors_not_pruned += _mm_popcnt_u32(cmp_mask);
-            }
-        }
-        for (; vector_idx < n_vectors; ++vector_idx) {
-            pruning_positions[n_vectors_not_pruned] = vector_idx;
-            n_vectors_not_pruned += pruning_distances[vector_idx] < pruning_threshold;
-        }
-    }
-
-    static void PackU8ToU4x2(const uint8_t*, uint8_t*, size_t) {
-        assert(false && "PackU8ToU4x2 not applicable for u8");
-    }
-};
-
-template <>
 class SIMDUtilsComputer<Quantization::u4> {
   public:
     using data_t = skmeans_value_t<Quantization::u4>;
@@ -431,6 +464,68 @@ class SIMDUtilsComputer<Quantization::u4> {
         for (; i + 2 <= count; i += 2) {
             dst[i / 2] = (src[i] & 0x0F) | ((src[i + 1] & 0x0F) << 4);
         }
+    }
+};
+
+class SIMDFastScanComputer {
+  public:
+    static constexpr size_t kBlockSize = 32;
+
+    static void ScanBlock(
+        const uint8_t* packed,
+        const uint8_t* lut,
+        size_t binary_bytes,
+        uint16_t* out_dot,
+        size_t blk_count
+    ) {
+        if (blk_count == kBlockSize) {
+            ScanBlockAVX2(packed, lut, binary_bytes, out_dot);
+            return;
+        }
+        ScalarFastScanComputer::ScanBlock(packed, lut, binary_bytes, out_dot, blk_count);
+    }
+
+  private:
+    // AVX-512 includes AVX2; use the 256-bit path for the 32-point block.
+    static void ScanBlockAVX2(
+        const uint8_t* packed,
+        const uint8_t* lut,
+        size_t binary_bytes,
+        uint16_t* out_dot
+    ) {
+        const __m256i mask_0f = _mm256_set1_epi8(0x0F);
+
+        __m256i acc0 = _mm256_setzero_si256();
+        __m256i acc1 = _mm256_setzero_si256();
+
+        for (size_t b = 0; b < binary_bytes; ++b) {
+            __m128i lut_lo_128 = _mm_loadu_si128(
+                reinterpret_cast<const __m128i*>(lut + (2 * b) * 16));
+            __m128i lut_hi_128 = _mm_loadu_si128(
+                reinterpret_cast<const __m128i*>(lut + (2 * b + 1) * 16));
+            __m256i lut_lo_vec = _mm256_broadcastsi128_si256(lut_lo_128);
+            __m256i lut_hi_vec = _mm256_broadcastsi128_si256(lut_hi_128);
+
+            __m256i data = _mm256_loadu_si256(
+                reinterpret_cast<const __m256i*>(packed + b * kBlockSize));
+
+            __m256i lo_idx = _mm256_and_si256(data, mask_0f);
+            __m256i hi_idx = _mm256_and_si256(_mm256_srli_epi16(data, 4), mask_0f);
+
+            __m256i res_lo = _mm256_shuffle_epi8(lut_lo_vec, lo_idx);
+            __m256i res_hi = _mm256_shuffle_epi8(lut_hi_vec, hi_idx);
+
+            __m256i partial = _mm256_add_epi8(res_lo, res_hi);
+
+            __m256i lo16 = _mm256_cvtepu8_epi16(_mm256_castsi256_si128(partial));
+            __m256i hi16 = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(partial, 1));
+
+            acc0 = _mm256_add_epi16(acc0, lo16);
+            acc1 = _mm256_add_epi16(acc1, hi16);
+        }
+
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(out_dot), acc0);
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(out_dot + 16), acc1);
     }
 };
 

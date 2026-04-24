@@ -20,15 +20,16 @@
 namespace skmeans {
 
 /**
- * @brief RaBitQ quantizer with FastScan-accelerated distance kernel.
+ * @brief RaBitQ quantizer with SIMD-accelerated binary distance kernel.
  *
  * Uses FAISS RaBitQuantizer for Fit/Encode/Decode.
- * Distance computation uses a custom FastScan kernel (VPSHUFB/TBL lookups)
- * that processes 32 data points simultaneously per centroid.
+ * Distance computation uses DistanceComputer<l2, b8> (popcount-based)
+ * for 1:1 binary inner products between data codes and centroid bit planes.
  *
- * For k-means: centroids (K, small) are SQ-quantized to qb bits once,
- * then LUTs are built from the quantized values. Data points (N, large)
- * are byte-transposed into blocks of 32 for SIMD lookup.
+ * For k-means: centroids (K, small) are SQ-quantized to qb bits and
+ * bit-transposed once. Data points (N, large) stay as binary codes.
+ * For each (data, centroid) pair, computes weighted popcount across qb
+ * bit planes, then applies the RaBitQ correction formula.
  */
 class RaBitQGemmQuantizer : public IQuantizer<Quantization::u8> {
   public:
@@ -118,65 +119,49 @@ class RaBitQGemmQuantizer : public IQuantizer<Quantization::u8> {
         std::vector<float> dp_mult(n_x);
         PrecomputeCodeFactors(x_codes, n_x, sum_q.data(), or_c_l2sqr.data(), dp_mult.data());
 
-        // Quantize centroids and build LUTs
-        const size_t n_sub = 2 * binary_bytes_; // 2 sub-quantizers per byte position
+        // Quantize centroids → bit planes + correction factors
+        std::vector<uint8_t> query_planes(qb_ * n_y * binary_bytes_, 0);
         std::vector<float> c1(n_y), c2(n_y), c34(n_y), qr_to_c_l2sqr(n_y);
-        std::vector<uint8_t> all_luts(n_y * n_sub * 16);
-        QuantizeCentroidsAndBuildLUTs(
+        QuantizeCentroids(
             y_float, n_y, d,
-            all_luts.data(), c1.data(), c2.data(), c34.data(), qr_to_c_l2sqr.data()
+            query_planes.data(), c1.data(), c2.data(), c34.data(), qr_to_c_l2sqr.data()
         );
 
-        const size_t lut_stride = n_sub * 16;
-        const size_t n_blocks = (n_x + FastScanComputer::kBlockSize - 1) / FastScanComputer::kBlockSize;
+        using b8_computer = DistanceComputer<DistanceFunction::l2, Quantization::b8>;
 
         std::fill_n(out_distances, n_x, std::numeric_limits<float>::max());
         std::fill_n(out_knn, n_x, 0u);
 
         {
-            SKM_PROFILE_SCOPE("RaBitQ::FastScanDistance");
+            SKM_PROFILE_SCOPE("RaBitQ::BinaryDistance");
 #pragma omp parallel for num_threads(g_n_threads)
-            for (size_t blk = 0; blk < n_blocks; ++blk) {
-                const size_t blk_start = blk * FastScanComputer::kBlockSize;
-                const size_t blk_count = std::min(FastScanComputer::kBlockSize, n_x - blk_start);
-
-                // Byte-transpose this block's binary codes
-                std::unique_ptr<uint8_t[]> packed(new uint8_t[FastScanComputer::kBlockSize * binary_bytes_]);
-                TransposeBlock(x_codes, blk_start, blk_count, packed.get());
-
-                float best_dist[FastScanComputer::kBlockSize];
-                uint32_t best_idx[FastScanComputer::kBlockSize];
-                std::fill_n(best_dist, FastScanComputer::kBlockSize, std::numeric_limits<float>::max());
-                std::fill_n(best_idx, FastScanComputer::kBlockSize, 0u);
+            for (size_t i = 0; i < n_x; ++i) {
+                const uint8_t* code = x_codes + i * faiss_code_size_;
+                float best_dist = std::numeric_limits<float>::max();
+                uint32_t best_idx = 0;
 
                 for (size_t j = 0; j < n_y; ++j) {
-                    uint16_t dot_qo[FastScanComputer::kBlockSize];
-                    FastScanComputer::ScanBlock(
-                        packed.get(), all_luts.data() + j * lut_stride,
-                        binary_bytes_, dot_qo, blk_count
-                    );
+                    uint32_t dot_qo = 0;
+                    for (int b = 0; b < qb_; ++b) {
+                        const uint8_t* plane =
+                            query_planes.data() + (b * n_y + j) * binary_bytes_;
+                        dot_qo += b8_computer::Horizontal(code, plane, binary_bytes_) << b;
+                    }
+                    const float final_dot =
+                        c1[j] * static_cast<float>(dot_qo) +
+                        c2[j] * static_cast<float>(sum_q[i]) -
+                        c34[j];
+                    const float dist =
+                        or_c_l2sqr[i] + qr_to_c_l2sqr[j] -
+                        2.0f * dp_mult[i] * final_dot;
 
-                    for (size_t k = 0; k < blk_count; ++k) {
-                        const size_t i = blk_start + k;
-                        const float final_dot =
-                            c1[j] * static_cast<float>(dot_qo[k]) +
-                            c2[j] * static_cast<float>(sum_q[i]) -
-                            c34[j];
-                        const float dist =
-                            or_c_l2sqr[i] + qr_to_c_l2sqr[j] -
-                            2.0f * dp_mult[i] * final_dot;
-
-                        if (dist < best_dist[k]) {
-                            best_dist[k] = dist;
-                            best_idx[k] = static_cast<uint32_t>(j);
-                        }
+                    if (dist < best_dist) {
+                        best_dist = dist;
+                        best_idx = static_cast<uint32_t>(j);
                     }
                 }
-
-                for (size_t k = 0; k < blk_count; ++k) {
-                    out_distances[blk_start + k] = best_dist[k];
-                    out_knn[blk_start + k] = best_idx[k];
-                }
+                out_distances[i] = best_dist;
+                out_knn[i] = best_idx;
             }
         }
     }
@@ -214,70 +199,51 @@ class RaBitQGemmQuantizer : public IQuantizer<Quantization::u8> {
         std::vector<float> dp_mult(n_x);
         PrecomputeCodeFactors(x_codes, n_x, sum_q.data(), or_c_l2sqr.data(), dp_mult.data());
 
-        // Quantize centroids and build LUTs
-        const size_t n_sub = 2 * binary_bytes_;
+        // Quantize centroids
+        std::vector<uint8_t> query_planes(qb_ * n_y * binary_bytes_, 0);
         std::vector<float> c1(n_y), c2(n_y), c34(n_y), qr_to_c_l2sqr(n_y);
-        std::vector<uint8_t> all_luts(n_y * n_sub * 16);
-        QuantizeCentroidsAndBuildLUTs(
+        QuantizeCentroids(
             y_float, n_y, d,
-            all_luts.data(), c1.data(), c2.data(), c34.data(), qr_to_c_l2sqr.data()
+            query_planes.data(), c1.data(), c2.data(), c34.data(), qr_to_c_l2sqr.data()
         );
 
-        const size_t lut_stride = n_sub * 16;
-        const size_t n_blocks = (n_x + FastScanComputer::kBlockSize - 1) / FastScanComputer::kBlockSize;
+        using b8_computer = DistanceComputer<DistanceFunction::l2, Quantization::b8>;
 
         // Per-query top-k from quantized distances
         std::vector<float> topk_distances(n_x * rerank_k, std::numeric_limits<float>::max());
         std::vector<uint32_t> topk_indices(n_x * rerank_k, static_cast<uint32_t>(-1));
 
         {
-            SKM_PROFILE_SCOPE("RaBitQ::FastScanDistance");
+            SKM_PROFILE_SCOPE("RaBitQ::BinaryDistance");
 #pragma omp parallel for num_threads(g_n_threads)
-            for (size_t blk = 0; blk < n_blocks; ++blk) {
-                const size_t blk_start = blk * FastScanComputer::kBlockSize;
-                const size_t blk_count = std::min(FastScanComputer::kBlockSize, n_x - blk_start);
-
-                std::unique_ptr<uint8_t[]> packed(new uint8_t[FastScanComputer::kBlockSize * binary_bytes_]);
-                TransposeBlock(x_codes, blk_start, blk_count, packed.get());
-
-                // Per-point candidate heaps (small vectors on stack)
-                std::vector<std::pair<float, uint32_t>> candidates[FastScanComputer::kBlockSize];
-                for (size_t k = 0; k < blk_count; ++k) {
-                    candidates[k].reserve(n_y);
-                }
+            for (size_t i = 0; i < n_x; ++i) {
+                const uint8_t* code = x_codes + i * faiss_code_size_;
+                std::vector<std::pair<float, uint32_t>> candidates(n_y);
 
                 for (size_t j = 0; j < n_y; ++j) {
-                    uint16_t dot_qo[FastScanComputer::kBlockSize];
-                    FastScanComputer::ScanBlock(
-                        packed.get(), all_luts.data() + j * lut_stride,
-                        binary_bytes_, dot_qo, blk_count
-                    );
-
-                    for (size_t k = 0; k < blk_count; ++k) {
-                        const size_t i = blk_start + k;
-                        const float final_dot =
-                            c1[j] * static_cast<float>(dot_qo[k]) +
-                            c2[j] * static_cast<float>(sum_q[i]) -
-                            c34[j];
-                        const float dist =
-                            or_c_l2sqr[i] + qr_to_c_l2sqr[j] -
-                            2.0f * dp_mult[i] * final_dot;
-                        candidates[k].push_back({dist, static_cast<uint32_t>(j)});
+                    uint32_t dot_qo = 0;
+                    for (int b = 0; b < qb_; ++b) {
+                        const uint8_t* plane =
+                            query_planes.data() + (b * n_y + j) * binary_bytes_;
+                        dot_qo += b8_computer::Horizontal(code, plane, binary_bytes_) << b;
                     }
+                    const float final_dot =
+                        c1[j] * static_cast<float>(dot_qo) +
+                        c2[j] * static_cast<float>(sum_q[i]) -
+                        c34[j];
+                    const float dist =
+                        or_c_l2sqr[i] + qr_to_c_l2sqr[j] -
+                        2.0f * dp_mult[i] * final_dot;
+                    candidates[j] = {dist, static_cast<uint32_t>(j)};
                 }
 
-                for (size_t k = 0; k < blk_count; ++k) {
-                    const size_t i = blk_start + k;
-                    size_t actual_k = std::min(rerank_k, n_y);
-                    std::partial_sort(
-                        candidates[k].begin(),
-                        candidates[k].begin() + actual_k,
-                        candidates[k].end()
-                    );
-                    for (size_t ki = 0; ki < actual_k; ++ki) {
-                        topk_distances[i * rerank_k + ki] = candidates[k][ki].first;
-                        topk_indices[i * rerank_k + ki] = candidates[k][ki].second;
-                    }
+                size_t actual_k = std::min(rerank_k, n_y);
+                std::partial_sort(
+                    candidates.begin(), candidates.begin() + actual_k, candidates.end()
+                );
+                for (size_t ki = 0; ki < actual_k; ++ki) {
+                    topk_distances[i * rerank_k + ki] = candidates[ki].first;
+                    topk_indices[i * rerank_k + ki] = candidates[ki].second;
                 }
             }
         }
@@ -342,24 +308,15 @@ class RaBitQGemmQuantizer : public IQuantizer<Quantization::u8> {
         }
     }
 
-    /// SQ-quantize centroids to qb bits and build 16-entry LUTs for FastScan.
-    ///
-    /// Each centroid produces d SQ-quantized uint8 values.
-    /// Sub-quantizer m corresponds to 4 consecutive dimensions (4m..4m+3).
-    /// LUT[m][c] = sum of quantized values at dimensions where bit k is set in c.
-    ///
-    /// Layout: lut[j * n_sub * 16 + m * 16 + c] for centroid j, sub-quantizer m, code c.
-    /// Sub-quantizers are ordered: byte 0 low nibble, byte 0 high nibble,
-    ///                             byte 1 low nibble, byte 1 high nibble, ...
-    void QuantizeCentroidsAndBuildLUTs(
+    /// Batch SQ-quantize centroids to qb bits and bit-transpose into planes.
+    void QuantizeCentroids(
         const float* y_float, size_t n_y, size_t d,
-        uint8_t* all_luts,
+        uint8_t* query_planes,
         float* c1, float* c2, float* c34, float* qr_to_c_l2sqr
     ) const {
-        SKM_PROFILE_SCOPE("RaBitQ::QuantizeCentroidsAndBuildLUTs");
+        SKM_PROFILE_SCOPE("RaBitQ::QuantizeCentroids");
         const float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(d));
         const float max_val = static_cast<float>((1 << qb_) - 1);
-        const size_t n_sub = 2 * binary_bytes_;
 
 #pragma omp parallel for num_threads(g_n_threads)
         for (size_t j = 0; j < n_y; ++j) {
@@ -393,60 +350,15 @@ class RaBitQGemmQuantizer : public IQuantizer<Quantization::u8> {
             c2[j] = 2.0f * v_min * inv_sqrt_d;
             c34[j] = inv_sqrt_d * (delta * sum_qq + static_cast<float>(d) * v_min);
 
-            // Build LUTs for this centroid
-            // Each byte of the binary code maps to 2 sub-quantizers (4 dims each).
-            // Sub-quantizer 2b handles dims 8b..8b+3 (low nibble of byte b)
-            // Sub-quantizer 2b+1 handles dims 8b+4..8b+7 (high nibble of byte b)
-            uint8_t* lut_j = all_luts + j * n_sub * 16;
-            for (size_t b = 0; b < binary_bytes_; ++b) {
-                uint8_t* lut_lo = lut_j + (2 * b) * 16;
-                uint8_t* lut_hi = lut_j + (2 * b + 1) * 16;
-
-                // Get the 8 SQ values for dimensions 8b..8b+7
-                uint8_t sq[8] = {0};
-                for (int k = 0; k < 8 && (8 * b + k) < d; ++k) {
-                    sq[k] = quantized[8 * b + k];
+            // Bit-transpose into qb planes
+            for (int b = 0; b < qb_; ++b) {
+                uint8_t* plane = query_planes + (b * n_y + j) * binary_bytes_;
+                std::memset(plane, 0, binary_bytes_);
+                for (size_t dim = 0; dim < d; ++dim) {
+                    if ((quantized[dim] >> b) & 1) {
+                        plane[dim / 8] |= static_cast<uint8_t>(1 << (dim % 8));
+                    }
                 }
-
-                // Low nibble LUT: dims 8b..8b+3
-                for (int c = 0; c < 16; ++c) {
-                    uint8_t val = 0;
-                    if (c & 1) val += sq[0];
-                    if (c & 2) val += sq[1];
-                    if (c & 4) val += sq[2];
-                    if (c & 8) val += sq[3];
-                    lut_lo[c] = val;
-                }
-
-                // High nibble LUT: dims 8b+4..8b+7
-                for (int c = 0; c < 16; ++c) {
-                    uint8_t val = 0;
-                    if (c & 1) val += sq[4];
-                    if (c & 2) val += sq[5];
-                    if (c & 4) val += sq[6];
-                    if (c & 8) val += sq[7];
-                    lut_hi[c] = val;
-                }
-            }
-        }
-    }
-
-    /// Byte-level matrix transpose: extract binary codes from n points
-    /// and write them in column-major order for SIMD scanning.
-    ///
-    /// Input:  codes[i] has binary_bytes_ bytes at offset i * faiss_code_size_
-    /// Output: packed[b * FastScanComputer::kBlockSize + k] = codes[blk_start + k][b]
-    void TransposeBlock(
-        const uint8_t* codes, size_t blk_start, size_t blk_count,
-        uint8_t* packed
-    ) const {
-        // Zero the entire block (handles partial blocks where blk_count < 32)
-        std::memset(packed, 0, binary_bytes_ * FastScanComputer::kBlockSize);
-
-        for (size_t k = 0; k < blk_count; ++k) {
-            const uint8_t* src = codes + (blk_start + k) * faiss_code_size_;
-            for (size_t b = 0; b < binary_bytes_; ++b) {
-                packed[b * FastScanComputer::kBlockSize + k] = src[b];
             }
         }
     }

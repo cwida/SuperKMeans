@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cassert>
+#include <cstring>
 
 #include "superkmeans/common.h"
 
@@ -105,8 +106,66 @@ class ScalarComputer<DistanceFunction::l2, Quantization::u4> {
     };
 };
 
+template <>
+class ScalarComputer<DistanceFunction::l2, Quantization::b8> {
+  public:
+    using distance_t = pdx_distance_t<Quantization::b8>;
+    using data_t = skmeans_value_t<Quantization::b8>;
+
+    /**
+     * @brief Computes popcount(a AND b) — binary inner product.
+     * @param vector1 Binary vector 1 (packed bytes)
+     * @param vector2 Binary vector 2 (packed bytes)
+     * @param num_bytes Number of bytes to process (d/8 for d-bit vectors)
+     * @return popcount of bitwise AND
+     */
+    static distance_t Horizontal(
+        const data_t* SKM_RESTRICT vector1,
+        const data_t* SKM_RESTRICT vector2,
+        size_t num_bytes
+    ) {
+        uint32_t count = 0;
+        const uint64_t* a64 = reinterpret_cast<const uint64_t*>(vector1);
+        const uint64_t* b64 = reinterpret_cast<const uint64_t*>(vector2);
+        size_t n_words = num_bytes / 8;
+        for (size_t i = 0; i < n_words; ++i) {
+            count += static_cast<uint32_t>(__builtin_popcountll(a64[i] & b64[i]));
+        }
+        for (size_t i = n_words * 8; i < num_bytes; ++i) {
+            count += static_cast<uint32_t>(__builtin_popcount(vector1[i] & vector2[i]));
+        }
+        return count;
+    };
+};
+
 template <Quantization q>
-class ScalarUtilsComputer {};
+class ScalarUtilsComputer {
+  public:
+    using data_t = skmeans_value_t<q>;
+    using pdx_dist_t = pdx_distance_t<q>;
+
+    static void FlipSign(const data_t*, data_t*, const uint32_t*, size_t) {
+        assert(false && "FlipSign not supported");
+    }
+
+    static void InitPositionsArray(
+        size_t n_vectors,
+        size_t& n_vectors_not_pruned,
+        uint32_t* pruning_positions,
+        pdx_dist_t pruning_threshold,
+        const pdx_dist_t* pruning_distances
+    ) {
+        n_vectors_not_pruned = 0;
+        for (size_t i = 0; i < n_vectors; ++i) {
+            pruning_positions[n_vectors_not_pruned] = i;
+            n_vectors_not_pruned += pruning_distances[i] < pruning_threshold;
+        }
+    }
+
+    static void PackU8ToU4x2(const uint8_t*, uint8_t*, size_t) {
+        assert(false && "PackU8ToU4x2 not applicable");
+    }
+};
 
 template <>
 class ScalarUtilsComputer<Quantization::f32> {
@@ -158,35 +217,6 @@ class ScalarUtilsComputer<Quantization::f32> {
 };
 
 template <>
-class ScalarUtilsComputer<Quantization::u8> {
-  public:
-    using data_t = skmeans_value_t<Quantization::u8>;
-    using pdx_dist_t = pdx_distance_t<Quantization::u8>;
-
-    static void FlipSign(const data_t*, data_t*, const uint32_t*, size_t) {
-        assert(false && "FlipSign not supported for u8");
-    }
-
-    static void InitPositionsArray(
-        size_t n_vectors,
-        size_t& n_vectors_not_pruned,
-        uint32_t* pruning_positions,
-        pdx_dist_t pruning_threshold,
-        const pdx_dist_t* pruning_distances
-    ) {
-        n_vectors_not_pruned = 0;
-        for (size_t i = 0; i < n_vectors; ++i) {
-            pruning_positions[n_vectors_not_pruned] = i;
-            n_vectors_not_pruned += pruning_distances[i] < pruning_threshold;
-        }
-    }
-
-    static void PackU8ToU4x2(const uint8_t*, uint8_t*, size_t) {
-        assert(false && "PackU8ToU4x2 not applicable for u8");
-    }
-};
-
-template <>
 class ScalarUtilsComputer<Quantization::u4> {
   public:
     using data_t = skmeans_value_t<Quantization::u4>;
@@ -225,6 +255,31 @@ class ScalarUtilsComputer<Quantization::u4> {
         SKM_VECTORIZE_LOOP
         for (size_t k = 0; k < n_packed; ++k) {
             dst[k] = (src[2 * k] & 0x0F) | ((src[2 * k + 1] & 0x0F) << 4);
+        }
+    }
+};
+
+class ScalarFastScanComputer {
+  public:
+    static constexpr size_t kBlockSize = 32;
+
+    static void ScanBlock(
+        const uint8_t* packed,
+        const uint8_t* lut,
+        size_t binary_bytes,
+        uint16_t* out_dot,
+        size_t blk_count
+    ) {
+        std::memset(out_dot, 0, kBlockSize * sizeof(uint16_t));
+        for (size_t b = 0; b < binary_bytes; ++b) {
+            const uint8_t* lut_lo = lut + (2 * b) * 16;
+            const uint8_t* lut_hi = lut + (2 * b + 1) * 16;
+            const uint8_t* row = packed + b * kBlockSize;
+            for (size_t k = 0; k < blk_count; ++k) {
+                uint8_t byte = row[k];
+                out_dot[k] += static_cast<uint16_t>(lut_lo[byte & 0x0F])
+                            + static_cast<uint16_t>(lut_hi[byte >> 4]);
+            }
         }
     }
 };

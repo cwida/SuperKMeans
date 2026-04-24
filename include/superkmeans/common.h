@@ -128,7 +128,7 @@ static constexpr uint32_t AlignValue(T n) {
 
 enum class DistanceFunction : uint8_t { l2, dp };
 
-enum class Quantization : uint8_t { f32, u8, u4, f16, bf16 };
+enum class Quantization : uint8_t { f32, u8, u4, b8, f16, bf16 };
 
 enum class QuantizerType : uint8_t { none, sq8, sq4, rabitq, rabitq_gemm };
 
@@ -154,6 +154,10 @@ struct PDXDistanceType<Quantization::u8> {
 };
 template <>
 struct PDXDistanceType<Quantization::u4> {
+    using type = uint32_t;
+};
+template <>
+struct PDXDistanceType<Quantization::b8> {
     using type = uint32_t;
 };
 template <Quantization q>
