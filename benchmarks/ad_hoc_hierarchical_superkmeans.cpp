@@ -72,6 +72,7 @@ int main(int argc, char* argv[]) {
     // Base SuperKMeans config parameters
     config.iters = 10;
     config.verbose = true;
+    config.verbose_detail = true;
     config.n_threads = THREADS;
     config.objective_k = 100;
     config.ann_explore_fraction = 0.01f;
@@ -122,6 +123,13 @@ int main(int argc, char* argv[]) {
     timer_fast.Toc();
     std::cout << "Time taken for AssignTrainingPoints: " << timer_fast.GetMilliseconds() << " ms"
               << std::endl;
+
+    using SKM = skmeans::SuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>;
+    double wcss_f32 = SKM::ComputeWCSS(
+        data.data(), centroids.data(), assignments.data(), n, d
+    );
+    std::cout << "WCSS (f32): " << std::fixed << std::setprecision(2) << wcss_f32 << std::endl;
+
     auto balance_stats = skmeans::HierarchicalSuperKMeans<
         skmeans::Quantization::f32,
         skmeans::DistanceFunction::l2>::GetClustersBalanceStats(assignments.data(), n, n_clusters);

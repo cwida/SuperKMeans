@@ -119,6 +119,9 @@ EXPLORE_FRACTIONS = [
     0.1
 ]
 
+# Fixed absolute centroid counts to always evaluate (nprobe=1, nprobe=2)
+ABSOLUTE_EXPLORE_COUNTS = [1, 2]
+
 # KNN values to test
 KNN_VALUES = [10, 100]
 
@@ -172,10 +175,17 @@ def compute_recall(gt_dict, assignments, queries, centroids, num_centroids, knn)
     dot_products = queries @ centroids.T  # (n_queries, num_centroids)
     distances = query_norms + centroid_norms - 2 * dot_products  # (n_queries, num_centroids)
 
-    results = []
-    for explore_frac in EXPLORE_FRACTIONS:
-        centroids_to_explore = max(1, int(num_centroids * explore_frac))
+    # Build list of (centroids_to_explore, explore_frac) configs:
+    # absolute counts first (nprobe=1, nprobe=2), then fraction-based
+    explore_configs = []
+    for count in ABSOLUTE_EXPLORE_COUNTS:
+        c = min(count, num_centroids)
+        explore_configs.append((c, c / num_centroids))
+    for frac in EXPLORE_FRACTIONS:
+        explore_configs.append((max(1, int(num_centroids * frac)), frac))
 
+    results = []
+    for centroids_to_explore, explore_frac in explore_configs:
         # Find top-N nearest centroids for each query
         top_centroid_indices = np.argsort(distances, axis=1)[:, :centroids_to_explore]
 
@@ -251,7 +261,9 @@ def write_results_to_csv(
         final_objective,
         config_dict,
         results_knn_10,
-        results_knn_100
+        results_knn_100,
+        balance_stats_json="",
+        iteration_stats_json=""
 ):
     """Write results to CSV file.
 
@@ -270,6 +282,7 @@ def write_results_to_csv(
         config_dict: Dictionary with algorithm-specific configuration (will be serialized to JSON)
         results_knn_10: Results for KNN=10
         results_knn_100: Results for KNN=100
+        balance_stats_json: JSON string with cluster balance statistics (including cluster_sizes)
     """
     arch = os.environ.get('SKM_ARCH', 'default')
     benchmarks_dir = Path(__file__).parent
@@ -285,11 +298,18 @@ def write_results_to_csv(
               'data_size', 'n_clusters', 'construction_time_ms', 'threads', 'final_objective']
     if has_recall_data:
         for knn in KNN_VALUES:
+            for count in ABSOLUTE_EXPLORE_COUNTS:
+                header.append(f'recall@{knn}@nprobe{count}')
+                header.append(f'recall_std@{knn}@nprobe{count}')
+                header.append(f'centroids_explored@{knn}@nprobe{count}')
+                header.append(f'vectors_explored@{knn}@nprobe{count}')
             for explore_frac in EXPLORE_FRACTIONS:
                 header.append(f'recall@{knn}@{explore_frac * 100:.2f}')
                 header.append(f'recall_std@{knn}@{explore_frac * 100:.2f}')
                 header.append(f'centroids_explored@{knn}@{explore_frac * 100:.2f}')
                 header.append(f'vectors_explored@{knn}@{explore_frac * 100:.2f}')
+    header.append('balance_stats')
+    header.append('iteration_stats')
     header.append('config')
     row = [
         timestamp,
@@ -318,6 +338,8 @@ def write_results_to_csv(
             row.append(f'{std_recall:.6f}')
             row.append(str(centroids_to_explore))
             row.append(f'{avg_vectors:.2f}')
+    row.append(balance_stats_json)
+    row.append(iteration_stats_json)
     config_json = json.dumps(config_dict)
     row.append(config_json)
     with open(csv_path, 'a', newline='') as f:

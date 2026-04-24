@@ -2,7 +2,10 @@
 
 #include <Eigen/Dense>
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <iomanip>
+#include <numeric>
 #include <omp.h>
 #include <random>
 
@@ -63,6 +66,8 @@ struct SuperKMeansConfig {
 
     bool data_already_rotated = false; // Whether input data is already rotated (skip rotation)
     bool quantized_centroid_update = false; // Accumulate centroids in quantized domain (u8/u4 only)
+    bool full_precision_final_centroids = false; // Recompute final centroids from raw float data
+    bool verbose_detail = false; // Print per-cluster movement details each iteration
 };
 
 /**
@@ -73,6 +78,8 @@ struct SuperKMeansIterationStats {
     float objective = 0.0f; // Total clustering cost (WCSS)
     float shift = 0.0f;     // Average squared centroid shift from previous iteration
     size_t split = 0;       // Number of clusters that were split (empty cluster handling)
+    size_t movements = 0;           // Number of assignments that changed from previous iteration
+    size_t affected_clusters = 0;    // Number of clusters involved in movements
     float recall = 0.0f;    // Recall@k value (0.0 to 1.0, only when queries provided)
     // Percentage of vectors not pruned (0.0 to 1.0, -1.0 if not applicable)
     float not_pruned_pct = -1.0f;
@@ -80,6 +87,33 @@ struct SuperKMeansIterationStats {
     uint32_t partial_d = 0;
     // Whether this iteration used BLAS-only computation (no PDX pruning)
     bool is_gemm_only = false;
+
+    std::string to_json() const {
+        std::ostringstream oss;
+        oss << "{\"iteration\":" << iteration
+            << ",\"objective\":" << std::setprecision(6) << objective
+            << ",\"shift\":" << std::setprecision(4) << shift
+            << ",\"split\":" << split
+            << ",\"movements\":" << movements
+            << ",\"affected_clusters\":" << affected_clusters
+            << ",\"recall\":" << std::setprecision(4) << recall
+            << ",\"not_pruned_pct\":" << not_pruned_pct
+            << ",\"partial_d\":" << partial_d
+            << ",\"is_gemm_only\":" << (is_gemm_only ? "true" : "false")
+            << "}";
+        return oss.str();
+    }
+
+    static std::string vector_to_json(const std::vector<SuperKMeansIterationStats>& stats) {
+        std::ostringstream oss;
+        oss << "[";
+        for (size_t i = 0; i < stats.size(); ++i) {
+            if (i > 0) oss << ",";
+            oss << stats[i].to_json();
+        }
+        oss << "]";
+        return oss.str();
+    }
 };
 
 /**
@@ -92,19 +126,69 @@ struct ClusterBalanceStats {
     float cv = 0.0f;
     size_t min = 0;
     size_t max = 0;
+    size_t n_empty = 0;
+    float skewness = 0.0f;
+    float kurtosis = 0.0f;
+    float iqr = 0.0f;
+    float whisker_low = 0.0f;
+    float whisker_high = 0.0f;
+    std::vector<size_t> outliers;
+    std::vector<size_t> cluster_sizes; // All cluster sizes (for plotting distributions)
+    // Percentiles: 5, 10, 20, 25, 30, 40, 50, 60, 70, 75, 80, 90, 95, 99, 99.9
+    static constexpr std::array<float, 15> PERCENTILE_KEYS = {
+        5.0f, 10.0f, 20.0f, 25.0f, 30.0f, 40.0f, 50.0f, 60.0f,
+        70.0f, 75.0f, 80.0f, 90.0f, 95.0f, 99.0f, 99.9f
+    };
+    std::array<float, 15> percentiles = {};
 
     std::string to_json() const {
         std::ostringstream oss;
+        oss << std::setprecision(4);
         oss << "{\"mean\":" << mean << ",\"geometric_mean\":" << geometric_mean
-            << ",\"stdev\":" << stdev << ",\"cv\":" << cv << ",\"min\":" << min
-            << ",\"max\":" << max << "}";
+            << ",\"stdev\":" << stdev << ",\"cv\":" << cv
+            << ",\"min\":" << min << ",\"max\":" << max
+            << ",\"n_empty\":" << n_empty
+            << ",\"skewness\":" << skewness << ",\"kurtosis\":" << kurtosis
+            << ",\"iqr\":" << iqr
+            << ",\"whisker_low\":" << whisker_low << ",\"whisker_high\":" << whisker_high
+            << ",\"percentiles\":{";
+        for (size_t i = 0; i < PERCENTILE_KEYS.size(); ++i) {
+            if (i > 0) oss << ",";
+            // Format key: "5" for integer percentiles, "99.9" for fractional
+            if (PERCENTILE_KEYS[i] == std::floor(PERCENTILE_KEYS[i])) {
+                oss << "\"" << static_cast<int>(PERCENTILE_KEYS[i]) << "\":" << percentiles[i];
+            } else {
+                oss << "\"" << PERCENTILE_KEYS[i] << "\":" << percentiles[i];
+            }
+        }
+        oss << "},\"outliers\":[";
+        for (size_t i = 0; i < outliers.size(); ++i) {
+            if (i > 0) oss << ",";
+            oss << outliers[i];
+        }
+        oss << "],\"cluster_sizes\":[";
+        for (size_t i = 0; i < cluster_sizes.size(); ++i) {
+            if (i > 0) oss << ",";
+            oss << cluster_sizes[i];
+        }
+        oss << "]}";
         return oss.str();
     }
 
     void print() const {
         std::cout << "Cluster size stats: "
                   << "mean=" << mean << ", gmean=" << geometric_mean << ", std=" << stdev
-                  << ", CV=" << cv << ", min=" << min << ", max=" << max << std::endl;
+                  << ", CV=" << cv << ", min=" << min << ", max=" << max
+                  << ", empty=" << n_empty
+                  << ", skew=" << std::fixed << std::setprecision(3) << skewness
+                  << ", kurt=" << kurtosis << std::defaultfloat
+                  << "\n  IQR=" << iqr
+                  << ", whiskers=[" << whisker_low << ", " << whisker_high << "]"
+                  << ", outliers=" << outliers.size()
+                  << "\n  P5=" << percentiles[0] << " P25=" << percentiles[3]
+                  << " P50=" << percentiles[6] << " P75=" << percentiles[9]
+                  << " P95=" << percentiles[12] << " P99=" << percentiles[13]
+                  << std::endl;
     }
 };
 
@@ -238,10 +322,18 @@ class SuperKMeans {
             distances.reset(new distance_t[n]);
             data_norms.reset(new float[n_samples]);
             centroid_norms.reset(new float[n_clusters]);
+            if (config.verbose) {
+                prev_assignments_buf.reset(new uint32_t[n_samples]);
+            }
         }
         if constexpr (q != Quantization::f32) {
             if (config.quantized_centroid_update) {
-                quantized_centroid_accumulators.reset(new uint32_t[n_clusters * d]);
+                if (config.quantizer_type == QuantizerType::rabitq_gemm ||
+                    config.quantizer_type == QuantizerType::rabitq) {
+                    decoded_data_buffer.reset(new float[n_samples * d]);
+                } else {
+                    quantized_centroid_accumulators.reset(new uint32_t[n_clusters * d]);
+                }
             }
         }
         std::vector<size_t> not_pruned_counts;
@@ -442,6 +534,28 @@ class SuperKMeans {
 
         trained = true;
 
+        // When quantized centroid update was used but we want full-precision final centroids,
+        // recompute by averaging the raw (rotated) float training data using final assignments.
+        if constexpr (q != Quantization::f32) {
+            if (config.quantized_centroid_update && config.full_precision_final_centroids) {
+                ResetCentroids(n_clusters);
+                UpdateCentroids(data_to_cluster, n_samples, n_clusters);
+#pragma omp parallel for if (n_threads > 1) num_threads(n_threads)
+                for (size_t i = 0; i < n_clusters; ++i) {
+                    if (cluster_sizes[i] == 0) continue;
+                    float mult = 1.0f / cluster_sizes[i];
+                    auto p = horizontal_centroids.get() + i * d;
+                    SKM_VECTORIZE_LOOP
+                    for (size_t j = 0; j < d; ++j) {
+                        p[j] *= mult;
+                    }
+                }
+                if (config.angular) {
+                    PostprocessCentroids(n_clusters);
+                }
+            }
+        }
+
         auto output_centroids = GetOutputCentroids(config.unrotate_centroids);
         if (config.verbose) {
             Profiler::Get().PrintHierarchical();
@@ -529,6 +643,47 @@ class SuperKMeans {
             );
         }
 
+        // Pruning path: reuse trained encoded data when all data was used for training.
+        // quantized_data and quantized_centroids (+ PDXified buffers) are all in the
+        // rotated domain from Train/ConsolidateCentroids — we reuse them directly
+        // rather than re-encoding from the caller's (potentially unrotated) arguments.
+        if constexpr (q != Quantization::f32) {
+            if (config.sampling_fraction >= 1.0f && quantizer->SupportsPruning()) {
+                std::vector<uint32_t> result_assignments(
+                    assignments.get(), assignments.get() + n_vectors);
+                std::vector<distance_t> result_distances(n_vectors,
+                    std::numeric_limits<distance_t>::max());
+                std::vector<size_t> not_pruned_counts(n_vectors, 0);
+
+                // Reuse stored quantized_centroids (rotated domain, from ConsolidateCentroids).
+                // Only refresh partial norms (may be stale after ConsolidateCentroids re-encoded).
+                quantizer->CacheCentroidPartialNorms(
+                    quantized_centroids.get(), n_centroids, d, partial_d
+                );
+                quantizer->CacheDataPartialNorms(quantized_data.get(), n_vectors, d, partial_d);
+
+                // Reuse stored PDXified buffers (already up-to-date from ConsolidateCentroids)
+                auto pdx_wrapper = layout_t(
+                    pdxified_quantized_centroids.get(),
+                    *pruner,
+                    n_centroids,
+                    PDXDim(d),
+                    partial_hor_quantized_centroids.get()
+                );
+
+                quantizer->FindNearestNeighborWithPruning(
+                    quantized_data.get(), quantized_centroids.get(),
+                    vectors, centroids,
+                    n_vectors, n_centroids, d,
+                    result_assignments.data(), result_distances.data(),
+                    pdx_wrapper, partial_d, not_pruned_counts.data()
+                );
+
+                return result_assignments;
+            }
+        }
+
+        // BLAS-only fallback
         std::vector<uint32_t> result_assignments(n_vectors);
         std::vector<distance_t> result_distances(n_vectors);
         std::unique_ptr<distance_t[]> tmp_distances_buf(new distance_t[X_BATCH_SIZE * Y_BATCH_SIZE]);
@@ -802,10 +957,12 @@ class SuperKMeans {
             cluster_sizes[assignments[i]]++;
         }
 
-        auto sum = std::accumulate(cluster_sizes.begin(), cluster_sizes.end(), size_t{0});
-        stats.mean = static_cast<float>(sum) / static_cast<float>(cluster_sizes.size());
+        const float n_f = static_cast<float>(n_clusters);
 
-        // Geometric mean
+        auto sum = std::accumulate(cluster_sizes.begin(), cluster_sizes.end(), size_t{0});
+        stats.mean = static_cast<float>(sum) / n_f;
+
+        // Geometric mean and empty count
         float log_sum = 0.0f;
         size_t non_zero_count = 0;
         for (size_t size : cluster_sizes) {
@@ -816,23 +973,117 @@ class SuperKMeans {
         }
         stats.geometric_mean =
             (non_zero_count > 0) ? std::exp(log_sum / static_cast<float>(non_zero_count)) : 0.0f;
+        stats.n_empty = n_clusters - non_zero_count;
 
-        auto sq_sum = std::inner_product(
-            cluster_sizes.begin(), cluster_sizes.end(), cluster_sizes.begin(), size_t{0}
-        );
-        stats.stdev = std::sqrt(
-            static_cast<float>(sq_sum) / static_cast<float>(cluster_sizes.size()) -
-            stats.mean * stats.mean
-        );
+        // Variance, stdev, CV
+        double var_acc = 0.0;
+        for (size_t size : cluster_sizes) {
+            double diff = static_cast<double>(size) - static_cast<double>(stats.mean);
+            var_acc += diff * diff;
+        }
+        float variance = static_cast<float>(var_acc / static_cast<double>(n_clusters));
+        stats.stdev = std::sqrt(variance);
+        stats.cv = (stats.mean > 0.0f) ? stats.stdev / stats.mean : 0.0f;
 
-        // Coefficient of variation
-        stats.cv = stats.stdev / stats.mean;
+        // Skewness and kurtosis (population, using stdev already computed)
+        if (stats.stdev > 0.0f) {
+            double m3 = 0.0, m4 = 0.0;
+            for (size_t size : cluster_sizes) {
+                double z = (static_cast<double>(size) - static_cast<double>(stats.mean))
+                           / static_cast<double>(stats.stdev);
+                double z2 = z * z;
+                m3 += z2 * z;
+                m4 += z2 * z2;
+            }
+            stats.skewness = static_cast<float>(m3 / static_cast<double>(n_clusters));
+            stats.kurtosis = static_cast<float>(m4 / static_cast<double>(n_clusters) - 3.0);
+        }
 
+        // Min, max
         auto minmax = std::minmax_element(cluster_sizes.begin(), cluster_sizes.end());
         stats.min = *minmax.first;
         stats.max = *minmax.second;
 
+        // Sort for percentiles, IQR, whiskers, outliers
+        std::vector<size_t> sorted(cluster_sizes);
+        std::sort(sorted.begin(), sorted.end());
+
+        // Percentiles (linear interpolation)
+        auto percentile = [&](float p) -> float {
+            double rank = (p / 100.0) * static_cast<double>(n_clusters - 1);
+            size_t lo = static_cast<size_t>(rank);
+            size_t hi = std::min(lo + 1, n_clusters - 1);
+            double frac = rank - static_cast<double>(lo);
+            return static_cast<float>(
+                static_cast<double>(sorted[lo]) * (1.0 - frac) +
+                static_cast<double>(sorted[hi]) * frac
+            );
+        };
+        for (size_t i = 0; i < ClusterBalanceStats::PERCENTILE_KEYS.size(); ++i) {
+            stats.percentiles[i] = percentile(ClusterBalanceStats::PERCENTILE_KEYS[i]);
+        }
+
+        // IQR, whiskers (Tukey fences), outliers
+        float q1 = percentile(25.0f);
+        float q3 = percentile(75.0f);
+        stats.iqr = q3 - q1;
+        float fence_low = q1 - 1.5f * stats.iqr;
+        float fence_high = q3 + 1.5f * stats.iqr;
+        // Clamp whiskers to actual data range
+        stats.whisker_low = static_cast<float>(sorted.front());
+        stats.whisker_high = static_cast<float>(sorted.back());
+        for (size_t v : sorted) {
+            if (static_cast<float>(v) >= fence_low) {
+                stats.whisker_low = static_cast<float>(v);
+                break;
+            }
+        }
+        for (auto it = sorted.rbegin(); it != sorted.rend(); ++it) {
+            if (static_cast<float>(*it) <= fence_high) {
+                stats.whisker_high = static_cast<float>(*it);
+                break;
+            }
+        }
+        // Collect outlier values (outside whiskers)
+        for (size_t v : sorted) {
+            if (static_cast<float>(v) < fence_low || static_cast<float>(v) > fence_high) {
+                stats.outliers.push_back(v);
+            }
+        }
+
+        stats.cluster_sizes = std::move(cluster_sizes);
         return stats;
+    }
+
+    /**
+     * @brief Compute WCSS in the original float32 domain.
+     *
+     * Sums L2 squared distances from each vector to its assigned centroid
+     * using the SIMD-accelerated Horizontal kernel.
+     *
+     * @param data Float32 data matrix (row-major, n_vectors x d)
+     * @param centroids Float32 centroid matrix (row-major, n_centroids x d)
+     * @param assignments Cluster assignment for each vector [n_vectors]
+     * @param n_vectors Number of data vectors
+     * @param d Dimensionality
+     * @return WCSS (sum of squared L2 distances to assigned centroids)
+     */
+    [[nodiscard]] static double ComputeWCSS(
+        const float* SKM_RESTRICT data,
+        const float* SKM_RESTRICT centroids,
+        const uint32_t* assignments,
+        size_t n_vectors,
+        size_t d
+    ) {
+        using f32_l2 = DistanceComputer<DistanceFunction::l2, Quantization::f32>;
+        double wcss = 0.0;
+#pragma omp parallel for reduction(+ : wcss)
+        for (size_t i = 0; i < n_vectors; ++i) {
+            wcss += static_cast<double>(
+                f32_l2::Horizontal(data + i * d, centroids + assignments[i] * d, d)
+            );
+        }
+        return wcss;
     }
 
   protected:
@@ -985,6 +1236,13 @@ class SuperKMeans {
     ) {
         if (!is_first_iter) {
             std::swap(horizontal_centroids, prev_centroids);
+            // Snapshot assignments before the new assignment pass (for movement counting)
+            if (prev_assignments_buf) {
+                std::memcpy(
+                    prev_assignments_buf.get(), assignments.get(),
+                    n_samples * sizeof(uint32_t)
+                );
+            }
         }
 
         if constexpr (GEMM_ONLY) {
@@ -1012,7 +1270,7 @@ class SuperKMeans {
                 );
             }
             if constexpr (q != Quantization::f32) {
-                if (config.quantized_centroid_update) {
+                if (config.quantized_centroid_update && !decoded_data_buffer) {
                     ResetQuantizedCentroids(n_clusters);
                 } else {
                     ResetCentroids(n_clusters);
@@ -1035,7 +1293,7 @@ class SuperKMeans {
                 centroids_pdx_wrapper, partial_d, not_pruned_counts.data()
             );
             if constexpr (q != Quantization::f32) {
-                if (config.quantized_centroid_update) {
+                if (config.quantized_centroid_update && !decoded_data_buffer) {
                     ResetQuantizedCentroids(n_clusters);
                 } else {
                     ResetCentroids(n_clusters);
@@ -1045,9 +1303,25 @@ class SuperKMeans {
             }
         }
 
+        // Count assignment movements (only after first iteration, only if verbose)
+        size_t movements = 0;
+        size_t affected_clusters = 0;
+        if (!is_first_iter && prev_assignments_buf) {
+            std::tie(movements, affected_clusters) = ComputeMovements(
+                assignments.get(), prev_assignments_buf.get(), n_samples, n_clusters
+            );
+        }
+
         if constexpr (q != Quantization::f32) {
             if (config.quantized_centroid_update) {
-                UpdateCentroidsQuantized(encoded_data_p, n_samples, n_clusters);
+                if (decoded_data_buffer) {
+                    // RaBitQ: decode all quantized data to float, then accumulate floats
+                    quantizer->Decode(encoded_data_p, decoded_data_buffer.get(), n_samples, d);
+                    UpdateCentroids(decoded_data_buffer.get(), n_samples, n_clusters);
+                } else {
+                    // SQ8/SQ4: accumulate directly in quantized domain
+                    UpdateCentroidsQuantized(encoded_data_p, n_samples, n_clusters);
+                }
             } else {
                 UpdateCentroids(data_to_cluster, n_samples, n_clusters);
             }
@@ -1084,6 +1358,8 @@ class SuperKMeans {
         stats.objective = cost;
         stats.shift = shift;
         stats.split = n_split;
+        stats.movements = movements;
+        stats.affected_clusters = affected_clusters;
         stats.recall = recall;
         stats.is_gemm_only = GEMM_ONLY;
         if constexpr (!GEMM_ONLY) {
@@ -1096,14 +1372,22 @@ class SuperKMeans {
             std::cout << "Iteration " << iter_idx + 1 << "/" << config.iters
                       << " | Objective: " << cost << " | Objective improvement: "
                       << (iter_idx > 0 ? 1 - (cost / prev_cost) : 0.0f) << " | Shift: " << shift
-                      << " | Split: " << n_split << " | Recall: " << recall;
+                      << " | Split: " << n_split
+                      << " | Movements: " << movements << " (" << affected_clusters << " clusters)"
+                      << " | Recall: " << recall;
             if constexpr (GEMM_ONLY) {
                 std::cout << " [BLAS-only]";
             } else {
                 std::cout << " | Not Pruned %: " << avg_not_pruned_pct * 100.0f
                           << " | d': " << old_partial_d << " -> " << partial_d;
             }
-            std::cout << std::endl << std::endl;
+            std::cout << "\n";
+            if (config.verbose_detail && movements > 0) {
+                PrintMovementDetails(
+                    assignments.get(), prev_assignments_buf.get(), n_samples, n_clusters
+                );
+            }
+            std::cout << std::endl;
         }
     }
 
@@ -1166,7 +1450,7 @@ class SuperKMeans {
         SKM_PROFILE_SCOPE("consolidate");
 
         if constexpr (q != Quantization::f32) {
-            if (config.quantized_centroid_update) {
+            if (config.quantized_centroid_update && !decoded_data_buffer) {
                 {
                     SKM_PROFILE_SCOPE("consolidate/splitting");
                     // Average in quantized domain: uint32 accumulators → quantized_centroids
@@ -1280,6 +1564,79 @@ class SuperKMeans {
             total_shift += (new_mat.row(i) - prev_mat.row(i)).squaredNorm();
         }
         shift = total_shift;
+    }
+
+    /**
+     * @brief Counts the number of assignments that changed between iterations.
+     */
+    [[nodiscard]] static std::pair<size_t, size_t> ComputeMovements(
+        const uint32_t* SKM_RESTRICT current_assignments,
+        const uint32_t* SKM_RESTRICT prev_assignments,
+        size_t n_samples,
+        size_t n_clusters
+    ) {
+        SKM_PROFILE_SCOPE("movements");
+        size_t count = 0;
+        // Track which clusters are involved in movements (source or destination)
+        std::vector<uint8_t> cluster_touched(n_clusters, 0);
+        for (size_t i = 0; i < n_samples; ++i) {
+            if (current_assignments[i] != prev_assignments[i]) {
+                ++count;
+                cluster_touched[prev_assignments[i]] = 1;
+                cluster_touched[current_assignments[i]] = 1;
+            }
+        }
+        size_t n_affected = 0;
+        for (size_t c = 0; c < n_clusters; ++c) {
+            n_affected += cluster_touched[c];
+        }
+        return {count, n_affected};
+    }
+
+    /**
+     * @brief Prints top-10 clusters that gave/received the most points.
+     */
+    static void PrintMovementDetails(
+        const uint32_t* SKM_RESTRICT current_assignments,
+        const uint32_t* SKM_RESTRICT prev_assignments,
+        size_t n_samples,
+        size_t n_clusters
+    ) {
+        SKM_PROFILE_SCOPE("movement_details");
+        std::vector<int64_t> gave(n_clusters, 0);
+        std::vector<int64_t> received(n_clusters, 0);
+        for (size_t i = 0; i < n_samples; ++i) {
+            if (current_assignments[i] != prev_assignments[i]) {
+                gave[prev_assignments[i]]++;
+                received[current_assignments[i]]++;
+            }
+        }
+        constexpr size_t TOP_K = 10;
+        size_t k = std::min(TOP_K, n_clusters);
+
+        std::vector<size_t> ids(n_clusters);
+        std::iota(ids.begin(), ids.end(), 0);
+
+        // Top givers
+        std::partial_sort(ids.begin(), ids.begin() + k, ids.end(),
+            [&](size_t a, size_t b) { return gave[a] > gave[b]; });
+        std::cout << "  Top givers:    ";
+        for (size_t i = 0; i < k && gave[ids[i]] > 0; ++i) {
+            if (i > 0) std::cout << ", ";
+            std::cout << "c" << ids[i] << ":-" << gave[ids[i]];
+        }
+        std::cout << "\n";
+
+        // Top receivers
+        std::iota(ids.begin(), ids.end(), 0);
+        std::partial_sort(ids.begin(), ids.begin() + k, ids.end(),
+            [&](size_t a, size_t b) { return received[a] > received[b]; });
+        std::cout << "  Top receivers: ";
+        for (size_t i = 0; i < k && received[ids[i]] > 0; ++i) {
+            if (i > 0) std::cout << ", ";
+            std::cout << "c" << ids[i] << ":+" << received[ids[i]];
+        }
+        std::cout << "\n";
     }
 
     /**
@@ -1796,6 +2153,7 @@ class SuperKMeans {
     std::unique_ptr<vector_value_t[]> pdxified_quantized_centroids;
     std::unique_ptr<vector_value_t[]> partial_hor_quantized_centroids;
     std::unique_ptr<uint32_t[]> quantized_centroid_accumulators; // uint32 accumulation for quantized centroid update
+    std::unique_ptr<float[]> decoded_data_buffer; // Temporary buffer for RaBitQ decode-all centroid update
 
     // Buffers for ground truth and recall computation
     std::unique_ptr<uint32_t[]> gt_assignments;
@@ -1804,6 +2162,8 @@ class SuperKMeans {
     std::unique_ptr<distance_t[]> tmp_distances_buffer;
     std::unique_ptr<uint32_t[]> promising_centroids;
     std::unique_ptr<distance_t[]> recall_distances;
+
+    std::unique_ptr<uint32_t[]> prev_assignments_buf; // For movement counting (verbose only)
 
   public:
     std::unique_ptr<uint32_t[]> assignments;

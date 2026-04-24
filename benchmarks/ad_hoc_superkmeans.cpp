@@ -73,6 +73,7 @@ int main(int argc, char* argv[]) {
     skmeans::SuperKMeansConfig config;
     config.iters = n_iters;
     config.verbose = true;
+    config.verbose_detail = true;
     config.n_threads = THREADS;
     config.objective_k = 100;
     config.ann_explore_fraction = 0.01f;
@@ -112,10 +113,24 @@ int main(int argc, char* argv[]) {
     // Compute assignments and cluster balance statistics
     auto assignments =
         kmeans_state.AssignTrainingPoints(data.data(), centroids.data(), n, n_clusters);
+
+    using SKM = skmeans::SuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>;
+    double wcss_f32 = SKM::ComputeWCSS(
+        data.data(), centroids.data(), assignments.data(), n, d
+    );
+    std::cout << "WCSS (f32): " << std::fixed << std::setprecision(2) << wcss_f32 << std::endl;
+
     auto balance_stats =
         skmeans::SuperKMeans<skmeans::Quantization::f32, skmeans::DistanceFunction::l2>::
             GetClustersBalanceStats(assignments.data(), n, n_clusters);
     balance_stats.print();
+
+    // Compute top-k distances for a random sample of points
+    std::string topk_output = bench_utils::BENCHMARKS_ROOT + "/results/topk_distances_" + dataset + "_f32.json";
+    bench_utils::compute_and_store_topk_distances(
+        data.data(), centroids.data(), n, n_clusters, d,
+        /*k=*/100, /*sample_size=*/1000, topk_output
+    );
 
     // Compute recall if ground truth file exists
     std::string gt_filename = bench_utils::get_ground_truth_path(dataset);

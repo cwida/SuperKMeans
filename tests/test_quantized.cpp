@@ -888,6 +888,80 @@ TEST_F(SuperKMeansU8RaBitQTest, WCSSReasonable) {
         << "RaBitQ WCSS (" << wcss_rbq << ") is too much worse than f32 WCSS (" << wcss_f32 << ")";
 }
 
+TEST_F(SuperKMeansU8RaBitQTest, QuantizedCentroidUpdate_DecodedConverges) {
+    const size_t n = 3000;
+    const size_t d = 64;
+    const size_t n_clusters = 10;
+
+    std::vector<float> data = MakeBlobs(n, d, n_clusters);
+
+    SuperKMeansConfig config;
+    config.iters = 10;
+    config.verbose = false;
+    config.quantizer_type = QuantizerType::rabitq;
+    config.quantized_centroid_update = true;
+
+    auto kmeans = SuperKMeans<Quantization::u8, DistanceFunction::l2>(n_clusters, d, config);
+    auto centroids = kmeans.Train(data.data(), n);
+
+    EXPECT_TRUE(kmeans.IsTrained());
+    EXPECT_EQ(centroids.size(), n_clusters * d);
+
+    auto stats = kmeans.GetIterationStats();
+    ASSERT_GE(stats.size(), 2u);
+    EXPECT_LT(stats.back().objective, stats.front().objective);
+}
+
+TEST_F(SuperKMeansU8RaBitQTest, QuantizedCentroidUpdate_WCSSComparable) {
+    const size_t n = 3000;
+    const size_t d = 64;
+    const size_t n_clusters = 10;
+
+    std::vector<float> data = MakeBlobs(n, d, n_clusters);
+
+    // Train with float centroid update (standard RaBitQ)
+    SuperKMeansConfig config_float;
+    config_float.iters = 15;
+    config_float.verbose = false;
+    config_float.quantizer_type = QuantizerType::rabitq;
+    auto kmeans_float = SuperKMeans<Quantization::u8, DistanceFunction::l2>(n_clusters, d, config_float);
+    auto centroids_float = kmeans_float.Train(data.data(), n);
+
+    // Train with decoded centroid update
+    SuperKMeansConfig config_decoded;
+    config_decoded.iters = 15;
+    config_decoded.verbose = false;
+    config_decoded.quantizer_type = QuantizerType::rabitq;
+    config_decoded.quantized_centroid_update = true;
+    auto kmeans_decoded = SuperKMeans<Quantization::u8, DistanceFunction::l2>(n_clusters, d, config_decoded);
+    auto centroids_decoded = kmeans_decoded.Train(data.data(), n);
+
+    auto assign_float = kmeans_float.Assign(data.data(), centroids_float.data(), n, n_clusters);
+    auto assign_decoded = kmeans_decoded.Assign(data.data(), centroids_decoded.data(), n, n_clusters);
+
+    auto compute_wcss = [&](const std::vector<uint32_t>& assignments,
+                            const std::vector<float>& ctrs) {
+        double wcss = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+            uint32_t c = assignments[i];
+            for (size_t j = 0; j < d; ++j) {
+                double diff = data[i * d + j] - ctrs[c * d + j];
+                wcss += diff * diff;
+            }
+        }
+        return wcss;
+    };
+
+    double wcss_float = compute_wcss(assign_float, centroids_float);
+    double wcss_decoded = compute_wcss(assign_decoded, centroids_decoded);
+
+    // 1-bit decode is very coarse (2 values per dim), so centroid estimates
+    // are much noisier than with raw floats. Allow 10x for small d.
+    EXPECT_LT(wcss_decoded, wcss_float * 10.0)
+        << "Decoded centroid update WCSS (" << wcss_decoded
+        << ") is too much worse than float centroid update (" << wcss_float << ")";
+}
+
 #endif // HAS_FAISS
 
 // ── AverageCentroids unit tests ──
@@ -1057,4 +1131,98 @@ TEST_F(SuperKMeansU8Test, QuantizedCentroidUpdate_WCSSComparable) {
     EXPECT_LT(wcss_quant, wcss_float * 2.0)
         << "Quantized centroid update WCSS (" << wcss_quant
         << ") is too much worse than float centroid update (" << wcss_float << ")";
+}
+
+// Test that QuantizedAssign with pruning (sampling_fraction=1.0) produces
+// balanced assignments comparable to Assign(). This catches rotation-domain
+// mismatches between stored quantized_data (rotated) and caller centroids.
+TEST_F(SuperKMeansU8Test, QuantizedAssignPruning_BalancedAssignments) {
+    const size_t n = 3000;
+    const size_t d = 128;
+    const size_t n_clusters = 15;
+
+    std::vector<float> data = MakeBlobs(n, d, n_clusters);
+
+    SuperKMeansConfig config;
+    config.iters = 5;
+    config.verbose = false;
+    config.quantizer_type = QuantizerType::sq8;
+    config.sampling_fraction = 1.0f;  // Required to trigger pruning path
+
+    auto kmeans = SuperKMeans<Quantization::u8, DistanceFunction::l2>(n_clusters, d, config);
+    auto centroids = kmeans.Train(data.data(), n);
+
+    // Assign with brute-force float (ground truth)
+    auto assign_gt = kmeans.Assign(data.data(), centroids.data(), n, n_clusters);
+
+    // QuantizedAssign should use pruning path (sampling_fraction=1.0, SQ8 supports pruning)
+    auto assign_pruning = kmeans.QuantizedAssign(data.data(), centroids.data(), n, n_clusters);
+
+    // Check that no cluster has an absurdly large fraction of all vectors.
+    // The rotation-domain bug caused max cluster size ≈ n (all vectors in one cluster).
+    size_t max_cluster_size = 0;
+    std::vector<size_t> cluster_sizes(n_clusters, 0);
+    for (size_t i = 0; i < n; ++i) {
+        ASSERT_LT(assign_pruning[i], n_clusters) << "Invalid assignment at index " << i;
+        cluster_sizes[assign_pruning[i]]++;
+    }
+    for (size_t c = 0; c < n_clusters; ++c) {
+        max_cluster_size = std::max(max_cluster_size, cluster_sizes[c]);
+    }
+    // With balanced blobs, max cluster size should be well under 50% of n
+    EXPECT_LT(max_cluster_size, n / 2)
+        << "Pruning-based QuantizedAssign produced severely imbalanced assignments "
+        << "(max cluster size " << max_cluster_size << " out of " << n << " vectors)";
+
+    // Also check agreement with brute-force Assign — most assignments should match
+    size_t agreements = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (assign_gt[i] == assign_pruning[i]) agreements++;
+    }
+    double agreement_rate = static_cast<double>(agreements) / n;
+    EXPECT_GT(agreement_rate, 0.5)
+        << "QuantizedAssign pruning path agrees with Assign() on only "
+        << (agreement_rate * 100) << "% of vectors (expected >50%)";
+}
+
+TEST_F(SuperKMeansU4SQ4Test, QuantizedAssignPruning_BalancedAssignments) {
+    const size_t n = 3000;
+    const size_t d = 128;
+    const size_t n_clusters = 15;
+
+    std::vector<float> data = MakeBlobs(n, d, n_clusters);
+
+    SuperKMeansConfig config;
+    config.iters = 5;
+    config.verbose = false;
+    config.quantizer_type = QuantizerType::sq4;
+    config.sampling_fraction = 1.0f;
+
+    auto kmeans = SuperKMeans<Quantization::u4, DistanceFunction::l2>(n_clusters, d, config);
+    auto centroids = kmeans.Train(data.data(), n);
+
+    auto assign_gt = kmeans.Assign(data.data(), centroids.data(), n, n_clusters);
+    auto assign_pruning = kmeans.QuantizedAssign(data.data(), centroids.data(), n, n_clusters);
+
+    size_t max_cluster_size = 0;
+    std::vector<size_t> cluster_sizes(n_clusters, 0);
+    for (size_t i = 0; i < n; ++i) {
+        ASSERT_LT(assign_pruning[i], n_clusters);
+        cluster_sizes[assign_pruning[i]]++;
+    }
+    for (size_t c = 0; c < n_clusters; ++c) {
+        max_cluster_size = std::max(max_cluster_size, cluster_sizes[c]);
+    }
+    EXPECT_LT(max_cluster_size, n / 2)
+        << "Pruning-based QuantizedAssign produced severely imbalanced assignments "
+        << "(max cluster size " << max_cluster_size << " out of " << n << " vectors)";
+
+    size_t agreements = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (assign_gt[i] == assign_pruning[i]) agreements++;
+    }
+    double agreement_rate = static_cast<double>(agreements) / n;
+    EXPECT_GT(agreement_rate, 0.5)
+        << "QuantizedAssign pruning path agrees with Assign() on only "
+        << (agreement_rate * 100) << "% of vectors (expected >50%)";
 }
