@@ -21,7 +21,6 @@
 #include "superkmeans/quantizers/sq8.h"
 #ifdef HAS_FAISS
 #include "superkmeans/quantizers/rabitq.h"
-#include "superkmeans/quantizers/rabitq_gemm.h"
 #endif
 
 namespace skmeans {
@@ -328,8 +327,7 @@ class SuperKMeans {
         }
         if constexpr (q != Quantization::f32) {
             if (config.quantized_centroid_update) {
-                if (config.quantizer_type == QuantizerType::rabitq_gemm ||
-                    config.quantizer_type == QuantizerType::rabitq) {
+                if (config.quantizer_type == QuantizerType::rabitq) {
                     decoded_data_buffer.reset(new float[n_samples * d]);
                 } else {
                     quantized_centroid_accumulators.reset(new uint32_t[n_clusters * d]);
@@ -391,8 +389,6 @@ class SuperKMeans {
 #ifdef HAS_FAISS
             } else if (config.quantizer_type == QuantizerType::rabitq) {
                 quantizer = std::make_unique<RaBitQQuantizer>();
-            } else if (config.quantizer_type == QuantizerType::rabitq_gemm) {
-                quantizer = std::make_unique<RaBitQGemmQuantizer>();
 #endif
             } else {
                 throw std::invalid_argument("Unsupported quantizer type for non-f32 quantization");

@@ -15,13 +15,10 @@
 #include <omp.h>
 #include <vector>
 
-#include <faiss/IndexRaBitQFastScan.h>
 #include <faiss/impl/RaBitQuantizer.h>
 
 namespace skmeans {
 
-// Matches faiss::FactorsData layout (defined in RaBitQuantizer.cpp, not exported).
-// Each RaBitQ code stores binary_bytes + this struct at the end.
 struct RaBitQFactors {
     float or_minus_c_l2sqr; // ||original - centroid||²  (for L2 metric)
     float dp_multiplier;    // scaling factor for dot-product estimation
@@ -29,24 +26,25 @@ struct RaBitQFactors {
 static_assert(sizeof(RaBitQFactors) == 8, "RaBitQFactors must match FAISS FactorsData");
 
 /**
- * @brief RaBitQ (1-bit) quantizer using IndexRaBitQFastScan for distance.
+ * @brief RaBitQ quantizer with FastScan-accelerated distance kernel.
  *
- * Data points are encoded to 1-bit RaBitQ codes (32x compression).
- * Distance computation uses FastScan with centroids as the database:
- * - K centroids indexed in FastScan (sign-quantized, rebuilt each iteration)
- * - N data points decoded from 1-bit codes to approximate float in streaming
- *   chunks, then searched as queries (SQ-quantized to qb bits by FastScan)
- * - FastScan processes 32 centroids at a time with SIMD
+ * Uses FAISS RaBitQuantizer for Fit/Encode/Decode.
+ * Distance computation uses a custom FastScan kernel (VPSHUFB/TBL lookups)
+ * that processes 32 data points simultaneously per centroid.
  *
- * This gives per-data-point results (correct direction for k-means) while
- * keeping the N data points stored as compact 1-bit codes.
+ * For k-means: centroids (K, small) are SQ-quantized to qb bits once,
+ * then LUTs are built from the quantized values. Data points (N, large)
+ * are byte-transposed into blocks of 32 for SIMD lookup.
  */
 class RaBitQQuantizer : public IQuantizer<Quantization::u8> {
   public:
     using quantized_t = IQuantizer::quantized_t;
 
     void Fit(const float* data, size_t n, size_t d) override {
+        SKM_PROFILE_SCOPE("RaBitQ::Fit");
+        assert(d % 8 == 0 && "RaBitQ-GEMM requires dimensionality divisible by 8");
         d_ = d;
+        binary_bytes_ = (d + 7) / 8;
         centroid_.resize(d, 0.0f);
 
         // Compute dataset mean as the centering centroid for RaBitQ
@@ -67,12 +65,14 @@ class RaBitQQuantizer : public IQuantizer<Quantization::u8> {
     }
 
     void Encode(const float* in, quantized_t* out, size_t n, size_t d) const override {
+        SKM_PROFILE_SCOPE("RaBitQ::Encode");
         assert(fitted_);
         assert(d == d_);
         faiss_quantizer_->compute_codes(in, reinterpret_cast<uint8_t*>(out), n);
     }
 
     void Decode(const quantized_t* in, float* out, size_t n, size_t d) const override {
+        SKM_PROFILE_SCOPE("RaBitQ::Decode");
         assert(fitted_);
         assert(d == d_);
         faiss_quantizer_->decode(reinterpret_cast<const uint8_t*>(in), out, n);
@@ -81,25 +81,20 @@ class RaBitQQuantizer : public IQuantizer<Quantization::u8> {
     void ComputeNorms(
         const quantized_t* data, size_t n, size_t d, float* out_norms
     ) const override {
+        SKM_PROFILE_SCOPE("RaBitQ::ComputeNorms");
+
         assert(fitted_);
-        const size_t binary_bytes = (d + 7) / 8;
 
 #pragma omp parallel for num_threads(g_n_threads)
         for (size_t i = 0; i < n; ++i) {
             const uint8_t* code =
                 reinterpret_cast<const uint8_t*>(data) + i * faiss_code_size_;
             const auto* factors =
-                reinterpret_cast<const RaBitQFactors*>(code + binary_bytes);
+                reinterpret_cast<const RaBitQFactors*>(code + binary_bytes_);
             out_norms[i] = factors->or_minus_c_l2sqr;
         }
     }
 
-    /**
-     * @brief Find top-1 nearest centroid per data point.
-     *
-     * Data points (x) are 1-bit codes decoded in streaming chunks.
-     * Centroids (y_float) are indexed in a FastScan database.
-     */
     void FindNearestNeighbor(
         const quantized_t* x,
         const quantized_t* y,
@@ -121,21 +116,79 @@ class RaBitQQuantizer : public IQuantizer<Quantization::u8> {
         (void)norms_y;
         (void)tmp_buf;
 
-        CoreDistanceLoop(
-            reinterpret_cast<const uint8_t*>(x),
-            y_float, n_x, n_y, d,
-            out_knn, out_distances
+        const uint8_t* x_codes = reinterpret_cast<const uint8_t*>(x);
+
+        // Precompute per-code factors
+        std::vector<uint32_t> sum_q(n_x);
+        std::vector<float> or_c_l2sqr(n_x);
+        std::vector<float> dp_mult(n_x);
+        PrecomputeCodeFactors(x_codes, n_x, sum_q.data(), or_c_l2sqr.data(), dp_mult.data());
+
+        // Quantize centroids and build LUTs
+        const size_t n_sub = 2 * binary_bytes_; // 2 sub-quantizers per byte position
+        std::vector<float> c1(n_y), c2(n_y), c34(n_y), qr_to_c_l2sqr(n_y);
+        std::vector<uint8_t> all_luts(n_y * n_sub * 16);
+        QuantizeCentroidsAndBuildLUTs(
+            y_float, n_y, d,
+            all_luts.data(), c1.data(), c2.data(), c34.data(), qr_to_c_l2sqr.data()
         );
+
+        const size_t lut_stride = n_sub * 16;
+        const size_t n_blocks = (n_x + FastScanComputer::kBlockSize - 1) / FastScanComputer::kBlockSize;
+
+        std::fill_n(out_distances, n_x, std::numeric_limits<float>::max());
+        std::fill_n(out_knn, n_x, 0u);
+
+        {
+            SKM_PROFILE_SCOPE("RaBitQ::FastScanDistance");
+#pragma omp parallel for num_threads(g_n_threads)
+            for (size_t blk = 0; blk < n_blocks; ++blk) {
+                const size_t blk_start = blk * FastScanComputer::kBlockSize;
+                const size_t blk_count = std::min(FastScanComputer::kBlockSize, n_x - blk_start);
+
+                // Byte-transpose this block's binary codes
+                std::unique_ptr<uint8_t[]> packed(new uint8_t[FastScanComputer::kBlockSize * binary_bytes_]);
+                TransposeBlock(x_codes, blk_start, blk_count, packed.get());
+
+                float best_dist[FastScanComputer::kBlockSize];
+                uint32_t best_idx[FastScanComputer::kBlockSize];
+                std::fill_n(best_dist, FastScanComputer::kBlockSize, std::numeric_limits<float>::max());
+                std::fill_n(best_idx, FastScanComputer::kBlockSize, 0u);
+
+                for (size_t j = 0; j < n_y; ++j) {
+                    uint16_t dot_qo[FastScanComputer::kBlockSize];
+                    FastScanComputer::ScanBlock(
+                        packed.get(), all_luts.data() + j * lut_stride,
+                        binary_bytes_, dot_qo, blk_count
+                    );
+
+                    for (size_t k = 0; k < blk_count; ++k) {
+                        const size_t i = blk_start + k;
+                        const float final_dot =
+                            c1[j] * static_cast<float>(dot_qo[k]) +
+                            c2[j] * static_cast<float>(sum_q[i]) -
+                            c34[j];
+                        const float dist =
+                            or_c_l2sqr[i] + qr_to_c_l2sqr[j] -
+                            2.0f * dp_mult[i] * final_dot;
+
+                        if (dist < best_dist[k]) {
+                            best_dist[k] = dist;
+                            best_idx[k] = static_cast<uint32_t>(j);
+                        }
+                    }
+                }
+
+                for (size_t k = 0; k < blk_count; ++k) {
+                    out_distances[blk_start + k] = best_dist[k];
+                    out_knn[blk_start + k] = best_idx[k];
+                }
+            }
+        }
     }
 
     size_t DefaultRerankK() const override { return 0; }
 
-    /**
-     * @brief Coarse RaBitQ search (decoded 1-bit) + exact f32 reranking.
-     *
-     * Phase 1: Decode 1-bit codes in chunks → FastScan top-k candidates.
-     * Phase 2: Exact f32 L2² reranking using original float data.
-     */
     void FindNearestNeighborWithReranking(
         const quantized_t* x_quantized,
         const quantized_t* y_quantized,
@@ -159,31 +212,98 @@ class RaBitQQuantizer : public IQuantizer<Quantization::u8> {
 
         using f32_computer = DistanceComputer<DistanceFunction::l2, Quantization::f32>;
 
-        // Phase 1: Decoded chunked FastScan coarse search
-        std::vector<float> topk_distances(n_x * rerank_k);
-        std::vector<faiss::idx_t> topk_labels(n_x * rerank_k);
-        CoreDistanceLoopTopK(
-            reinterpret_cast<const uint8_t*>(x_quantized),
-            y_float, n_x, n_y, d,
-            rerank_k, topk_labels.data(), topk_distances.data()
+        const uint8_t* x_codes = reinterpret_cast<const uint8_t*>(x_quantized);
+
+        // Precompute per-code factors
+        std::vector<uint32_t> sum_q(n_x);
+        std::vector<float> or_c_l2sqr(n_x);
+        std::vector<float> dp_mult(n_x);
+        PrecomputeCodeFactors(x_codes, n_x, sum_q.data(), or_c_l2sqr.data(), dp_mult.data());
+
+        // Quantize centroids and build LUTs
+        const size_t n_sub = 2 * binary_bytes_;
+        std::vector<float> c1(n_y), c2(n_y), c34(n_y), qr_to_c_l2sqr(n_y);
+        std::vector<uint8_t> all_luts(n_y * n_sub * 16);
+        QuantizeCentroidsAndBuildLUTs(
+            y_float, n_y, d,
+            all_luts.data(), c1.data(), c2.data(), c34.data(), qr_to_c_l2sqr.data()
         );
 
-        // Phase 2: F32 reranking among top-k candidates
+        const size_t lut_stride = n_sub * 16;
+        const size_t n_blocks = (n_x + FastScanComputer::kBlockSize - 1) / FastScanComputer::kBlockSize;
+
+        // Per-query top-k from quantized distances
+        std::vector<float> topk_distances(n_x * rerank_k, std::numeric_limits<float>::max());
+        std::vector<uint32_t> topk_indices(n_x * rerank_k, static_cast<uint32_t>(-1));
+
+        {
+            SKM_PROFILE_SCOPE("RaBitQ::FastScanDistance");
+#pragma omp parallel for num_threads(g_n_threads)
+            for (size_t blk = 0; blk < n_blocks; ++blk) {
+                const size_t blk_start = blk * FastScanComputer::kBlockSize;
+                const size_t blk_count = std::min(FastScanComputer::kBlockSize, n_x - blk_start);
+
+                std::unique_ptr<uint8_t[]> packed(new uint8_t[FastScanComputer::kBlockSize * binary_bytes_]);
+                TransposeBlock(x_codes, blk_start, blk_count, packed.get());
+
+                // Per-point candidate heaps (small vectors on stack)
+                std::vector<std::pair<float, uint32_t>> candidates[FastScanComputer::kBlockSize];
+                for (size_t k = 0; k < blk_count; ++k) {
+                    candidates[k].reserve(n_y);
+                }
+
+                for (size_t j = 0; j < n_y; ++j) {
+                    uint16_t dot_qo[FastScanComputer::kBlockSize];
+                    FastScanComputer::ScanBlock(
+                        packed.get(), all_luts.data() + j * lut_stride,
+                        binary_bytes_, dot_qo, blk_count
+                    );
+
+                    for (size_t k = 0; k < blk_count; ++k) {
+                        const size_t i = blk_start + k;
+                        const float final_dot =
+                            c1[j] * static_cast<float>(dot_qo[k]) +
+                            c2[j] * static_cast<float>(sum_q[i]) -
+                            c34[j];
+                        const float dist =
+                            or_c_l2sqr[i] + qr_to_c_l2sqr[j] -
+                            2.0f * dp_mult[i] * final_dot;
+                        candidates[k].push_back({dist, static_cast<uint32_t>(j)});
+                    }
+                }
+
+                for (size_t k = 0; k < blk_count; ++k) {
+                    const size_t i = blk_start + k;
+                    size_t actual_k = std::min(rerank_k, n_y);
+                    std::partial_sort(
+                        candidates[k].begin(),
+                        candidates[k].begin() + actual_k,
+                        candidates[k].end()
+                    );
+                    for (size_t ki = 0; ki < actual_k; ++ki) {
+                        topk_distances[i * rerank_k + ki] = candidates[k][ki].first;
+                        topk_indices[i * rerank_k + ki] = candidates[k][ki].second;
+                    }
+                }
+            }
+        }
+
+        // F32 reranking
 #pragma omp parallel for num_threads(g_n_threads)
         for (size_t i = 0; i < n_x; ++i) {
             float best_dist = std::numeric_limits<float>::max();
             uint32_t best_idx = 0;
 
             for (size_t ki = 0; ki < rerank_k; ++ki) {
-                const faiss::idx_t cand_idx = topk_labels[i * rerank_k + ki];
-                if (cand_idx < 0) break;
+                const uint32_t cand_idx = topk_indices[i * rerank_k + ki];
+                if (cand_idx == static_cast<uint32_t>(-1)) break;
 
                 const float dist =
                     f32_computer::Horizontal(x_float + i * d, y_float + cand_idx * d, d);
 
                 if (dist < best_dist) {
                     best_dist = dist;
-                    best_idx = static_cast<uint32_t>(cand_idx);
+                    best_idx = cand_idx;
                 }
             }
 
@@ -199,99 +319,147 @@ class RaBitQQuantizer : public IQuantizer<Quantization::u8> {
     bool IsFitted() const override { return fitted_; }
 
   private:
-    static constexpr size_t DECODE_CHUNK = 8192;
-
-    /// Build a FastScan index with centroids as the database.
-    faiss::IndexRaBitQFastScan BuildFastScanIndex(
-        const float* y_float_centroids,
-        size_t n_y,
-        size_t d
+    /// Extract per-code metadata: popcount, or_c_l2sqr, dp_multiplier.
+    void PrecomputeCodeFactors(
+        const uint8_t* codes, size_t n,
+        uint32_t* sum_q, float* or_c_l2sqr, float* dp_mult
     ) const {
-        faiss::IndexRaBitQFastScan fast_index(d, faiss::METRIC_L2, 32, 1);
-        fast_index.qb = qb_;
+        SKM_PROFILE_SCOPE("RaBitQ::PrecomputeCodeFactors");
+#pragma omp parallel for num_threads(g_n_threads)
+        for (size_t i = 0; i < n; ++i) {
+            const uint8_t* code = codes + i * faiss_code_size_;
 
-        // Train on centroids (computes center)
-        fast_index.train(n_y, y_float_centroids);
+            // Popcount of the binary part
+            uint32_t pc = 0;
+            size_t b = 0;
+            for (; b + 8 <= binary_bytes_; b += 8) {
+                uint64_t word;
+                std::memcpy(&word, code + b, 8);
+                pc += static_cast<uint32_t>(__builtin_popcountll(word));
+            }
+            for (; b < binary_bytes_; ++b) {
+                pc += static_cast<uint32_t>(__builtin_popcount(code[b]));
+            }
+            sum_q[i] = pc;
 
-        // Override center with our full-dataset centroid for consistency
-        fast_index.center = centroid_;
-        fast_index.rabitq.centroid = fast_index.center.data();
-
-        // Add centroids to the index (sign-quantized)
-        fast_index.add(n_y, y_float_centroids);
-        return fast_index;
+            const auto* fac = reinterpret_cast<const RaBitQFactors*>(code + binary_bytes_);
+            or_c_l2sqr[i] = fac->or_minus_c_l2sqr;
+            dp_mult[i] = fac->dp_multiplier;
+        }
     }
 
-    /// Decode 1-bit codes in streaming chunks, search each chunk via FastScan.
-    void CoreDistanceLoop(
-        const uint8_t* x_codes,
-        const float* y_float_centroids,
-        size_t n_x,
-        size_t n_y,
-        size_t d,
-        uint32_t* out_knn,
-        float* out_distances
+    /// SQ-quantize centroids to qb bits and build 16-entry LUTs for FastScan.
+    ///
+    /// Each centroid produces d SQ-quantized uint8 values.
+    /// Sub-quantizer m corresponds to 4 consecutive dimensions (4m..4m+3).
+    /// LUT[m][c] = sum of quantized values at dimensions where bit k is set in c.
+    ///
+    /// Layout: lut[j * n_sub * 16 + m * 16 + c] for centroid j, sub-quantizer m, code c.
+    /// Sub-quantizers are ordered: byte 0 low nibble, byte 0 high nibble,
+    ///                             byte 1 low nibble, byte 1 high nibble, ...
+    void QuantizeCentroidsAndBuildLUTs(
+        const float* y_float, size_t n_y, size_t d,
+        uint8_t* all_luts,
+        float* c1, float* c2, float* c34, float* qr_to_c_l2sqr
     ) const {
-        auto fast_index = BuildFastScanIndex(y_float_centroids, n_y, d);
+        SKM_PROFILE_SCOPE("RaBitQ::QuantizeCentroidsAndBuildLUTs");
+        const float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(d));
+        const float max_val = static_cast<float>((1 << qb_) - 1);
+        const size_t n_sub = 2 * binary_bytes_;
 
-        std::vector<float> decoded(DECODE_CHUNK * d);
-        std::vector<float> chunk_dists(DECODE_CHUNK);
-        std::vector<faiss::idx_t> chunk_labels(DECODE_CHUNK);
+#pragma omp parallel for num_threads(g_n_threads)
+        for (size_t j = 0; j < n_y; ++j) {
+            std::vector<float> rotated(d);
+            float v_min = std::numeric_limits<float>::max();
+            float v_max = std::numeric_limits<float>::lowest();
+            float norm_sq = 0;
 
-        for (size_t i = 0; i < n_x; i += DECODE_CHUNK) {
-            const size_t chunk_n = std::min(DECODE_CHUNK, n_x - i);
+            for (size_t dim = 0; dim < d; ++dim) {
+                rotated[dim] = y_float[j * d + dim] - centroid_[dim];
+                v_min = std::min(v_min, rotated[dim]);
+                v_max = std::max(v_max, rotated[dim]);
+                norm_sq += rotated[dim] * rotated[dim];
+            }
+            qr_to_c_l2sqr[j] = norm_sq;
 
-            // Decode 1-bit codes → approximate float
-            faiss_quantizer_->decode(
-                x_codes + i * faiss_code_size_, decoded.data(), chunk_n
-            );
+            float delta = (v_max - v_min) / max_val;
+            if (delta < std::numeric_limits<float>::epsilon()) delta = 1.0f;
+            const float inv_delta = 1.0f / delta;
+            float sum_qq = 0;
 
-            // Search decoded chunk as queries against centroid database
-            fast_index.search(
-                chunk_n, decoded.data(), 1,
-                chunk_dists.data(), chunk_labels.data()
-            );
+            std::vector<uint8_t> quantized(d);
+            for (size_t dim = 0; dim < d; ++dim) {
+                int v = static_cast<int>(std::lround((rotated[dim] - v_min) * inv_delta));
+                v = std::max(0, std::min(v, static_cast<int>(max_val)));
+                quantized[dim] = static_cast<uint8_t>(v);
+                sum_qq += static_cast<float>(v);
+            }
 
-            for (size_t j = 0; j < chunk_n; ++j) {
-                out_knn[i + j] = static_cast<uint32_t>(chunk_labels[j]);
-                out_distances[i + j] = chunk_dists[j];
+            c1[j] = 2.0f * delta * inv_sqrt_d;
+            c2[j] = 2.0f * v_min * inv_sqrt_d;
+            c34[j] = inv_sqrt_d * (delta * sum_qq + static_cast<float>(d) * v_min);
+
+            // Build LUTs for this centroid
+            // Each byte of the binary code maps to 2 sub-quantizers (4 dims each).
+            // Sub-quantizer 2b handles dims 8b..8b+3 (low nibble of byte b)
+            // Sub-quantizer 2b+1 handles dims 8b+4..8b+7 (high nibble of byte b)
+            uint8_t* lut_j = all_luts + j * n_sub * 16;
+            for (size_t b = 0; b < binary_bytes_; ++b) {
+                uint8_t* lut_lo = lut_j + (2 * b) * 16;
+                uint8_t* lut_hi = lut_j + (2 * b + 1) * 16;
+
+                // Get the 8 SQ values for dimensions 8b..8b+7
+                uint8_t sq[8] = {0};
+                for (int k = 0; k < 8 && (8 * b + k) < d; ++k) {
+                    sq[k] = quantized[8 * b + k];
+                }
+
+                // Low nibble LUT: dims 8b..8b+3
+                for (int c = 0; c < 16; ++c) {
+                    uint8_t val = 0;
+                    if (c & 1) val += sq[0];
+                    if (c & 2) val += sq[1];
+                    if (c & 4) val += sq[2];
+                    if (c & 8) val += sq[3];
+                    lut_lo[c] = val;
+                }
+
+                // High nibble LUT: dims 8b+4..8b+7
+                for (int c = 0; c < 16; ++c) {
+                    uint8_t val = 0;
+                    if (c & 1) val += sq[4];
+                    if (c & 2) val += sq[5];
+                    if (c & 4) val += sq[6];
+                    if (c & 8) val += sq[7];
+                    lut_hi[c] = val;
+                }
             }
         }
     }
 
-    /// Decode 1-bit codes in streaming chunks, search each chunk for top-k.
-    void CoreDistanceLoopTopK(
-        const uint8_t* x_codes,
-        const float* y_float_centroids,
-        size_t n_x,
-        size_t n_y,
-        size_t d,
-        size_t rerank_k,
-        faiss::idx_t* topk_labels,
-        float* topk_distances
+    /// Byte-level matrix transpose: extract binary codes from n points
+    /// and write them in column-major order for SIMD scanning.
+    ///
+    /// Input:  codes[i] has binary_bytes_ bytes at offset i * faiss_code_size_
+    /// Output: packed[b * FastScanComputer::kBlockSize + k] = codes[blk_start + k][b]
+    void TransposeBlock(
+        const uint8_t* codes, size_t blk_start, size_t blk_count,
+        uint8_t* packed
     ) const {
-        auto fast_index = BuildFastScanIndex(y_float_centroids, n_y, d);
+        // Zero the entire block (handles partial blocks where blk_count < 32)
+        std::memset(packed, 0, binary_bytes_ * FastScanComputer::kBlockSize);
 
-        std::vector<float> decoded(DECODE_CHUNK * d);
-
-        for (size_t i = 0; i < n_x; i += DECODE_CHUNK) {
-            const size_t chunk_n = std::min(DECODE_CHUNK, n_x - i);
-
-            faiss_quantizer_->decode(
-                x_codes + i * faiss_code_size_, decoded.data(), chunk_n
-            );
-
-            fast_index.search(
-                chunk_n, decoded.data(),
-                static_cast<faiss::idx_t>(rerank_k),
-                topk_distances + i * rerank_k,
-                topk_labels + i * rerank_k
-            );
+        for (size_t k = 0; k < blk_count; ++k) {
+            const uint8_t* src = codes + (blk_start + k) * faiss_code_size_;
+            for (size_t b = 0; b < binary_bytes_; ++b) {
+                packed[b * FastScanComputer::kBlockSize + k] = src[b];
+            }
         }
     }
 
-    uint8_t qb_ = 1;
+    int qb_ = 4;
     size_t d_ = 0;
+    size_t binary_bytes_ = 0;
     size_t faiss_code_size_ = 0;
     std::vector<float> centroid_;
     std::unique_ptr<faiss::RaBitQuantizer> faiss_quantizer_;

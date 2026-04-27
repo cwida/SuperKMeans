@@ -354,7 +354,7 @@ void RunPipeline(
         else if (quantizer_name == "sq4")
             config.quantizer_type = skmeans::QuantizerType::sq4;
         else if (quantizer_name == "rabitq")
-            config.quantizer_type = skmeans::QuantizerType::rabitq_gemm;
+            config.quantizer_type = skmeans::QuantizerType::rabitq;
 
         if (is_angular) {
             std::cout << "Using spherical k-means" << std::endl;
@@ -425,10 +425,29 @@ void RunPipeline(
                 data.data(), full_d_centroids.data(), n, n_clusters
             );
 
+            // Requantize in full-d: fit quantizer on full-d data (1 cheap iter),
+            // then QuantizedAssign with unprojected centroids
+            std::vector<uint32_t> q_assignments_unproj;
+            if (has_quantizer) {
+                skmeans::SuperKMeansConfig refit_cfg;
+                refit_cfg.iters = 1;
+                refit_cfg.n_threads = THREADS;
+                refit_cfg.use_blas_only = true;
+                refit_cfg.verbose = false;
+                refit_cfg.quantizer_type = config.quantizer_type;
+
+                auto kmeans_refit = SKM(n_clusters, d, refit_cfg);
+                kmeans_refit.Train(data.data(), n);
+
+                q_assignments_unproj = kmeans_refit.QuantizedAssign(
+                    data.data(), full_d_centroids.data(), n, n_clusters
+                );
+            }
+
             write_row(
                 target_d, construction_time_ms, actual_iterations,
                 kmeans.iteration_stats,
-                assignments_unproj, {},
+                assignments_unproj, q_assignments_unproj,
                 full_d_centroids.data(), "true", config
             );
 

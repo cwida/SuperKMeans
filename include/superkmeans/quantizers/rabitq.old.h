@@ -31,7 +31,7 @@ namespace skmeans {
  * For each (data, centroid) pair, computes weighted popcount across qb
  * bit planes, then applies the RaBitQ correction formula.
  */
-class RaBitQGemmQuantizer : public IQuantizer<Quantization::u8> {
+class RaBitQQuantizer : public IQuantizer<Quantization::u8> {
   public:
     using quantized_t = IQuantizer::quantized_t;
 
