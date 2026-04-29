@@ -86,7 +86,8 @@ static std::unordered_map<std::string, std::string> BuildConfigDict(
     const std::string& quantizer,
     const std::string& unproject_centroids,
     size_t target_d,
-    const skmeans::SuperKMeansConfig& cfg
+    const skmeans::SuperKMeansConfig& cfg,
+    double preprocessing_time_ms
 ) {
     std::unordered_map<std::string, std::string> c;
     // Pipeline-specific columns
@@ -94,6 +95,7 @@ static std::unordered_map<std::string, std::string> BuildConfigDict(
     c["quantizer"] = "\"" + quantizer + "\"";
     c["unproject_centroids"] = "\"" + unproject_centroids + "\"";
     c["target_d"] = std::to_string(target_d);
+    c["preprocessing_time_ms"] = std::to_string(preprocessing_time_ms);
     // Algorithm config
     c["iters"] = std::to_string(cfg.iters);
     c["sampling_fraction"] = std::to_string(cfg.sampling_fraction);
@@ -192,7 +194,7 @@ void RunPipeline(
         }
         if (target_d_list.empty()) {
             std::cerr << "No valid TARGET_D values for d=" << d
-                      << " (min is 64, d must be > 64)\n";
+                      << " (min is 32, d must be > 32)\n";
             return;
         }
     }
@@ -201,6 +203,7 @@ void RunPipeline(
     auto write_row = [&](
         size_t target_d,
         double construction_time_ms,
+        double preprocessing_time_ms,
         int actual_iterations,
         const std::vector<skmeans::SuperKMeansIterationStats>& iter_stats,
         const std::vector<uint32_t>& assignments,
@@ -216,12 +219,13 @@ void RunPipeline(
         std::cout << "WCSS (Assign): " << std::fixed << std::setprecision(2)
                   << wcss_assign << std::endl;
 
+        double wcss_q_assign = -1.0;
         if (!q_assignments.empty()) {
-            double wcss_q = SKM_f32::ComputeWCSS(
+            wcss_q_assign = SKM_f32::ComputeWCSS(
                 data.data(), full_d_centroids, q_assignments.data(), n, d
             );
             std::cout << "WCSS (QuantizedAssign): " << std::fixed << std::setprecision(2)
-                      << wcss_q << std::endl;
+                      << wcss_q_assign << std::endl;
         }
 
         // Balance stats (from Assign)
@@ -271,8 +275,30 @@ void RunPipeline(
             quantizer_name,
             unproject_str,
             target_d,
-            cfg
+            cfg,
+            preprocessing_time_ms
         );
+        config_dict["wcss_assign"] = std::to_string(wcss_assign);
+        if (wcss_q_assign >= 0.0) {
+            config_dict["wcss_quantized_assign"] = std::to_string(wcss_q_assign);
+        }
+
+        // Build human-readable run label (matches accelerators.sh echo strings)
+        std::string dim_label = is_raw ? "raw" : dim_reduction;
+        std::string quant_label = quantizer_name;
+        std::string update_label;
+        if (quantizer_name == "f32") {
+            update_label = "";
+        } else if (cfg.quantized_centroid_update && cfg.full_precision_final_centroids) {
+            update_label = " / quant-update + full-prec-final";
+        } else if (cfg.quantized_centroid_update) {
+            update_label = " / quant-update";
+        } else {
+            update_label = " / no-quant-update";
+        }
+        std::string path_label = cfg.use_blas_only ? " / blas-only" : " / pruning";
+        std::string run_label = dim_label + " / " + quant_label
+                               + update_label + path_label;
 
         bench_utils::write_results_to_csv_v2(
             experiment_name, algorithm, dataset,
@@ -286,7 +312,8 @@ void RunPipeline(
             assign_r10, assign_r100,
             q_assign_r10, q_assign_r100,
             balance_stats.to_json(),
-            iter_stats_json
+            iter_stats_json,
+            run_label
         );
     };
 
@@ -396,7 +423,7 @@ void RunPipeline(
             }
 
             write_row(
-                target_d, construction_time_ms, actual_iterations,
+                target_d, construction_time_ms, 0.0, actual_iterations,
                 kmeans.iteration_stats,
                 assignments, q_assignments,
                 working_centroids.data(), "none", config
@@ -445,7 +472,8 @@ void RunPipeline(
             }
 
             write_row(
-                target_d, construction_time_ms, actual_iterations,
+                target_d, construction_time_ms, preprocess_timer.GetMilliseconds(),
+                actual_iterations,
                 kmeans.iteration_stats,
                 assignments_unproj, q_assignments_unproj,
                 full_d_centroids.data(), "true", config
@@ -480,7 +508,8 @@ void RunPipeline(
             }
 
             write_row(
-                target_d, construction_time_ms, actual_iterations,
+                target_d, construction_time_ms, preprocess_timer.GetMilliseconds(),
+                actual_iterations,
                 kmeans.iteration_stats,
                 assignments_nounproj, q_assignments,
                 recomputed_centroids.data(), "false", config

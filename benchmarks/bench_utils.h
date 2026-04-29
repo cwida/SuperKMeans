@@ -124,7 +124,7 @@ const float SCIKIT_EARLY_TERM_TOL = 1e-8f;
 
 // Target dimensionalities for PCA/JLT preprocessing (multiples of 64 up to 2048)
 const std::vector<size_t> TARGET_D_VALUES = {
-    64, 128, 192, 256, 320, 384, 448, 512, 576, 640, 704, 768,
+    32, 64, 128, 192, 256, 320, 384, 448, 512, 576, 640, 704, 768,
     832, 896, 960, 1024, 1088, 1152, 1216, 1280, 1344, 1408, 1472, 1536,
     1600, 1664, 1728, 1792, 1856, 1920, 1984, 2048
 };
@@ -648,7 +648,8 @@ inline void write_results_to_csv_v2(
     const recall_results_t& quantized_assign_results_knn_10 = {},
     const recall_results_t& quantized_assign_results_knn_100 = {},
     const std::string& balance_stats_json = "",
-    const std::string& iteration_stats_json = ""
+    const std::string& iteration_stats_json = "",
+    const std::string& run_label = ""
 ) {
     const char* arch_env = std::getenv("SKM_ARCH");
     std::string arch = arch_env ? std::string(arch_env) : "default";
@@ -665,7 +666,8 @@ inline void write_results_to_csv_v2(
     if (!file_exists) {
         csv_file << "timestamp,algorithm,dataset,n_iters,actual_iterations,dimensionality,"
                     "data_size,n_clusters,construction_time_ms,threads,final_objective,"
-                    "clustering_quality_stats,balance_stats,iteration_stats,config\n";
+                    "clustering_quality_stats,balance_stats,iteration_stats,config,"
+                    "run_label\n";
     }
 
     // Timestamp
@@ -739,7 +741,8 @@ inline void write_results_to_csv_v2(
         first = false;
     }
     config_json_ss << "}";
-    csv_file << "," << escape_csv_json(config_json_ss.str()) << "\n";
+    csv_file << "," << escape_csv_json(config_json_ss.str())
+             << "," << run_label << "\n";
 
     csv_file.close();
     std::cout << "Results written to: " << csv_path << std::endl;

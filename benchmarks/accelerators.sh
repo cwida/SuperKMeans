@@ -69,6 +69,15 @@ cd "$SCRIPT_DIR"
 
 STEP=0
 
+run() {
+    STEP=$((STEP+1))
+    echo ""
+    echo "────────────────────────────────────────────────────────────────"
+    echo "── [$STEP] $1 ──"
+    shift
+    "$BIN" "$@"
+}
+
 for DATASET in "${DATASETS[@]}"; do
     echo ""
     echo "######################################################################"
@@ -80,204 +89,87 @@ for DATASET in "${DATASETS[@]}"; do
     # ==================================================================
 
     # ── raw + f32 ──
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] raw / f32 / pruning ──"
-    "$BIN" "$DATASET" raw f32 false false false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] raw / f32 / blas-only ──"
-    "$BIN" "$DATASET" raw f32 false false true
+    run "raw / f32 / pruning"                                       "$DATASET" raw f32 false false false
+    run "raw / f32 / blas-only"                                     "$DATASET" raw f32 false false true
 
     # ── raw + sq8 ──
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] raw / sq8 / no-quant-update / pruning ──"
-    "$BIN" "$DATASET" raw sq8 false false false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] raw / sq8 / quant-update / pruning ──"
-    "$BIN" "$DATASET" raw sq8 true false false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] raw / sq8 / quant-update + full-prec-final / pruning ──"
-    "$BIN" "$DATASET" raw sq8 true true false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] raw / sq8 / no-quant-update / blas-only ──"
-    "$BIN" "$DATASET" raw sq8 false false true
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] raw / sq8 / quant-update / blas-only ──"
-    "$BIN" "$DATASET" raw sq8 true false true
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] raw / sq8 / quant-update + full-prec-final / blas-only ──"
-    "$BIN" "$DATASET" raw sq8 true true true
+    run "raw / sq8 / no-quant-update / pruning"                     "$DATASET" raw sq8 false false false
+    run "raw / sq8 / quant-update / pruning"                        "$DATASET" raw sq8 true false false
+    run "raw / sq8 / quant-update + full-prec-final / pruning"      "$DATASET" raw sq8 true true false
+    run "raw / sq8 / no-quant-update / blas-only"                   "$DATASET" raw sq8 false false true
+    run "raw / sq8 / quant-update / blas-only"                      "$DATASET" raw sq8 true false true
+    run "raw / sq8 / quant-update + full-prec-final / blas-only"    "$DATASET" raw sq8 true true true
 
     # ── raw + sq4 ──
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] raw / sq4 / no-quant-update / pruning ──"
-    "$BIN" "$DATASET" raw sq4 false false false
+    run "raw / sq4 / no-quant-update / pruning"                     "$DATASET" raw sq4 false false false
+    run "raw / sq4 / quant-update / pruning"                        "$DATASET" raw sq4 true false false
+    run "raw / sq4 / quant-update + full-prec-final / pruning"      "$DATASET" raw sq4 true true false
+    run "raw / sq4 / no-quant-update / blas-only"                   "$DATASET" raw sq4 false false true
+    run "raw / sq4 / quant-update / blas-only"                      "$DATASET" raw sq4 true false true
+    run "raw / sq4 / quant-update + full-prec-final / blas-only"    "$DATASET" raw sq4 true true true
 
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] raw / sq4 / quant-update / pruning ──"
-    "$BIN" "$DATASET" raw sq4 true false false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] raw / sq4 / quant-update + full-prec-final / pruning ──"
-    "$BIN" "$DATASET" raw sq4 true true false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] raw / sq4 / no-quant-update / blas-only ──"
-    "$BIN" "$DATASET" raw sq4 false false true
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] raw / sq4 / quant-update / blas-only ──"
-    "$BIN" "$DATASET" raw sq4 true false true
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] raw / sq4 / quant-update + full-prec-final / blas-only ──"
-    "$BIN" "$DATASET" raw sq4 true true true
-
-    # ── raw + rabitq ──
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] raw / rabitq / no-quant-update / pruning ──"
-    "$BIN" "$DATASET" raw rabitq false false false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] raw / rabitq / quant-update / pruning ──"
-    "$BIN" "$DATASET" raw rabitq true false false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] raw / rabitq / quant-update + full-prec-final / pruning ──"
-    "$BIN" "$DATASET" raw rabitq true true false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] raw / rabitq / no-quant-update / blas-only ──"
-    "$BIN" "$DATASET" raw rabitq false false true
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] raw / rabitq / quant-update / blas-only ──"
-    "$BIN" "$DATASET" raw rabitq true false true
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] raw / rabitq / quant-update + full-prec-final / blas-only ──"
-    "$BIN" "$DATASET" raw rabitq true true true
+    # ── raw + rabitq (no pruning support — blas-only) ──
+    run "raw / rabitq / no-quant-update / blas-only"                "$DATASET" raw rabitq false false true
+    run "raw / rabitq / quant-update / blas-only"                   "$DATASET" raw rabitq true false true
+    run "raw / rabitq / quant-update + full-prec-final / blas-only" "$DATASET" raw rabitq true true true
 
     # ==================================================================
     #  PCA (dimensionality reduction, iterates over TARGET_D internally)
     # ==================================================================
 
     # ── pca + f32 ──
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] pca / f32 / pruning ──"
-    "$BIN" "$DATASET" pca f32 false false false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] pca / f32 / blas-only ──"
-    "$BIN" "$DATASET" pca f32 false false true
+    run "pca / f32 / pruning"                                       "$DATASET" pca f32 false false false
+    run "pca / f32 / blas-only"                                     "$DATASET" pca f32 false false true
 
     # ── pca + sq8 ──
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] pca / sq8 / no-quant-update / pruning ──"
-    "$BIN" "$DATASET" pca sq8 false false false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] pca / sq8 / quant-update / pruning ──"
-    "$BIN" "$DATASET" pca sq8 true false false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] pca / sq8 / quant-update + full-prec-final / pruning ──"
-    "$BIN" "$DATASET" pca sq8 true true false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] pca / sq8 / no-quant-update / blas-only ──"
-    "$BIN" "$DATASET" pca sq8 false false true
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] pca / sq8 / quant-update / blas-only ──"
-    "$BIN" "$DATASET" pca sq8 true false true
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] pca / sq8 / quant-update + full-prec-final / blas-only ──"
-    "$BIN" "$DATASET" pca sq8 true true true
+    run "pca / sq8 / no-quant-update / pruning"                     "$DATASET" pca sq8 false false false
+    run "pca / sq8 / quant-update / pruning"                        "$DATASET" pca sq8 true false false
+    run "pca / sq8 / quant-update + full-prec-final / pruning"      "$DATASET" pca sq8 true true false
+    run "pca / sq8 / no-quant-update / blas-only"                   "$DATASET" pca sq8 false false true
+    run "pca / sq8 / quant-update / blas-only"                      "$DATASET" pca sq8 true false true
+    run "pca / sq8 / quant-update + full-prec-final / blas-only"    "$DATASET" pca sq8 true true true
 
     # ── pca + sq4 ──
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] pca / sq4 / no-quant-update / pruning ──"
-    "$BIN" "$DATASET" pca sq4 false false false
+    run "pca / sq4 / no-quant-update / pruning"                     "$DATASET" pca sq4 false false false
+    run "pca / sq4 / quant-update / pruning"                        "$DATASET" pca sq4 true false false
+    run "pca / sq4 / quant-update + full-prec-final / pruning"      "$DATASET" pca sq4 true true false
+    run "pca / sq4 / no-quant-update / blas-only"                   "$DATASET" pca sq4 false false true
+    run "pca / sq4 / quant-update / blas-only"                      "$DATASET" pca sq4 true false true
+    run "pca / sq4 / quant-update + full-prec-final / blas-only"    "$DATASET" pca sq4 true true true
 
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] pca / sq4 / quant-update / pruning ──"
-    "$BIN" "$DATASET" pca sq4 true false false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] pca / sq4 / quant-update + full-prec-final / pruning ──"
-    "$BIN" "$DATASET" pca sq4 true true false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] pca / sq4 / no-quant-update / blas-only ──"
-    "$BIN" "$DATASET" pca sq4 false false true
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] pca / sq4 / quant-update / blas-only ──"
-    "$BIN" "$DATASET" pca sq4 true false true
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] pca / sq4 / quant-update + full-prec-final / blas-only ──"
-    "$BIN" "$DATASET" pca sq4 true true true
-
-    # ── pca + rabitq ──
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] pca / rabitq / no-quant-update / pruning ──"
-    "$BIN" "$DATASET" pca rabitq false false false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] pca / rabitq / quant-update / pruning ──"
-    "$BIN" "$DATASET" pca rabitq true false false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] pca / rabitq / quant-update + full-prec-final / pruning ──"
-    "$BIN" "$DATASET" pca rabitq true true false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] pca / rabitq / no-quant-update / blas-only ──"
-    "$BIN" "$DATASET" pca rabitq false false true
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] pca / rabitq / quant-update / blas-only ──"
-    "$BIN" "$DATASET" pca rabitq true false true
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] pca / rabitq / quant-update + full-prec-final / blas-only ──"
-    "$BIN" "$DATASET" pca rabitq true true true
+    # ── pca + rabitq (no pruning support — blas-only) ──
+    run "pca / rabitq / no-quant-update / blas-only"                "$DATASET" pca rabitq false false true
+    run "pca / rabitq / quant-update / blas-only"                   "$DATASET" pca rabitq true false true
+    run "pca / rabitq / quant-update + full-prec-final / blas-only" "$DATASET" pca rabitq true true true
 
     # ==================================================================
     #  JLT (dimensionality reduction, iterates over TARGET_D internally)
     # ==================================================================
 
     # ── jlt + f32 ──
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] jlt / f32 / pruning ──"
-    "$BIN" "$DATASET" jlt f32 false false false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] jlt / f32 / blas-only ──"
-    "$BIN" "$DATASET" jlt f32 false false true
+    run "jlt / f32 / pruning"                                       "$DATASET" jlt f32 false false false
+    run "jlt / f32 / blas-only"                                     "$DATASET" jlt f32 false false true
 
     # ── jlt + sq8 ──
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] jlt / sq8 / no-quant-update / pruning ──"
-    "$BIN" "$DATASET" jlt sq8 false false false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] jlt / sq8 / quant-update / pruning ──"
-    "$BIN" "$DATASET" jlt sq8 true false false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] jlt / sq8 / quant-update + full-prec-final / pruning ──"
-    "$BIN" "$DATASET" jlt sq8 true true false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] jlt / sq8 / no-quant-update / blas-only ──"
-    "$BIN" "$DATASET" jlt sq8 false false true
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] jlt / sq8 / quant-update / blas-only ──"
-    "$BIN" "$DATASET" jlt sq8 true false true
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] jlt / sq8 / quant-update + full-prec-final / blas-only ──"
-    "$BIN" "$DATASET" jlt sq8 true true true
+    run "jlt / sq8 / no-quant-update / pruning"                     "$DATASET" jlt sq8 false false false
+    run "jlt / sq8 / quant-update / pruning"                        "$DATASET" jlt sq8 true false false
+    run "jlt / sq8 / quant-update + full-prec-final / pruning"      "$DATASET" jlt sq8 true true false
+    run "jlt / sq8 / no-quant-update / blas-only"                   "$DATASET" jlt sq8 false false true
+    run "jlt / sq8 / quant-update / blas-only"                      "$DATASET" jlt sq8 true false true
+    run "jlt / sq8 / quant-update + full-prec-final / blas-only"    "$DATASET" jlt sq8 true true true
 
     # ── jlt + sq4 ──
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] jlt / sq4 / no-quant-update / pruning ──"
-    "$BIN" "$DATASET" jlt sq4 false false false
+    run "jlt / sq4 / no-quant-update / pruning"                     "$DATASET" jlt sq4 false false false
+    run "jlt / sq4 / quant-update / pruning"                        "$DATASET" jlt sq4 true false false
+    run "jlt / sq4 / quant-update + full-prec-final / pruning"      "$DATASET" jlt sq4 true true false
+    run "jlt / sq4 / no-quant-update / blas-only"                   "$DATASET" jlt sq4 false false true
+    run "jlt / sq4 / quant-update / blas-only"                      "$DATASET" jlt sq4 true false true
+    run "jlt / sq4 / quant-update + full-prec-final / blas-only"    "$DATASET" jlt sq4 true true true
 
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] jlt / sq4 / quant-update / pruning ──"
-    "$BIN" "$DATASET" jlt sq4 true false false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] jlt / sq4 / quant-update + full-prec-final / pruning ──"
-    "$BIN" "$DATASET" jlt sq4 true true false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] jlt / sq4 / no-quant-update / blas-only ──"
-    "$BIN" "$DATASET" jlt sq4 false false true
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] jlt / sq4 / quant-update / blas-only ──"
-    "$BIN" "$DATASET" jlt sq4 true false true
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] jlt / sq4 / quant-update + full-prec-final / blas-only ──"
-    "$BIN" "$DATASET" jlt sq4 true true true
-
-    # ── jlt + rabitq ──
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] jlt / rabitq / no-quant-update / pruning ──"
-    "$BIN" "$DATASET" jlt rabitq false false false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] jlt / rabitq / quant-update / pruning ──"
-    "$BIN" "$DATASET" jlt rabitq true false false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] jlt / rabitq / quant-update + full-prec-final / pruning ──"
-    "$BIN" "$DATASET" jlt rabitq true true false
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] jlt / rabitq / no-quant-update / blas-only ──"
-    "$BIN" "$DATASET" jlt rabitq false false true
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] jlt / rabitq / quant-update / blas-only ──"
-    "$BIN" "$DATASET" jlt rabitq true false true
-
-    STEP=$((STEP+1)); echo ""; echo "── [$STEP] jlt / rabitq / quant-update + full-prec-final / blas-only ──"
-    "$BIN" "$DATASET" jlt rabitq true true true
+    # ── jlt + rabitq (no pruning support — blas-only) ──
+    run "jlt / rabitq / no-quant-update / blas-only"                "$DATASET" jlt rabitq false false true
+    run "jlt / rabitq / quant-update / blas-only"                   "$DATASET" jlt rabitq true false true
+    run "jlt / rabitq / quant-update + full-prec-final / blas-only" "$DATASET" jlt rabitq true true true
 
 done
 
