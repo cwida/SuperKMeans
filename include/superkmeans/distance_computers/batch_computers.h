@@ -65,20 +65,20 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
         int ldb = static_cast<int>(d);         // d of x (row stride in row-major)
         int ldc = static_cast<int>(batch_n_y); // Leading dimension of tmp_distances_buf
 
-        sgemm_(
-            &trans_a,
-            &trans_b,
-            &m,
-            &n,
-            &k,
-            &alpha,
+        Sgemm(
+            trans_a,
+            trans_b,
+            m,
+            n,
+            k,
+            alpha,
             batch_y_p,
-            &lda,
+            lda,
             batch_x_p,
-            &ldb,
-            &beta,
+            ldb,
+            beta,
             tmp_distances_buf,
-            &ldc
+            ldc
         );
     }
 

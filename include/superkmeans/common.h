@@ -23,6 +23,30 @@ int sgemm_(
 );
 }
 
+#if defined(__APPLE__)
+// Accelerate ships two BLAS implementations: `sgemm_` binds to the legacy one (frozen at LAPACK
+// 3.2.1, with known wrong-result bugs on some Apple Silicon / macOS combinations) while the
+// maintained one sits behind the $NEWLAPACK symbols (macOS >= 13.3). Declared with an asm label so
+// no Accelerate header (which clashes with Eigen's BLAS declarations) is needed; weak so it is
+// null on older systems and we fall back to `sgemm_`.
+extern "C" void skm_cblas_sgemm_newlapack(
+    int order,
+    int transa,
+    int transb,
+    int m,
+    int n,
+    int k,
+    float alpha,
+    const float* a,
+    int lda,
+    const float* b,
+    int ldb,
+    float beta,
+    float* c,
+    int ldc
+) __asm("_cblas_sgemm$NEWLAPACK") __attribute__((weak_import));
+#endif
+
 #define SKMEANS_ENSURE_POSITIVE(x)                                                                 \
     if ((x) <= 0) {                                                                                \
         throw std::invalid_argument("Value must be positive: " #x);                                \
@@ -86,6 +110,47 @@ int sgemm_(
 #endif
 
 namespace skmeans {
+
+// SGEMM. Every GEMM in the code base goes through here.
+inline void Sgemm(
+    char transa,
+    char transb,
+    int m,
+    int n,
+    int k,
+    float alpha,
+    const float* a,
+    int lda,
+    const float* b,
+    int ldb,
+    float beta,
+    float* c,
+    int ldc
+) {
+#if defined(__APPLE__)
+    if (&skm_cblas_sgemm_newlapack != nullptr) {
+        constexpr int COL_MAJOR = 102, NO_TRANS = 111, TRANS = 112;
+        skm_cblas_sgemm_newlapack(
+            COL_MAJOR,
+            transa == 'N' ? NO_TRANS : TRANS,
+            transb == 'N' ? NO_TRANS : TRANS,
+            m,
+            n,
+            k,
+            alpha,
+            a,
+            lda,
+            b,
+            ldb,
+            beta,
+            c,
+            ldc
+        );
+        return;
+    }
+#endif
+    sgemm_(&transa, &transb, &m, &n, &k, &alpha, a, &lda, b, &ldb, &beta, c, &ldc);
+}
 
 static inline constexpr float PROPORTION_HORIZONTAL_DIM = 0.75;
 static inline constexpr size_t D_THRESHOLD_FOR_DCT_ROTATION = 512;

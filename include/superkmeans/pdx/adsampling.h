@@ -243,20 +243,20 @@ class ADSamplingPruner {
         int lda = static_cast<int>(num_dimensions);
         int ldb = static_cast<int>(num_dimensions);
         int ldc = static_cast<int>(num_dimensions);
-        sgemm_(
-            &trans_a,
-            &trans_b,
-            &m,
-            &n_blas,
-            &k,
-            &alpha,
+        Sgemm(
+            trans_a,
+            trans_b,
+            m,
+            n_blas,
+            k,
+            alpha,
             matrix.data(),
-            &lda,
+            lda,
             vectors,
-            &ldb,
-            &beta,
+            ldb,
+            beta,
             out_buffer,
-            &ldc
+            ldc
         );
     }
 
@@ -326,20 +326,20 @@ class ADSamplingPruner {
         int lda = static_cast<int>(num_dimensions);
         int ldb = static_cast<int>(num_dimensions);
         int ldc = static_cast<int>(num_dimensions);
-        sgemm_(
-            &trans_a,
-            &trans_b,
-            &m,
-            &n_blas,
-            &k,
-            &alpha,
+        Sgemm(
+            trans_a,
+            trans_b,
+            m,
+            n_blas,
+            k,
+            alpha,
             matrix.data(),
-            &lda,
+            lda,
             rotated_vectors,
-            &ldb,
-            &beta,
+            ldb,
+            beta,
             out_buffer,
-            &ldc
+            ldc
         );
     }
 
