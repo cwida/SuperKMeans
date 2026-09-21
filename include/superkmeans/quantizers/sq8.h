@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <omp.h>
 #include <utility>
 #include <vector>
@@ -71,7 +72,9 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
         params = ComputeScalarQuantizationParams(
             embeddings, total_elements, static_cast<float>(MAX_VALUE)
         );
-        tmp_dots_buf.resize(X_BATCH_SIZE * Y_BATCH_SIZE);
+        if (!tmp_dots_buf) {
+            tmp_dots_buf.reset(new uint32_t[X_BATCH_SIZE * Y_BATCH_SIZE]);
+        }
         centroids_nk_packed_buf.resize(nk_dots_packed_size_u8(Y_BATCH_SIZE, d));
         fitted = true;
     }
@@ -188,7 +191,7 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
                 const size_t batch_n_y = std::min(Y_BATCH_SIZE, n_y - j);
 
                 MatrixMultiplication(
-                    x + i * d, y + j * d, tmp_dots_buf.data(), batch_n_x, batch_n_y, d, d, d
+                    x + i * d, y + j * d, tmp_dots_buf.get(), batch_n_x, batch_n_y, d, d, d
                 );
 
                 // L2²(x,y) = ||x||² + ||y||² - 2·inv_scale²·dot(x,y)
@@ -199,7 +202,7 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
 #pragma omp parallel for num_threads(g_n_threads)
                 for (size_t r = 0; r < batch_n_x; ++r) {
                     const size_t idx = i + r;
-                    const uint32_t* dots_row = tmp_dots_buf.data() + r * batch_n_y;
+                    const uint32_t* dots_row = tmp_dots_buf.get() + r * batch_n_y;
                     float* dists_row = tmp_buf + r * batch_n_y;
                     const float nx = norms_x[idx];
 
@@ -256,7 +259,8 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
         float* out_distances,
         PDXLayout<Quantization::sq8>& pdx_centroids,
         uint32_t partial_d,
-        size_t* out_not_pruned_counts
+        size_t* out_not_pruned_counts,
+        float* /*tmp_buf*/
     ) const override {
         SKM_PROFILE_SCOPE("search");
         (void) x_float;
@@ -287,7 +291,7 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
                     MatrixMultiplication(
                         x + i * d,
                         y + j * d,
-                        tmp_dots_buf.data(),
+                        tmp_dots_buf.get(),
                         batch_n_x,
                         batch_n_y,
                         partial_d,
@@ -309,7 +313,7 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
 
                         // Norms: convert dot products to squared L2 distances
                         const uint32_t norm_x_i = cached_data_partial_norms[i_idx];
-                        uint32_t* partial_distances_p = tmp_dots_buf.data() + r * batch_n_y;
+                        uint32_t* partial_distances_p = tmp_dots_buf.get() + r * batch_n_y;
                         SKM_VECTORIZE_LOOP
                         for (size_t c = 0; c < batch_n_y; ++c) {
                             partial_distances_p[c] = norm_x_i +
@@ -451,7 +455,7 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
     mutable uint32_t cached_data_partial_d_ = 0;
     std::vector<uint32_t> cached_centroid_partial_norms;
     mutable std::vector<uint32_t> centroid_accumulators;
-    mutable std::vector<uint32_t> tmp_dots_buf;
+    mutable std::unique_ptr<uint32_t[]> tmp_dots_buf;
     mutable std::vector<char> centroids_nk_packed_buf;
 };
 

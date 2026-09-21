@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <omp.h>
 #include <stdexcept>
 #include <string>
@@ -76,7 +77,9 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
         d_ = d;
         nibble_bytes_ = d / 2;
         code_size_ = nibble_bytes_ + 8;
-        dots_buf_.resize(X_BATCH_SIZE * Y_BATCH_SIZE);
+        if (!dots_buf_) {
+            dots_buf_.reset(new uint32_t[X_BATCH_SIZE * Y_BATCH_SIZE]);
+        }
         packed_buf_.resize(nk_dots_packed_size_u4(Y_BATCH_SIZE, d));
         fitted_ = true;
     }
@@ -222,7 +225,7 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
                 MatrixMultiplication(
                     x + i * code_size_,
                     y + j * code_size_,
-                    dots_buf_.data(),
+                    dots_buf_.get(),
                     batch_n_x,
                     batch_n_y,
                     d,
@@ -239,7 +242,7 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
 #pragma omp parallel for num_threads(g_n_threads)
                 for (size_t r = 0; r < batch_n_x; ++r) {
                     const size_t idx = i + r;
-                    const uint32_t* dots_row = dots_buf_.data() + r * batch_n_y;
+                    const uint32_t* dots_row = dots_buf_.get() + r * batch_n_y;
                     float* dists_row = tmp_buf + r * batch_n_y;
                     const float si = cached_scales_[idx];
                     const float bi = cached_biases_[idx];
@@ -349,7 +352,8 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
         float* out_distances,
         PDXLayout<Quantization::lvq4>& /*pdx_centroids*/,
         uint32_t partial_d,
-        size_t* out_not_pruned_counts
+        size_t* out_not_pruned_counts,
+        float* /*tmp_buf*/
     ) const override {
         SKM_PROFILE_SCOPE("search");
         assert(fitted_);
@@ -391,7 +395,7 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
                     MatrixMultiplication(
                         x + i * code_size_,
                         y + j * code_size_,
-                        dots_buf_.data(),
+                        dots_buf_.get(),
                         batch_n_x,
                         batch_n_y,
                         partial_d,
@@ -411,7 +415,7 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
 #endif
                     for (size_t r = 0; r < batch_n_x; ++r) {
                         const size_t i_idx = i + r;
-                        const uint32_t* dots_row = dots_buf_.data() + r * batch_n_y;
+                        const uint32_t* dots_row = dots_buf_.get() + r * batch_n_y;
                         const uint8_t* x_code = x_codes + i_idx * code_size_;
 
                         const float si = cached_scales_[i_idx];
@@ -646,7 +650,7 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
     mutable std::vector<uint32_t> cached_sum_cx_sq_;
 
     // GEMM buffers
-    mutable std::vector<uint32_t> dots_buf_;
+    mutable std::unique_ptr<uint32_t[]> dots_buf_;
     mutable std::vector<char> packed_buf_;
     mutable std::vector<uint8_t> decoded_a_buf;
     mutable std::vector<uint8_t> decoded_b_buf;

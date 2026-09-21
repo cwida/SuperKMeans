@@ -272,6 +272,7 @@ class IQuantizer {
      * @param pdx_centroids PDXLayout holding the PDXified centroid data
      * @param partial_d Number of dimensions covered by partial GEMM
      * @param out_not_pruned_counts Output: count of non-pruned vectors per query (length n_x)
+     * @param tmp_buf Scratch space (at least X_BATCH_SIZE * Y_BATCH_SIZE floats)
      */
     virtual void FindNearestNeighborWithPruning(
         const quantized_t* x,
@@ -285,7 +286,8 @@ class IQuantizer {
         float* out_distances,
         PDXLayout<q>& pdx_centroids,
         uint32_t partial_d,
-        size_t* out_not_pruned_counts
+        size_t* out_not_pruned_counts,
+        float* tmp_buf
     ) const {
         (void) x;
         (void) y;
@@ -299,6 +301,7 @@ class IQuantizer {
         (void) pdx_centroids;
         (void) partial_d;
         (void) out_not_pruned_counts;
+        (void) tmp_buf;
         assert(false && "FindNearestNeighborWithPruning not supported by this quantizer");
     }
 };

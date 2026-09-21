@@ -386,7 +386,8 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
         float* out_distances,
         PDXLayout<Quantization::rabitq>& /*pdx_centroids*/,
         uint32_t partial_d,
-        size_t* out_not_pruned_counts
+        size_t* out_not_pruned_counts,
+        float* /*tmp_buf*/
     ) const override {
         SKM_PROFILE_SCOPE("RQ::FindNearestNeighborWithPruning");
         assert(fitted_);

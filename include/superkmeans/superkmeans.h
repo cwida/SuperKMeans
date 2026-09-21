@@ -713,6 +713,7 @@ class SuperKMeans {
                     );
                 }
 
+                EnsureTmpDistancesBuffer();
                 quantizer->FindNearestNeighborWithPruning(
                     quantized_data.get(),
                     quantized_centroids.get(),
@@ -725,7 +726,8 @@ class SuperKMeans {
                     result_distances.data(),
                     pdx_wrapper,
                     partial_d,
-                    not_pruned_counts.data()
+                    not_pruned_counts.data(),
+                    tmp_distances_buffer.get()
                 );
 
                 return result_assignments;
@@ -804,6 +806,7 @@ class SuperKMeans {
 
             if (config.sampling_fraction == 1.0f) {
                 quantizer->CacheDataPartialNorms(data_p, n_vectors, d, partial_d);
+                EnsureTmpDistancesBuffer();
                 quantizer->FindNearestNeighborWithPruning(
                     data_p,
                     horizontal_centroids.get(),
@@ -816,7 +819,8 @@ class SuperKMeans {
                     distances.get(),
                     pdx_centroids,
                     partial_d,
-                    not_pruned_counts.get()
+                    not_pruned_counts.get(),
+                    tmp_distances_buffer.get()
                 );
                 memcpy(result_assignments.data(), assignments.get(), n_vectors * sizeof(uint32_t));
                 return result_assignments;
@@ -835,6 +839,7 @@ class SuperKMeans {
                 }
 
                 quantizer->CacheDataPartialNorms(data_p, n_vectors, d, partial_d);
+                EnsureTmpDistancesBuffer();
                 quantizer->FindNearestNeighborWithPruning(
                     data_p,
                     horizontal_centroids.get(),
@@ -847,7 +852,8 @@ class SuperKMeans {
                     distances.get(),
                     pdx_centroids,
                     partial_d,
-                    not_pruned_counts.get()
+                    not_pruned_counts.get(),
+                    tmp_distances_buffer.get()
                 );
                 return result_assignments;
             } else {
@@ -889,6 +895,7 @@ class SuperKMeans {
                 }
 
                 quantizer->CacheDataPartialNorms(data_p, n_vectors, d, partial_d);
+                EnsureTmpDistancesBuffer();
                 quantizer->FindNearestNeighborWithPruning(
                     data_p,
                     horizontal_centroids.get(),
@@ -901,7 +908,8 @@ class SuperKMeans {
                     distances.get(),
                     pdx_centroids,
                     partial_d,
-                    not_pruned_counts.get()
+                    not_pruned_counts.get(),
+                    tmp_distances_buffer.get()
                 );
                 return result_assignments;
             }
@@ -1171,6 +1179,7 @@ class SuperKMeans {
             quantizer->CacheCentroidPartialNorms(
                 quantized_centroids.get(), n_clusters, d, partial_d
             );
+            EnsureTmpDistancesBuffer();
             quantizer->FindNearestNeighborWithPruning(
                 encoded_data_p,
                 quantized_centroids.get(),
@@ -1183,7 +1192,8 @@ class SuperKMeans {
                 distances.get(),
                 centroids_pdx_wrapper,
                 partial_d,
-                not_pruned_counts
+                not_pruned_counts,
+                tmp_distances_buffer.get()
             );
             ResetCentroids(n_clusters);
             quantizer->ResetCentroidAccumulators(n_clusters, d);
