@@ -173,7 +173,8 @@ only `if (n_samples < n || !data_already_rotated)`. It forces `unrotate_centroid
 `trained_in_place`, `training_data_rotated`, `code_size`, `n_encoded`, `rotator`), recorded at train
 time and exposed read-only, alongside `GetQuantizer()`, `GetQuantizedData()` and public
 `sampled_indices`. The rotation is exposed as the **pruner, not a matrix**, because the DCT path has
-no d × d matrix to hand out. 
+no d × d matrix to hand out. With `data_already_rotated` the pruner is built without a rotation
+(no d × d QR, the costly part at high d): its `Rotate`/`Unrotate` then warn and copy the vectors.
 
 **Assign family (3 methods):**
 - **`Assign`** — exact f32 brute force. Standalone, no trained state. Ground-truth reference.

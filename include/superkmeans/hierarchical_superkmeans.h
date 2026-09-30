@@ -47,7 +47,10 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
     )
         : SuperKMeans<q>(n_clusters, dimensionality, config), hierarchical_config(config) {
         this->pruner = std::make_unique<pruner_t>(
-            dimensionality, HIERARCHICAL_PRUNER_INITIAL_THRESHOLD, this->config.seed
+            dimensionality,
+            HIERARCHICAL_PRUNER_INITIAL_THRESHOLD,
+            this->config.seed,
+            this->config.data_already_rotated
         );
         SKMEANS_ENSURE_POSITIVE(config.iters_mesoclustering);
         SKMEANS_ENSURE_POSITIVE(config.iters_fineclustering);

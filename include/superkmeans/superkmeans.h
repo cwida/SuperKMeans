@@ -231,7 +231,9 @@ class SuperKMeans {
         }
         n_threads = (config.n_threads == 0) ? omp_get_max_threads() : config.n_threads;
         g_n_threads = n_threads;
-        pruner = std::make_unique<pruner_t>(dimensionality, PRUNER_INITIAL_THRESHOLD, config.seed);
+        pruner = std::make_unique<pruner_t>(
+            dimensionality, PRUNER_INITIAL_THRESHOLD, config.seed, config.data_already_rotated
+        );
 
         // If data is already rotated, we must not unrotate output centroids
         if (this->config.data_already_rotated) {

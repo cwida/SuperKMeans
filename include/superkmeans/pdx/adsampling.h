@@ -4,6 +4,7 @@
 #include "superkmeans/pdx/utils.h"
 #include <algorithm>
 #include <cstring>
+#include <iostream>
 #include <memory>
 #include <omp.h>
 #include <random>
@@ -63,10 +64,20 @@ class ADSamplingPruner {
      * @param num_dimensions_
      * @param epsilon0 Pruning threshold parameter (higher = more aggressive pruning, less accuracy)
      * @param seed Random seed for reproducible rotation matrix generation
+     * @param data_already_rotated The caller rotates the data itself: no rotation is built, and
+     * Rotate/Unrotate warn and copy the vectors unchanged
      */
-    ADSamplingPruner(uint32_t num_dimensions_, float epsilon0, uint32_t seed = 42)
+    ADSamplingPruner(
+        uint32_t num_dimensions_,
+        float epsilon0,
+        uint32_t seed = 42,
+        bool data_already_rotated = false
+    )
         : num_dimensions(num_dimensions_), epsilon0(epsilon0) {
         InitializeRatios();
+        if (data_already_rotated) {
+            return;
+        }
         std::mt19937 gen(seed); // NOLINT(bugprone-narrowing-conversions)
         bool matrix_created = false;
 #ifdef HAS_FFTW
@@ -177,6 +188,9 @@ class ADSamplingPruner {
      */
     template <bool IN_PLACE = false>
     void Rotate(const float* vectors, float* out_buffer, const uint32_t n) const {
+        if (WarnIfNoRotation(vectors, out_buffer, n)) {
+            return;
+        }
         Eigen::Map<MatrixR> out(out_buffer, n, num_dimensions);
 #ifdef HAS_FFTW
 #ifdef __AVX2__
@@ -270,6 +284,9 @@ class ADSamplingPruner {
         float* SKM_RESTRICT out_buffer,
         const uint32_t n
     ) const {
+        if (WarnIfNoRotation(rotated_vectors, out_buffer, n)) {
+            return;
+        }
         Eigen::Map<MatrixR> out(out_buffer, n, num_dimensions);
 #ifdef HAS_FFTW
 #ifdef __AVX2__
@@ -359,6 +376,27 @@ class ADSamplingPruner {
      */
     float GetRatio(const size_t visited_dimensions) {
         return ComputeADSamplingRatio(visited_dimensions, num_dimensions, epsilon0);
+    }
+
+    /**
+     * @brief Warns when the pruner was built without a rotation (data_already_rotated), and
+     * copies the vectors unchanged.
+     *
+     * @return Whether there is no rotation (the Rotate/Unrotate call is then done)
+     */
+    bool WarnIfNoRotation(const float* vectors, float* out_buffer, const uint32_t n) const {
+        if (matrix.size() != 0) {
+            return false;
+        }
+        std::cout << "WARNING: the ADSampling pruner was built for already rotated data and has no "
+                     "rotation, the vectors are copied unchanged"
+                  << std::endl;
+        if (vectors != out_buffer) {
+            std::memcpy(
+                out_buffer, vectors, static_cast<size_t>(n) * num_dimensions * sizeof(float)
+            );
+        }
+        return true;
     }
 };
 
