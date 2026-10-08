@@ -155,10 +155,11 @@ py::array_t<float> RotateToArray(const KMeans& self, py::array_t<float> vectors)
     auto result = py::array_t<float>({n, d});
     const auto* in = static_cast<const float*>(info.ptr);
     auto* out = static_cast<float*>(result.request().ptr);
+    skmeans::ExecutorScope executor_scope(nullptr, 0);
     if constexpr (INVERSE) {
-        rotator->Unrotate(in, out, static_cast<uint32_t>(n));
+        rotator->Unrotate(executor_scope.Get(), in, out, static_cast<uint32_t>(n));
     } else {
-        rotator->Rotate(in, out, static_cast<uint32_t>(n));
+        rotator->Rotate(executor_scope.Get(), in, out, static_cast<uint32_t>(n));
     }
     return result;
 }

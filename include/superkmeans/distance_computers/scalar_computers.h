@@ -129,10 +129,10 @@ class ScalarComputer<DistanceFunction::l2, Quantization::rabitq> {
         const uint64_t* b64 = reinterpret_cast<const uint64_t*>(vector2);
         size_t n_words = num_bytes / 8;
         for (size_t i = 0; i < n_words; ++i) {
-            count += static_cast<uint32_t>(__builtin_popcountll(a64[i] & b64[i]));
+            count += static_cast<uint32_t>(SKM_POPCOUNT64(a64[i] & b64[i]));
         }
         for (size_t i = n_words * 8; i < num_bytes; ++i) {
-            count += static_cast<uint32_t>(__builtin_popcount(vector1[i] & vector2[i]));
+            count += static_cast<uint32_t>(SKM_POPCOUNT(vector1[i] & vector2[i]));
         }
         return count;
     };
@@ -158,7 +158,7 @@ class ScalarComputer<DistanceFunction::l2, Quantization::rabitq> {
                     const uint64_t* p64 = reinterpret_cast<const uint64_t*>(
                         planes_interleaved + i * qb + static_cast<size_t>(bp) * 16
                     );
-                    result += static_cast<uint32_t>(__builtin_popcountll(x & p64[w])) << bp;
+                    result += static_cast<uint32_t>(SKM_POPCOUNT64(x & p64[w])) << bp;
                 }
             }
         }
@@ -168,7 +168,7 @@ class ScalarComputer<DistanceFunction::l2, Quantization::rabitq> {
             size_t byte_in_chunk = i % 16;
             for (int bp = 0; bp < qb; ++bp) {
                 result +=
-                    static_cast<uint32_t>(__builtin_popcount(
+                    static_cast<uint32_t>(SKM_POPCOUNT(
                         data[i] &
                         planes_interleaved
                             [chunk_idx * qb * 16 + static_cast<size_t>(bp) * 16 + byte_in_chunk]

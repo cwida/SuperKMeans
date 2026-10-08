@@ -1,6 +1,5 @@
 #include <cmath>
 #include <gtest/gtest.h>
-#include <omp.h>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -10,10 +9,7 @@
 #include "superkmeans/pdx/utils.h"
 #include "superkmeans/superkmeans.h"
 
-class AssignTest : public ::testing::Test {
-  protected:
-    void SetUp() override { omp_set_num_threads(omp_get_max_threads()); }
-};
+class AssignTest : public ::testing::Test {};
 
 namespace {
 

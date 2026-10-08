@@ -5,12 +5,12 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
-#include <omp.h>
 #include <random>
 #include <utility>
 #include <vector>
 
 #include "superkmeans/distance_computers/scalar_computers.h"
+#include "superkmeans/executor.h"
 
 namespace skmeans {
 
@@ -69,6 +69,8 @@ inline bool IsPowerOf2(const uint32_t x) {
  * @param cluster_std Standard deviation of points around centers
  * @param center_spread Standard deviation for generating cluster centers
  * @param random_state Seed for reproducibility
+ * @param executor Runs the loops; nullptr uses a default one on all cores. Each worker draws from
+ * its own generator, so the output depends on the worker count (a SerialExecutor gives one stream)
  * @return Flattened row-major vector of size n_samples * n_features
  */
 inline std::vector<float> MakeBlobs(
@@ -78,7 +80,8 @@ inline std::vector<float> MakeBlobs(
     bool normalize = false,
     float cluster_std = 1.0f,
     float center_spread = 10.0f,
-    uint32_t random_state = 42
+    uint32_t random_state = 42,
+    ParallelExecutor* executor = nullptr
 ) {
     std::mt19937 gen(random_state); // NOLINT(bugprone-narrowing-conversions)
     std::normal_distribution<float> center_dist(0.0f, center_spread);
@@ -88,15 +91,14 @@ inline std::vector<float> MakeBlobs(
         centers[i] = center_dist(gen);
     }
 
+    ExecutorScope executor_scope(executor, 0);
     std::vector<float> data(n_samples * n_features);
-#pragma omp parallel
-    {
+    executor_scope.Get().ParallelFor(n_samples, [&](size_t begin, size_t end, size_t worker) {
         std::uniform_int_distribution<size_t> cluster_dist(0, n_centers - 1);
         std::normal_distribution<float> point_dist(0.0f, cluster_std);
         // NOLINTNEXTLINE(bugprone-narrowing-conversions)
-        std::mt19937 thread_gen(random_state + static_cast<uint32_t>(omp_get_thread_num()));
-#pragma omp for
-        for (size_t i = 0; i < n_samples; ++i) {
+        std::mt19937 thread_gen(random_state + static_cast<uint32_t>(worker));
+        for (size_t i = begin; i < end; ++i) {
             size_t center_idx = cluster_dist(thread_gen) * n_features;
             float* row = &data[i * n_features];
             const float* center = &centers[center_idx];
@@ -104,20 +106,21 @@ inline std::vector<float> MakeBlobs(
                 row[j] = center[j] + point_dist(thread_gen);
             }
         }
-    }
+    });
     if (normalize) {
-#pragma omp parallel for
-        for (size_t i = 0; i < n_samples; ++i) {
-            float* row = &data[i * n_features];
-            float norm_sq = 0.0f;
-            for (size_t j = 0; j < n_features; ++j) {
-                norm_sq += row[j] * row[j];
+        executor_scope.Get().ParallelFor(n_samples, [&](size_t begin, size_t end, size_t) {
+            for (size_t i = begin; i < end; ++i) {
+                float* row = &data[i * n_features];
+                float norm_sq = 0.0f;
+                for (size_t j = 0; j < n_features; ++j) {
+                    norm_sq += row[j] * row[j];
+                }
+                float inv_norm = 1.0f / std::sqrt(norm_sq);
+                for (size_t j = 0; j < n_features; ++j) {
+                    row[j] *= inv_norm;
+                }
             }
-            float inv_norm = 1.0f / std::sqrt(norm_sq);
-            for (size_t j = 0; j < n_features; ++j) {
-                row[j] *= inv_norm;
-            }
-        }
+        });
     }
     return data;
 }
@@ -169,18 +172,26 @@ inline float ComputeL2DistanceSquared(const float* a, const float* b, size_t d) 
  * @param data Pointer to row-major data (n × d)
  * @param n Number of vectors
  * @param d Dimensionality
+ * @param executor Runs the loop; nullptr uses a default one on all cores
  * @return Vector of squared L2 norms
  */
-inline std::vector<float> ComputeNorms(const float* data, size_t n, size_t d) {
+inline std::vector<float> ComputeNorms(
+    const float* data,
+    size_t n,
+    size_t d,
+    ParallelExecutor* executor = nullptr
+) {
     std::vector<float> norms(n);
-#pragma omp parallel for
-    for (size_t i = 0; i < n; ++i) {
-        float norm = 0.0f;
-        for (size_t j = 0; j < d; ++j) {
-            norm += data[i * d + j] * data[i * d + j];
+    ExecutorScope executor_scope(executor, 0);
+    executor_scope.Get().ParallelFor(n, [&](size_t begin, size_t end, size_t) {
+        for (size_t i = begin; i < end; ++i) {
+            float norm = 0.0f;
+            for (size_t j = 0; j < d; ++j) {
+                norm += data[i * d + j] * data[i * d + j];
+            }
+            norms[i] = norm;
         }
-        norms[i] = norm;
-    }
+    });
     return norms;
 }
 
@@ -234,6 +245,7 @@ inline void FindNearestNeighborBruteForce(
  * @param k Number of nearest neighbors to find
  * @param out_knn Output: indices of k nearest neighbors (size: n_x × k)
  * @param out_distances Output: distances to k nearest neighbors (size: n_x × k)
+ * @param executor Runs the loops; nullptr uses a default one on all cores
  */
 inline void FindKNearestNeighborsBruteForce(
     const float* x,
@@ -243,19 +255,22 @@ inline void FindKNearestNeighborsBruteForce(
     size_t d,
     size_t k,
     uint32_t* out_knn,
-    float* out_distances
+    float* out_distances,
+    ParallelExecutor* executor = nullptr
 ) {
+    ExecutorScope executor_scope(executor, 0);
     std::vector<std::pair<float, uint32_t>> distances(n_y);
     for (size_t i = 0; i < n_x; ++i) {
-#pragma omp parallel for
-        for (size_t j = 0; j < n_y; ++j) {
-            float dist = 0.0f;
-            for (size_t dim = 0; dim < d; ++dim) {
-                float diff = x[i * d + dim] - y[j * d + dim];
-                dist += diff * diff;
+        executor_scope.Get().ParallelFor(n_y, [&](size_t begin, size_t end, size_t) {
+            for (size_t j = begin; j < end; ++j) {
+                float dist = 0.0f;
+                for (size_t dim = 0; dim < d; ++dim) {
+                    float diff = x[i * d + dim] - y[j * d + dim];
+                    dist += diff * diff;
+                }
+                distances[j] = {dist, static_cast<uint32_t>(j)};
             }
-            distances[j] = {dist, static_cast<uint32_t>(j)};
-        }
+        });
         size_t actual_k = std::min(k, n_y);
         std::partial_sort(distances.begin(), distances.begin() + actual_k, distances.end());
         for (size_t ki = 0; ki < actual_k; ++ki) {

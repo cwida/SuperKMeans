@@ -64,15 +64,17 @@ SeparatedSet MakeSeparated(size_t d, size_t n_c, size_t per, uint32_t seed) {
 
 double NearestNeighborRecall(size_t d, size_t n_c, size_t per, uint32_t seed) {
     SeparatedSet s = MakeSeparated(d, n_c, per, seed);
+    auto executor = MakeDefaultExecutor(0);
     RaBitQQuantizer q;
-    q.Fit(s.queries.data(), s.n_q, d);
+    q.Fit(*executor, s.queries.data(), s.n_q, d);
     const size_t cs = q.CodeSize(d);
     std::vector<uint8_t> codes(s.n_q * cs);
-    q.Encode(s.queries.data(), codes.data(), s.n_q, d);
+    q.Encode(*executor, s.queries.data(), codes.data(), s.n_q, d);
 
     std::vector<uint32_t> knn(s.n_q);
     std::vector<float> dist(s.n_q);
     q.FindNearestNeighbor(
+        *executor,
         codes.data(),
         nullptr,
         nullptr,
@@ -102,8 +104,10 @@ class RaBitQQuantizerTest : public ::testing::Test {
     static constexpr size_t n = 2000;
     static constexpr size_t d = 64;
     std::vector<float> data;
+    std::unique_ptr<ParallelExecutor> executor;
 
     void SetUp() override {
+        executor = MakeDefaultExecutor(0);
         std::mt19937 rng(42);
         std::normal_distribution<float> dist(0.0f, 1.0f);
         data.resize(n * d);
@@ -115,28 +119,31 @@ class RaBitQQuantizerTest : public ::testing::Test {
 TEST_F(RaBitQQuantizerTest, InvalidDimensionality_Throws) {
     std::vector<float> buf(8192, 0.1f);
     // Not a multiple of 8.
-    EXPECT_THROW(RaBitQQuantizer().Fit(buf.data(), 4, 60), std::invalid_argument);
+    EXPECT_THROW(RaBitQQuantizer().Fit(*executor, buf.data(), 4, 60), std::invalid_argument);
     // Multiple of 8 but above RABITQ_MAX_DIMS (4096).
-    EXPECT_THROW(RaBitQQuantizer().Fit(buf.data(), 1, RABITQ_MAX_DIMS + 8), std::invalid_argument);
+    EXPECT_THROW(
+        RaBitQQuantizer().Fit(*executor, buf.data(), 1, RABITQ_MAX_DIMS + 8),
+        std::invalid_argument
+    );
     // Valid.
-    EXPECT_NO_THROW(RaBitQQuantizer().Fit(buf.data(), 4, 64));
+    EXPECT_NO_THROW(RaBitQQuantizer().Fit(*executor, buf.data(), 4, 64));
 }
 
 TEST_F(RaBitQQuantizerTest, CodeSize_Matches) {
     RaBitQQuantizer q;
-    q.Fit(data.data(), n, d);
+    q.Fit(*executor, data.data(), n, d);
     EXPECT_EQ(q.CodeSize(d), (d + 7) / 8 + 8);
 }
 
 TEST_F(RaBitQQuantizerTest, ComputeNorms_MatchDistanceToCentroid) {
     RaBitQQuantizer q;
-    q.Fit(data.data(), n, d);
+    q.Fit(*executor, data.data(), n, d);
     const size_t cs = q.CodeSize(d);
     std::vector<uint8_t> codes(n * cs);
-    q.Encode(data.data(), codes.data(), n, d);
+    q.Encode(*executor, data.data(), codes.data(), n, d);
 
     std::vector<float> norms(n);
-    q.ComputeNorms(codes.data(), n, d, norms.data());
+    q.ComputeNorms(*executor, codes.data(), n, d, norms.data());
 
     std::vector<float> mean = ColumnMean(data, n, d);
     for (size_t i = 0; i < std::min(n, size_t{200}); ++i) {
@@ -154,12 +161,12 @@ TEST_F(RaBitQQuantizerTest, ComputeNorms_MatchDistanceToCentroid) {
 
 TEST_F(RaBitQQuantizerTest, Decode_FinitePreservesDirection) {
     RaBitQQuantizer q;
-    q.Fit(data.data(), n, d);
+    q.Fit(*executor, data.data(), n, d);
     const size_t cs = q.CodeSize(d);
     std::vector<uint8_t> codes(n * cs);
-    q.Encode(data.data(), codes.data(), n, d);
+    q.Encode(*executor, data.data(), codes.data(), n, d);
     std::vector<float> decoded(n * d);
-    q.Decode(codes.data(), decoded.data(), n, d);
+    q.Decode(*executor, codes.data(), decoded.data(), n, d);
 
     std::vector<float> mean = ColumnMean(data, n, d);
     size_t positive = 0;

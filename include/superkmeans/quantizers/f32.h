@@ -27,26 +27,35 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
     using MatrixR = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
     using VectorR = Eigen::VectorXf;
 
-    void Fit(const float* /*data*/, size_t /*n*/, size_t d) override {
+    void Fit(ParallelExecutor& /*executor*/, const float* /*data*/, size_t /*n*/, size_t d)
+        override {
         dim = d;
         fitted = true;
     }
 
-    void Encode(const float* in, float* out, size_t n, size_t d) const override {
+    void Encode(ParallelExecutor& /*executor*/, const float* in, float* out, size_t n, size_t d)
+        const override {
         assert(fitted);
         if (in != out) {
             memcpy(out, in, n * d * sizeof(float));
         }
     }
 
-    void Decode(const float* in, float* out, size_t n, size_t d) const override {
+    void Decode(ParallelExecutor& /*executor*/, const float* in, float* out, size_t n, size_t d)
+        const override {
         assert(fitted);
         if (in != out) {
             memcpy(out, in, n * d * sizeof(float));
         }
     }
 
-    void ComputeNorms(const float* data, size_t n, size_t d, float* out_norms) const override {
+    void ComputeNorms(
+        ParallelExecutor& /*executor*/,
+        const float* data,
+        size_t n,
+        size_t d,
+        float* out_norms
+    ) const override {
         assert(fitted);
         Eigen::Map<const MatrixR> e_data(data, n, d);
         Eigen::Map<VectorR> e_norms(out_norms, n);
@@ -54,6 +63,7 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
     }
 
     void FindNearestNeighbor(
+        ParallelExecutor& executor,
         const quantized_t* x,
         const quantized_t* y,
         const float* /*x_float*/,
@@ -69,12 +79,17 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
     ) const override {
         assert(fitted);
         batch_computer::FindNearestNeighbor(
-            x, y, n_x, n_y, d, norms_x, norms_y, out_knn, out_distances, tmp_buf
+            executor, x, y, n_x, n_y, d, norms_x, norms_y, out_knn, out_distances, tmp_buf
         );
     }
 
-    void CacheDataPartialNorms(const quantized_t* data, size_t n, size_t d, uint32_t partial_d)
-        override {
+    void CacheDataPartialNorms(
+        ParallelExecutor& /*executor*/,
+        const quantized_t* data,
+        size_t n,
+        size_t d,
+        uint32_t partial_d
+    ) override {
         cached_data_partial_norms.resize(n);
         Eigen::Map<const MatrixR> e_data(data, n, d);
         Eigen::Map<VectorR> e_norms(cached_data_partial_norms.data(), n);
@@ -82,6 +97,7 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
     }
 
     void CacheCentroidPartialNorms(
+        ParallelExecutor& /*executor*/,
         const quantized_t* centroids,
         size_t n,
         size_t d,
@@ -94,6 +110,7 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
     }
 
     void FindNearestNeighborWithPruning(
+        ParallelExecutor& executor,
         const quantized_t* x,
         const quantized_t* y,
         const float* /*x_float*/,
@@ -116,6 +133,7 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
         );
 
         batch_computer::FindNearestNeighborWithPruning(
+            executor,
             x,
             y,
             n_x,
@@ -133,35 +151,36 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
     }
 
     void UpdateCentroids(
+        ParallelExecutor& executor,
         const quantized_t* encoded_data,
         const uint32_t* assignments,
         float* centroid_accumulators,
         uint32_t* cluster_sizes,
         size_t n,
         size_t n_clusters,
-        size_t d,
-        uint32_t n_threads
+        size_t d
     ) const override {
         SKM_PROFILE_SCOPE("F32::UpdateCentroids");
-#pragma omp parallel if (n_threads > 1) num_threads(n_threads)
-        {
-            uint32_t nt = n_threads;
-            uint32_t rank = omp_get_thread_num();
-            size_t c0 = (n_clusters * rank) / nt;
-            size_t c1 = (n_clusters * (rank + 1)) / nt;
-            for (size_t i = 0; i < n; ++i) {
-                uint32_t ci = assignments[i];
-                if (ci >= c0 && ci < c1) {
-                    const float* vec = encoded_data + i * d;
-                    float* acc = centroid_accumulators + ci * d;
-                    cluster_sizes[ci] += 1;
-                    SKM_VECTORIZE_LOOP
-                    for (size_t j = 0; j < d; ++j) {
-                        acc[j] += vec[j];
+        // One rank per centroid range; the executor runs every rank exactly once.
+        const size_t nt = executor.NumWorkers();
+        executor.ParallelFor(nt, [&](size_t rank_begin, size_t rank_end, size_t) {
+            for (size_t rank = rank_begin; rank < rank_end; ++rank) {
+                const size_t c0 = (n_clusters * rank) / nt;
+                const size_t c1 = (n_clusters * (rank + 1)) / nt;
+                for (size_t i = 0; i < n; ++i) {
+                    uint32_t ci = assignments[i];
+                    if (ci >= c0 && ci < c1) {
+                        const float* vec = encoded_data + i * d;
+                        float* acc = centroid_accumulators + ci * d;
+                        cluster_sizes[ci] += 1;
+                        SKM_VECTORIZE_LOOP
+                        for (size_t j = 0; j < d; ++j) {
+                            acc[j] += vec[j];
+                        }
                     }
                 }
             }
-        }
+        });
     }
 
     bool IsFitted() const override { return fitted; }

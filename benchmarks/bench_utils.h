@@ -840,9 +840,11 @@ inline void ComputeAndStoreTopkDistances(
     // Allocate outputs
     std::vector<uint32_t> out_knn(sample_size * k);
     std::vector<float> out_distances(sample_size * k);
-    std::unique_ptr<float[]> tmp_buf(new float[skmeans::X_BATCH_SIZE * skmeans::Y_BATCH_SIZE]);
+    auto executor = skmeans::MakeDefaultExecutor(0);
+    std::unique_ptr<float[]> tmp_buf(new float[batch_computer::ScratchSize(*executor)]);
 
     batch_computer::FindKNearestNeighbors(
+        *executor,
         sampled.data(),
         centroids,
         sample_size,

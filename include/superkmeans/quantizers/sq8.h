@@ -14,7 +14,6 @@
 #include <cstring>
 #include <limits>
 #include <memory>
-#include <omp.h>
 #include <utility>
 #include <vector>
 
@@ -50,9 +49,12 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
      * - x86 without AMX (e.g. Zen 5): NumKong when k > THIN_MATRIX_THRESHOLD,
      *   ruy otherwise (NumKong is subpar for small k).
      *
-     * Handles OMP parallelization internally (backends need different threading).
+     * - Wasm: always NumKong (no ruy there; U8Gemm enforces it).
+     *
+     * Rows are split across the executor's workers inside U8Gemm.
      */
     void MatrixMultiplication(
+        ParallelExecutor& executor,
         const quantized_t* a,
         const quantized_t* b,
         uint32_t* out,
@@ -63,14 +65,27 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
         size_t b_stride
     ) const {
         const bool use_numkong = !IS_ARM && (has_amx || k > THIN_MATRIX_THRESHOLD);
-        U8Gemm(a, b, out, m, n, k, a_stride, b_stride, use_numkong, centroids_nk_packed_buf, true);
+        U8Gemm(
+            executor,
+            a,
+            b,
+            out,
+            m,
+            n,
+            k,
+            a_stride,
+            b_stride,
+            use_numkong,
+            centroids_nk_packed_buf,
+            true
+        );
     }
 
-    void Fit(const float* embeddings, size_t n, size_t d) override {
+    void Fit(ParallelExecutor& executor, const float* embeddings, size_t n, size_t d) override {
         SKM_PROFILE_SCOPE("fitting");
         const size_t total_elements = n * d;
         params = ComputeScalarQuantizationParams(
-            embeddings, total_elements, static_cast<float>(MAX_VALUE)
+            executor, embeddings, total_elements, static_cast<float>(MAX_VALUE)
         );
         if (!tmp_dots_buf) {
             tmp_dots_buf.reset(new uint32_t[X_BATCH_SIZE * Y_BATCH_SIZE]);
@@ -80,6 +95,7 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
     }
 
     void Encode(
+        ParallelExecutor& executor,
         const float* embeddings,
         quantized_t* output_quantized_embeddings,
         size_t n,
@@ -90,26 +106,28 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
         const float quantization_base = params.quantization_base;
         const float quantization_scale = params.quantization_scale;
 
-#pragma omp parallel for num_threads(g_n_threads)
-        for (size_t row = 0; row < n; ++row) {
-            const float* embedding = embeddings + row * d;
-            quantized_t* output_quantized_embedding = output_quantized_embeddings + row * d;
-            for (size_t i = 0; i < d; ++i) {
-                const int rounded = static_cast<int>(
-                    std::round((embedding[i] - quantization_base) * quantization_scale)
-                );
-                if (SKM_UNLIKELY(rounded > MAX_VALUE)) {
-                    output_quantized_embedding[i] = MAX_VALUE;
-                } else if (SKM_UNLIKELY(rounded < 0)) {
-                    output_quantized_embedding[i] = 0;
-                } else {
-                    output_quantized_embedding[i] = static_cast<uint8_t>(rounded);
+        executor.ParallelFor(n, [&](size_t row_begin, size_t row_end, size_t) {
+            for (size_t row = row_begin; row < row_end; ++row) {
+                const float* embedding = embeddings + row * d;
+                quantized_t* output_quantized_embedding = output_quantized_embeddings + row * d;
+                for (size_t i = 0; i < d; ++i) {
+                    const int rounded = static_cast<int>(
+                        std::round((embedding[i] - quantization_base) * quantization_scale)
+                    );
+                    if (SKM_UNLIKELY(rounded > MAX_VALUE)) {
+                        output_quantized_embedding[i] = MAX_VALUE;
+                    } else if (SKM_UNLIKELY(rounded < 0)) {
+                        output_quantized_embedding[i] = 0;
+                    } else {
+                        output_quantized_embedding[i] = static_cast<uint8_t>(rounded);
+                    }
                 }
             }
-        }
+        });
     }
 
     void Decode(
+        ParallelExecutor& executor,
         const quantized_t* quantized_embeddings,
         float* output_embeddings,
         size_t n,
@@ -120,16 +138,17 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
         const float quantization_base = params.quantization_base;
         const float inv_quantization_scale = params.inv_quantization_scale;
 
-#pragma omp parallel for num_threads(g_n_threads)
-        for (size_t row = 0; row < n; ++row) {
-            const quantized_t* quantized_embedding = quantized_embeddings + row * d;
-            float* output_embedding = output_embeddings + row * d;
-            for (size_t i = 0; i < d; ++i) {
-                output_embedding[i] =
-                    static_cast<float>(quantized_embedding[i]) * inv_quantization_scale +
-                    quantization_base;
+        executor.ParallelFor(n, [&](size_t row_begin, size_t row_end, size_t) {
+            for (size_t row = row_begin; row < row_end; ++row) {
+                const quantized_t* quantized_embedding = quantized_embeddings + row * d;
+                float* output_embedding = output_embeddings + row * d;
+                for (size_t i = 0; i < d; ++i) {
+                    output_embedding[i] =
+                        static_cast<float>(quantized_embedding[i]) * inv_quantization_scale +
+                        quantization_base;
+                }
             }
-        }
+        });
     }
 
     /**
@@ -138,22 +157,28 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
      * Since base cancels in L2 distance:
      *   norm[i] = inv_scale² * Σ q[i][dim]²
      */
-    void ComputeNorms(const quantized_t* quantized_embeddings, size_t n, size_t d, float* out_norms)
-        const override {
+    void ComputeNorms(
+        ParallelExecutor& executor,
+        const quantized_t* quantized_embeddings,
+        size_t n,
+        size_t d,
+        float* out_norms
+    ) const override {
         assert(fitted);
         const float inv_scale_sq = params.inv_quantization_scale * params.inv_quantization_scale;
 
-#pragma omp parallel for num_threads(g_n_threads)
-        for (size_t i = 0; i < n; ++i) {
-            const quantized_t* row = quantized_embeddings + i * d;
-            uint32_t sum_sq = 0;
-            SKM_VECTORIZE_LOOP
-            for (size_t j = 0; j < d; ++j) {
-                uint32_t v = row[j];
-                sum_sq += v * v;
+        executor.ParallelFor(n, [&](size_t begin, size_t end, size_t) {
+            for (size_t i = begin; i < end; ++i) {
+                const quantized_t* row = quantized_embeddings + i * d;
+                uint32_t sum_sq = 0;
+                SKM_VECTORIZE_LOOP
+                for (size_t j = 0; j < d; ++j) {
+                    uint32_t v = row[j];
+                    sum_sq += v * v;
+                }
+                out_norms[i] = inv_scale_sq * static_cast<float>(sum_sq);
             }
-            out_norms[i] = inv_scale_sq * static_cast<float>(sum_sq);
-        }
+        });
     }
 
     /**
@@ -163,6 +188,7 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
      * norms: L2²(x,y) = ||x||² + ||y||² - 2·dot(x,y).
      */
     void FindNearestNeighbor(
+        ParallelExecutor& executor,
         const quantized_t* x,
         const quantized_t* y,
         const float* x_float,
@@ -191,7 +217,7 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
                 const size_t batch_n_y = std::min(Y_BATCH_SIZE, n_y - j);
 
                 MatrixMultiplication(
-                    x + i * d, y + j * d, tmp_dots_buf.get(), batch_n_x, batch_n_y, d, d, d
+                    executor, x + i * d, y + j * d, tmp_dots_buf.get(), batch_n_x, batch_n_y, d, d, d
                 );
 
                 // L2²(x,y) = ||x||² + ||y||² - 2·inv_scale²·dot(x,y)
@@ -199,43 +225,50 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
                 using MatrixR =
                     Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
                 Eigen::Map<MatrixR> dists_matrix(tmp_buf, batch_n_x, batch_n_y);
-#pragma omp parallel for num_threads(g_n_threads)
-                for (size_t r = 0; r < batch_n_x; ++r) {
-                    const size_t idx = i + r;
-                    const uint32_t* dots_row = tmp_dots_buf.get() + r * batch_n_y;
-                    float* dists_row = tmp_buf + r * batch_n_y;
-                    const float nx = norms_x[idx];
+                executor.ParallelFor(batch_n_x, [&](size_t row_begin, size_t row_end, size_t) {
+                    for (size_t r = row_begin; r < row_end; ++r) {
+                        const size_t idx = i + r;
+                        const uint32_t* dots_row = tmp_dots_buf.get() + r * batch_n_y;
+                        float* dists_row = tmp_buf + r * batch_n_y;
+                        const float nx = norms_x[idx];
 
-                    SKM_VECTORIZE_LOOP
-                    for (size_t c = 0; c < batch_n_y; ++c) {
-                        dists_row[c] = nx + norms_y[j + c] -
-                                       2.0f * inv_scale_sq * static_cast<float>(dots_row[c]);
-                    }
+                        SKM_VECTORIZE_LOOP
+                        for (size_t c = 0; c < batch_n_y; ++c) {
+                            dists_row[c] = nx + norms_y[j + c] -
+                                           2.0f * inv_scale_sq * static_cast<float>(dots_row[c]);
+                        }
 
-                    uint32_t knn_idx;
-                    float batch_top_1 = dists_matrix.row(r).minCoeff(&knn_idx);
-                    if (batch_top_1 < out_distances[idx]) {
-                        out_distances[idx] = std::max(0.0f, batch_top_1);
-                        out_knn[idx] = static_cast<uint32_t>(j + knn_idx);
+                        uint32_t knn_idx;
+                        float batch_top_1 = dists_matrix.row(r).minCoeff(&knn_idx);
+                        if (batch_top_1 < out_distances[idx]) {
+                            out_distances[idx] = std::max(0.0f, batch_top_1);
+                            out_knn[idx] = static_cast<uint32_t>(j + knn_idx);
+                        }
                     }
-                }
+                });
             }
         }
     }
 
-    void CacheDataPartialNorms(const quantized_t* data, size_t n, size_t d, uint32_t partial_d)
-        override {
-        CachePartialNorms(data, n, d, partial_d, cached_data_partial_norms);
+    void CacheDataPartialNorms(
+        ParallelExecutor& executor,
+        const quantized_t* data,
+        size_t n,
+        size_t d,
+        uint32_t partial_d
+    ) override {
+        CachePartialNorms(executor, data, n, d, partial_d, cached_data_partial_norms);
         cached_data_partial_d_ = partial_d;
     }
 
     void CacheCentroidPartialNorms(
+        ParallelExecutor& executor,
         const quantized_t* centroids,
         size_t n,
         size_t d,
         uint32_t partial_d
     ) override {
-        CachePartialNorms(centroids, n, d, partial_d, cached_centroid_partial_norms);
+        CachePartialNorms(executor, centroids, n, d, partial_d, cached_centroid_partial_norms);
     }
 
     /**
@@ -248,6 +281,7 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
      * Partial norms must be cached via CacheDataPartialNorms / CacheCentroidPartialNorms.
      */
     void FindNearestNeighborWithPruning(
+        ParallelExecutor& executor,
         const quantized_t* x,
         const quantized_t* y,
         const float* x_float,
@@ -267,7 +301,7 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
         (void) y_float;
 
         if (cached_data_partial_norms.size() != n_x || cached_data_partial_d_ != partial_d) {
-            CachePartialNorms(x, n_x, d, partial_d, cached_data_partial_norms);
+            CachePartialNorms(executor, x, n_x, d, partial_d, cached_data_partial_norms);
             cached_data_partial_d_ = partial_d;
         }
 
@@ -289,6 +323,7 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
                 {
                     SKM_PROFILE_SCOPE("search/blas");
                     MatrixMultiplication(
+                        executor,
                         x + i * d,
                         y + j * d,
                         tmp_dots_buf.get(),
@@ -303,53 +338,51 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
                 {
                     SKM_PROFILE_SCOPE("search/pdx");
                     // Convert dots to L2² and run PDXearch per query vector
-#if defined(__clang__)
-#pragma omp parallel for num_threads(g_n_threads) schedule(dynamic, 8)
-#else
-#pragma omp parallel for num_threads(g_n_threads)
-#endif
-                    for (size_t r = 0; r < batch_n_x; ++r) {
-                        const size_t i_idx = i + r;
+                    executor.ParallelFor(batch_n_x, [&](size_t row_begin, size_t row_end, size_t) {
+                        for (size_t r = row_begin; r < row_end; ++r) {
+                            const size_t i_idx = i + r;
 
-                        // Norms: convert dot products to squared L2 distances
-                        const uint32_t norm_x_i = cached_data_partial_norms[i_idx];
-                        uint32_t* partial_distances_p = tmp_dots_buf.get() + r * batch_n_y;
-                        SKM_VECTORIZE_LOOP
-                        for (size_t c = 0; c < batch_n_y; ++c) {
-                            partial_distances_p[c] = norm_x_i +
-                                                     cached_centroid_partial_norms[j + c] -
-                                                     2 * partial_distances_p[c];
+                            // Norms: convert dot products to squared L2 distances
+                            const uint32_t norm_x_i = cached_data_partial_norms[i_idx];
+                            uint32_t* partial_distances_p = tmp_dots_buf.get() + r * batch_n_y;
+                            SKM_VECTORIZE_LOOP
+                            for (size_t c = 0; c < batch_n_y; ++c) {
+                                partial_distances_p[c] = norm_x_i +
+                                                         cached_centroid_partial_norms[j + c] -
+                                                         2 * partial_distances_p[c];
+                            }
+
+                            // PDX pruned search per vector
+                            auto data_p = x + (i_idx * d);
+                            const auto prev_assignment = out_knn[i_idx];
+                            float dist_to_prev_centroid;
+                            if (j == 0) {
+                                uint32_t u8_dist =
+                                    u8_computer::Horizontal(data_p, y + prev_assignment * d, d);
+                                dist_to_prev_centroid = static_cast<float>(u8_dist) * inv_scale_sq;
+                            } else {
+                                dist_to_prev_centroid = out_distances[i_idx];
+                            }
+
+                            // PDXearch with uint32_t partial distances
+                            size_t local_not_pruned = 0;
+                            auto assignment =
+                                pdx_centroids.searcher
+                                    ->Top1PartialSearchWithThresholdAndPartialDistances(
+                                        data_p,
+                                        dist_to_prev_centroid,
+                                        prev_assignment,
+                                        partial_distances_p,
+                                        partial_d,
+                                        j / VECTOR_CHUNK_SIZE,
+                                        (j + Y_BATCH_SIZE) / VECTOR_CHUNK_SIZE,
+                                        local_not_pruned
+                                    );
+                            out_not_pruned_counts[i_idx] += local_not_pruned;
+                            out_knn[i_idx] = assignment.index;
+                            out_distances[i_idx] = assignment.distance;
                         }
-
-                        // PDX pruned search per vector
-                        auto data_p = x + (i_idx * d);
-                        const auto prev_assignment = out_knn[i_idx];
-                        float dist_to_prev_centroid;
-                        if (j == 0) {
-                            uint32_t u8_dist =
-                                u8_computer::Horizontal(data_p, y + prev_assignment * d, d);
-                            dist_to_prev_centroid = static_cast<float>(u8_dist) * inv_scale_sq;
-                        } else {
-                            dist_to_prev_centroid = out_distances[i_idx];
-                        }
-
-                        // PDXearch with uint32_t partial distances
-                        size_t local_not_pruned = 0;
-                        auto assignment = pdx_centroids.searcher
-                                              ->Top1PartialSearchWithThresholdAndPartialDistances(
-                                                  data_p,
-                                                  dist_to_prev_centroid,
-                                                  prev_assignment,
-                                                  partial_distances_p,
-                                                  partial_d,
-                                                  j / VECTOR_CHUNK_SIZE,
-                                                  (j + Y_BATCH_SIZE) / VECTOR_CHUNK_SIZE,
-                                                  local_not_pruned
-                                              );
-                        out_not_pruned_counts[i_idx] += local_not_pruned;
-                        out_knn[i_idx] = assignment.index;
-                        out_distances[i_idx] = assignment.distance;
-                    }
+                    });
                 }
             }
         }
@@ -363,39 +396,41 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
     }
 
     void UpdateCentroids(
+        ParallelExecutor& executor,
         const quantized_t* encoded_data,
         const uint32_t* assignments,
         float* /*centroid_accumulators_float*/,
         uint32_t* cluster_sizes,
         size_t n,
         size_t n_clusters,
-        size_t d,
-        uint32_t n_threads
+        size_t d
     ) const override {
         SKM_PROFILE_SCOPE("SQ8::UpdateCentroids");
         assert(fitted);
-#pragma omp parallel if (n_threads > 1) num_threads(n_threads)
-        {
-            uint32_t nt = n_threads;
-            uint32_t rank = omp_get_thread_num();
-            size_t c0 = (n_clusters * rank) / nt;
-            size_t c1 = (n_clusters * (rank + 1)) / nt;
-            for (size_t i = 0; i < n; ++i) {
-                uint32_t ci = assignments[i];
-                if (ci >= c0 && ci < c1) {
-                    cluster_sizes[ci] += 1;
-                    const auto* vec = encoded_data + i * d;
-                    auto* acc = centroid_accumulators.data() + ci * d;
-                    SKM_VECTORIZE_LOOP
-                    for (size_t j = 0; j < d; ++j) {
-                        acc[j] += vec[j];
+        // One rank per centroid range; the executor runs every rank exactly once.
+        const size_t nt = executor.NumWorkers();
+        executor.ParallelFor(nt, [&](size_t rank_begin, size_t rank_end, size_t) {
+            for (size_t rank = rank_begin; rank < rank_end; ++rank) {
+                const size_t c0 = (n_clusters * rank) / nt;
+                const size_t c1 = (n_clusters * (rank + 1)) / nt;
+                for (size_t i = 0; i < n; ++i) {
+                    uint32_t ci = assignments[i];
+                    if (ci >= c0 && ci < c1) {
+                        cluster_sizes[ci] += 1;
+                        const auto* vec = encoded_data + i * d;
+                        auto* acc = centroid_accumulators.data() + ci * d;
+                        SKM_VECTORIZE_LOOP
+                        for (size_t j = 0; j < d; ++j) {
+                            acc[j] += vec[j];
+                        }
                     }
                 }
             }
-        }
+        });
     }
 
     void FinalizeCentroids(
+        ParallelExecutor& executor,
         float* centroids,
         const uint32_t* cluster_sizes,
         size_t n_clusters,
@@ -405,21 +440,23 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
         const float quantization_base = params.quantization_base;
         const float inv_quantization_scale = params.inv_quantization_scale;
 
-#pragma omp parallel for num_threads(g_n_threads)
         // TODO(@lkuffo, low): large clusters may overflow the uint32 accumulator
-        for (size_t i = 0; i < n_clusters; ++i) {
-            if (cluster_sizes[i] == 0)
-                continue;
-            const uint32_t* acc = centroid_accumulators.data() + i * d;
-            float* row = centroids + i * d;
-            const uint32_t half = cluster_sizes[i] / 2;
-            const float inv_size = 1.0f / static_cast<float>(cluster_sizes[i]);
-            SKM_VECTORIZE_LOOP
-            for (size_t j = 0; j < d; ++j) {
-                uint8_t qval = static_cast<uint8_t>(static_cast<float>(acc[j] + half) * inv_size);
-                row[j] = static_cast<float>(qval) * inv_quantization_scale + quantization_base;
+        executor.ParallelFor(n_clusters, [&](size_t begin, size_t end, size_t) {
+            for (size_t i = begin; i < end; ++i) {
+                if (cluster_sizes[i] == 0)
+                    continue;
+                const uint32_t* acc = centroid_accumulators.data() + i * d;
+                float* row = centroids + i * d;
+                const uint32_t half = cluster_sizes[i] / 2;
+                const float inv_size = 1.0f / static_cast<float>(cluster_sizes[i]);
+                SKM_VECTORIZE_LOOP
+                for (size_t j = 0; j < d; ++j) {
+                    uint8_t qval =
+                        static_cast<uint8_t>(static_cast<float>(acc[j] + half) * inv_size);
+                    row[j] = static_cast<float>(qval) * inv_quantization_scale + quantization_base;
+                }
             }
-        }
+        });
     }
 
     bool IsFitted() const override { return fitted; }
@@ -428,6 +465,7 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
 
   private:
     void CachePartialNorms(
+        ParallelExecutor& executor,
         const quantized_t* vecs,
         size_t n,
         size_t d,
@@ -435,17 +473,18 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
         std::vector<uint32_t>& out
     ) const {
         out.resize(n);
-#pragma omp parallel for num_threads(g_n_threads)
-        for (size_t idx = 0; idx < n; ++idx) {
-            uint32_t sum = 0;
-            const quantized_t* row = vecs + idx * d;
-            SKM_VECTORIZE_LOOP
-            for (size_t dim = 0; dim < partial_d; ++dim) {
-                uint32_t v = row[dim];
-                sum += v * v;
+        executor.ParallelFor(n, [&](size_t begin, size_t end, size_t) {
+            for (size_t idx = begin; idx < end; ++idx) {
+                uint32_t sum = 0;
+                const quantized_t* row = vecs + idx * d;
+                SKM_VECTORIZE_LOOP
+                for (size_t dim = 0; dim < partial_d; ++dim) {
+                    uint32_t v = row[dim];
+                    sum += v * v;
+                }
+                out[idx] = sum;
             }
-            out[idx] = sum;
-        }
+        });
     }
 
     ScalarQuantizationParams params{};

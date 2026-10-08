@@ -1,6 +1,5 @@
 #include <fstream>
 #include <iostream>
-#include <omp.h>
 #include <random>
 #include <vector>
 
@@ -17,9 +16,8 @@ int main(int argc, char* argv[]) {
     const int n_iters = 10;
     const float sampling_fraction = 1.0f;
     const size_t n_queries = bench_utils::N_QUERIES;
-    const size_t THREADS = omp_get_max_threads();
+    const size_t THREADS = skmeans::ResolveNumThreads(0);
     const float PRUNING_PCT_WINDOW_SIZE = 0.005f;
-    omp_set_num_threads(THREADS);
 
     std::cout << "=== Running sweet_pruning_spot benchmark ===" << std::endl;
     std::cout << "Fixed parameters: iters=" << n_iters

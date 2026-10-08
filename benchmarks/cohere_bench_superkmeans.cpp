@@ -8,7 +8,6 @@
 
 #include <fstream>
 #include <iostream>
-#include <omp.h>
 #include <unordered_map>
 #include <vector>
 
@@ -146,7 +145,7 @@ int main() {
             n,
             static_cast<int>(n_clusters),
             construction_time_ms + assignment_time_ms,
-            omp_get_max_threads(),
+            static_cast<int>(skmeans::ResolveNumThreads(0)),
             0.0,
             config_map,
             results_knn_10,

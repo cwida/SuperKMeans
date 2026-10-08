@@ -4,7 +4,6 @@
 
 #include <fstream>
 #include <iostream>
-#include <omp.h>
 #include <random>
 #include <vector>
 
@@ -34,8 +33,7 @@ int main(int argc, char* argv[]) {
     float sampling_fraction = 1.0f;
     std::string filename = bench_utils::GetDataPath(dataset);
     std::string filename_queries = bench_utils::GetQueryPath(dataset);
-    const size_t THREADS = omp_get_max_threads();
-    omp_set_num_threads(THREADS);
+    const size_t THREADS = skmeans::ResolveNumThreads(0);
 
     std::cout << "=== Running algorithm: " << algorithm << " ===" << std::endl;
     std::cout << "Dataset: " << dataset << " (n=" << n << ", d=" << d << ")\n";
@@ -165,7 +163,8 @@ int main(int argc, char* argv[]) {
         if (in_place) {
             skmeans::ADSamplingPruner pruner(d, skmeans::PRUNER_INITIAL_THRESHOLD, config.seed);
             rotated_queries.resize(n_queries * d);
-            pruner.Rotate(queries.data(), rotated_queries.data(), n_queries);
+            skmeans::ExecutorScope executor_scope(nullptr, THREADS);
+            pruner.Rotate(executor_scope.Get(), queries.data(), rotated_queries.data(), n_queries);
             queries_p = rotated_queries.data();
         }
 

@@ -100,6 +100,7 @@ venv
 *.png
 *.hdf5
 *.csv
+*.parquet
 benchmarks/results/topk_distances_*.json
 !benchmarks/results/plots/github_*.png
 !benchmarks/results/plots/comparison_*.png

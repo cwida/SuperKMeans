@@ -1,7 +1,6 @@
 #include <cmath>
 #include <cstring>
 #include <gtest/gtest.h>
-#include <omp.h>
 #include <random>
 #include <vector>
 
@@ -15,7 +14,11 @@ namespace {
 
 class DistanceComputerTest : public ::testing::Test {
   protected:
-    void SetUp() override { omp_set_num_threads(omp_get_max_threads()); }
+    using f32_batch_computer =
+        skmeans::BatchComputer<skmeans::DistanceFunction::l2, skmeans::Quantization::f32>;
+
+    void SetUp() override { executor = skmeans::MakeDefaultExecutor(0); }
+    std::unique_ptr<skmeans::ParallelExecutor> executor;
 };
 
 /**
@@ -113,9 +116,10 @@ TEST_F(DistanceComputerTest, BatchComputer_FindNearestNeighbor_Correctness) {
 
         std::vector<uint32_t> batch_knn(tc.n_x);
         std::vector<float> batch_distances(tc.n_x);
-        std::vector<float> tmp_buf(skmeans::X_BATCH_SIZE * skmeans::Y_BATCH_SIZE);
+        std::vector<float> tmp_buf(f32_batch_computer::ScratchSize(*executor));
         skmeans::BatchComputer<skmeans::DistanceFunction::l2, skmeans::Quantization::f32>::
             FindNearestNeighbor(
+                *executor,
                 x.data(),
                 y.data(),
                 tc.n_x,
@@ -173,9 +177,10 @@ TEST_F(DistanceComputerTest, BatchComputer_SingleQuery) {
 
     std::vector<uint32_t> batch_knn(1);
     std::vector<float> batch_distances(1);
-    std::vector<float> tmp_buf(skmeans::X_BATCH_SIZE * skmeans::Y_BATCH_SIZE);
+    std::vector<float> tmp_buf(f32_batch_computer::ScratchSize(*executor));
     skmeans::BatchComputer<skmeans::DistanceFunction::l2, skmeans::Quantization::f32>::
         FindNearestNeighbor(
+            *executor,
             x.data(),
             y.data(),
             1,
@@ -218,9 +223,10 @@ TEST_F(DistanceComputerTest, BatchComputer_FindKNearestNeighbors_Correctness) {
 
     std::vector<uint32_t> batch_knn(n_x * k);
     std::vector<float> batch_distances(n_x * k);
-    std::vector<float> tmp_buf(skmeans::X_BATCH_SIZE * skmeans::Y_BATCH_SIZE);
+    std::vector<float> tmp_buf(f32_batch_computer::ScratchSize(*executor));
     skmeans::BatchComputer<skmeans::DistanceFunction::l2, skmeans::Quantization::f32>::
         FindKNearestNeighbors(
+            *executor,
             x.data(),
             y.data(),
             n_x,

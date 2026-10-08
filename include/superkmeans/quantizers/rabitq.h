@@ -12,7 +12,6 @@
 #include <cstring>
 #include <limits>
 #include <memory>
-#include <omp.h>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -59,7 +58,7 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
         pruning_partial_norms_dirty_ = true;
     }
 
-    void Fit(const float* data, size_t n, size_t d) override {
+    void Fit(ParallelExecutor& executor, const float* data, size_t n, size_t d) override {
         SKM_PROFILE_SCOPE("RQ::Fit");
         if (d % 8 != 0) {
             throw std::invalid_argument(
@@ -77,19 +76,21 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
         centroid_.resize(d, 0.0f);
 
         // Compute dataset mean as the centering centroid for RaBitQ
-        std::vector<float> sums(d, 0.0);
-#pragma omp parallel num_threads(g_n_threads)
-        {
+        const size_t n_workers = executor.NumWorkers();
+        std::vector<float> worker_sums(n_workers * d, 0.0f);
+        executor.ParallelFor(n, [&](size_t begin, size_t end, size_t worker) {
             std::vector<float> local(d, 0.0);
-#pragma omp for schedule(static)
-            for (size_t i = 0; i < n; ++i) {
+            for (size_t i = begin; i < end; ++i) {
                 for (size_t j = 0; j < d; ++j) {
                     local[j] += data[i * d + j];
                 }
             }
-#pragma omp critical
+            std::copy(local.begin(), local.end(), worker_sums.begin() + worker * d);
+        });
+        std::vector<float> sums(d, 0.0);
+        for (size_t w = 0; w < n_workers; ++w) {
             for (size_t j = 0; j < d; ++j)
-                sums[j] += local[j];
+                sums[j] += worker_sums[w * d + j];
         }
         for (size_t j = 0; j < d; ++j) {
             centroid_[j] = static_cast<float>(sums[j] / static_cast<float>(n));
@@ -99,41 +100,52 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
         fitted_ = true;
     }
 
-    void Encode(const float* in, quantized_t* out, size_t n, size_t d) const override {
+    void Encode(ParallelExecutor& executor, const float* in, quantized_t* out, size_t n, size_t d)
+        const override {
         SKM_PROFILE_SCOPE("RQ::Encode");
         uint8_t* codes = reinterpret_cast<uint8_t*>(out);
-#pragma omp parallel for num_threads(g_n_threads)
-        for (size_t i = 0; i < n; ++i) {
-            RaBitQCodec::EncodeOne(
-                in + i * d, codes + i * code_size_, d, binary_bytes_, centroid_.data()
-            );
-        }
+        executor.ParallelFor(n, [&](size_t begin, size_t end, size_t) {
+            for (size_t i = begin; i < end; ++i) {
+                RaBitQCodec::EncodeOne(
+                    in + i * d, codes + i * code_size_, d, binary_bytes_, centroid_.data()
+                );
+            }
+        });
     }
 
-    void Decode(const quantized_t* in, float* out, size_t n, size_t d) const override {
+    void Decode(ParallelExecutor& executor, const quantized_t* in, float* out, size_t n, size_t d)
+        const override {
         SKM_PROFILE_SCOPE("RQ::Decode");
         const uint8_t* codes = reinterpret_cast<const uint8_t*>(in);
-#pragma omp parallel for num_threads(g_n_threads)
-        for (size_t i = 0; i < n; ++i) {
-            RaBitQCodec::DecodeOne(
-                codes + i * code_size_, out + i * d, d, binary_bytes_, centroid_.data()
-            );
-        }
+        executor.ParallelFor(n, [&](size_t begin, size_t end, size_t) {
+            for (size_t i = begin; i < end; ++i) {
+                RaBitQCodec::DecodeOne(
+                    codes + i * code_size_, out + i * d, d, binary_bytes_, centroid_.data()
+                );
+            }
+        });
     }
 
-    void ComputeNorms(const quantized_t* data, size_t n, size_t d, float* out_norms)
-        const override {
+    void ComputeNorms(
+        ParallelExecutor& executor,
+        const quantized_t* data,
+        size_t n,
+        size_t /*d*/,
+        float* out_norms
+    ) const override {
         SKM_PROFILE_SCOPE("RQ::ComputeNorms");
-#pragma omp parallel for num_threads(g_n_threads)
-        for (size_t i = 0; i < n; ++i) {
-            const uint8_t* code = reinterpret_cast<const uint8_t*>(data) + i * code_size_;
-            float or_minus_c_l2sqr;
-            std::memcpy(&or_minus_c_l2sqr, code + binary_bytes_, sizeof(float));
-            out_norms[i] = or_minus_c_l2sqr;
-        }
+        executor.ParallelFor(n, [&](size_t begin, size_t end, size_t) {
+            for (size_t i = begin; i < end; ++i) {
+                const uint8_t* code = reinterpret_cast<const uint8_t*>(data) + i * code_size_;
+                float or_minus_c_l2sqr;
+                std::memcpy(&or_minus_c_l2sqr, code + binary_bytes_, sizeof(float));
+                out_norms[i] = or_minus_c_l2sqr;
+            }
+        });
     }
 
     void FindNearestNeighbor(
+        ParallelExecutor& executor,
         const quantized_t* x,
         const quantized_t* y,
         const float* x_float,
@@ -157,8 +169,8 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
         const uint8_t* x_codes = reinterpret_cast<const uint8_t*>(x);
 
         // Cache per-data-point factors (depend only on x, reused across iterations)
-        EnsureCodeFactorsCache(x_codes, n_x);
-        EnsureTransposedBlocksCache(x_codes, n_x);
+        EnsureCodeFactorsCache(executor, x_codes, n_x);
+        EnsureTransposedBlocksCache(executor, x_codes, n_x);
         const uint32_t* sum_q = cached_sum_q_.data();
         const float* or_c_l2sqr = cached_or_c_l2sqr_.data();
         const float* dp_mult = cached_dp_mult_.data();
@@ -168,7 +180,15 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
         std::vector<float> c1(n_y), c2(n_y), c34(n_y), qr_to_c_l2sqr(n_y);
         std::vector<uint8_t> all_luts(n_y * n_sub * 16);
         QuantizeCentroidsAndBuildLUTs(
-            y_float, n_y, d, all_luts.data(), c1.data(), c2.data(), c34.data(), qr_to_c_l2sqr.data()
+            executor,
+            y_float,
+            n_y,
+            d,
+            all_luts.data(),
+            c1.data(),
+            c2.data(),
+            c34.data(),
+            qr_to_c_l2sqr.data()
         );
 
         const size_t lut_stride = n_sub * 16;
@@ -183,85 +203,90 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
             constexpr size_t kBS = FastScanComputer::kBlockSize;
             const size_t n_groups = (n_blocks + kSuperBlock - 1) / kSuperBlock;
 
-#pragma omp parallel for num_threads(g_n_threads)
-            for (size_t group = 0; group < n_groups; ++group) {
-                const size_t blk_base = group * kSuperBlock;
-                const size_t n_blks = std::min(kSuperBlock, n_blocks - blk_base);
+            executor.ParallelFor(n_groups, [&](size_t group_begin, size_t group_end, size_t) {
+                for (size_t group = group_begin; group < group_end; ++group) {
+                    const size_t blk_base = group * kSuperBlock;
+                    const size_t n_blks = std::min(kSuperBlock, n_blocks - blk_base);
 
-                const uint8_t* packed_ptrs[kSuperBlock];
-                size_t blk_starts[kSuperBlock], blk_counts[kSuperBlock];
-                for (size_t bi = 0; bi < n_blks; ++bi) {
-                    const size_t blk = blk_base + bi;
-                    packed_ptrs[bi] = cached_transposed_.get() + blk * block_bytes;
-                    blk_starts[bi] = blk * kBS;
-                    blk_counts[bi] = std::min(kBS, n_x - blk_starts[bi]);
-                }
-
-                float best_dist[kSuperBlock][kBS];
-                uint32_t best_idx[kSuperBlock][kBS];
-                float dist_buf[kSuperBlock][kBS];
-                float sum_q_f32[kSuperBlock][kBS];
-
-                for (size_t bi = 0; bi < n_blks; ++bi) {
-                    std::fill_n(best_dist[bi], kBS, std::numeric_limits<float>::max());
-                    std::fill_n(best_idx[bi], kBS, 0u);
-                    for (size_t k = 0; k < blk_counts[bi]; ++k) {
-                        sum_q_f32[bi][k] = static_cast<float>(sum_q[blk_starts[bi] + k]);
-                    }
-                }
-
-                for (size_t j = 0; j < n_y; ++j) {
-                    const uint8_t* lut_j = all_luts.data() + j * lut_stride;
-
-                    // Multi-block ScanBlock: share LUT across all blocks
-                    uint16_t dot_qo[kSuperBlock][kBS];
-                    if (n_blks == kSuperBlock) {
-                        uint16_t* out_ptrs[kSuperBlock];
-                        for (size_t bi = 0; bi < kSuperBlock; ++bi) {
-                            out_ptrs[bi] = dot_qo[bi];
-                        }
-                        FastScanComputer::ScanBlockMulti<4>(
-                            packed_ptrs, lut_j, binary_bytes_, out_ptrs
-                        );
-                    } else {
-                        for (size_t bi = 0; bi < n_blks; ++bi) {
-                            FastScanComputer::ScanBlock(
-                                packed_ptrs[bi], lut_j, binary_bytes_, dot_qo[bi], blk_counts[bi]
-                            );
-                        }
-                    }
-
-                    // Per-block correction + best update
+                    const uint8_t* packed_ptrs[kSuperBlock];
+                    size_t blk_starts[kSuperBlock], blk_counts[kSuperBlock];
                     for (size_t bi = 0; bi < n_blks; ++bi) {
-                        FastScanComputer::RabitQCorrection(
-                            dot_qo[bi],
-                            c1[j],
-                            c2[j],
-                            c34[j],
-                            qr_to_c_l2sqr[j],
-                            sum_q_f32[bi],
-                            or_c_l2sqr + blk_starts[bi],
-                            dp_mult + blk_starts[bi],
-                            dist_buf[bi],
-                            blk_counts[bi]
-                        );
+                        const size_t blk = blk_base + bi;
+                        packed_ptrs[bi] = cached_transposed_.get() + blk * block_bytes;
+                        blk_starts[bi] = blk * kBS;
+                        blk_counts[bi] = std::min(kBS, n_x - blk_starts[bi]);
+                    }
 
+                    float best_dist[kSuperBlock][kBS];
+                    uint32_t best_idx[kSuperBlock][kBS];
+                    float dist_buf[kSuperBlock][kBS];
+                    float sum_q_f32[kSuperBlock][kBS];
+
+                    for (size_t bi = 0; bi < n_blks; ++bi) {
+                        std::fill_n(best_dist[bi], kBS, std::numeric_limits<float>::max());
+                        std::fill_n(best_idx[bi], kBS, 0u);
                         for (size_t k = 0; k < blk_counts[bi]; ++k) {
-                            if (dist_buf[bi][k] < best_dist[bi][k]) {
-                                best_dist[bi][k] = dist_buf[bi][k];
-                                best_idx[bi][k] = static_cast<uint32_t>(j);
+                            sum_q_f32[bi][k] = static_cast<float>(sum_q[blk_starts[bi] + k]);
+                        }
+                    }
+
+                    for (size_t j = 0; j < n_y; ++j) {
+                        const uint8_t* lut_j = all_luts.data() + j * lut_stride;
+
+                        // Multi-block ScanBlock: share LUT across all blocks
+                        uint16_t dot_qo[kSuperBlock][kBS];
+                        if (n_blks == kSuperBlock) {
+                            uint16_t* out_ptrs[kSuperBlock];
+                            for (size_t bi = 0; bi < kSuperBlock; ++bi) {
+                                out_ptrs[bi] = dot_qo[bi];
+                            }
+                            FastScanComputer::ScanBlockMulti<4>(
+                                packed_ptrs, lut_j, binary_bytes_, out_ptrs
+                            );
+                        } else {
+                            for (size_t bi = 0; bi < n_blks; ++bi) {
+                                FastScanComputer::ScanBlock(
+                                    packed_ptrs[bi],
+                                    lut_j,
+                                    binary_bytes_,
+                                    dot_qo[bi],
+                                    blk_counts[bi]
+                                );
+                            }
+                        }
+
+                        // Per-block correction + best update
+                        for (size_t bi = 0; bi < n_blks; ++bi) {
+                            FastScanComputer::RabitQCorrection(
+                                dot_qo[bi],
+                                c1[j],
+                                c2[j],
+                                c34[j],
+                                qr_to_c_l2sqr[j],
+                                sum_q_f32[bi],
+                                or_c_l2sqr + blk_starts[bi],
+                                dp_mult + blk_starts[bi],
+                                dist_buf[bi],
+                                blk_counts[bi]
+                            );
+
+                            for (size_t k = 0; k < blk_counts[bi]; ++k) {
+                                if (dist_buf[bi][k] < best_dist[bi][k]) {
+                                    best_dist[bi][k] = dist_buf[bi][k];
+                                    best_idx[bi][k] = static_cast<uint32_t>(j);
+                                }
                             }
                         }
                     }
-                }
 
-                for (size_t bi = 0; bi < n_blks; ++bi) {
-                    for (size_t k = 0; k < blk_counts[bi]; ++k) {
-                        out_distances[blk_starts[bi] + k] = best_dist[bi][k];
-                        out_knn[blk_starts[bi] + k] = best_idx[bi][k];
+                    for (size_t bi = 0; bi < n_blks; ++bi) {
+                        for (size_t k = 0; k < blk_counts[bi]; ++k) {
+                            out_distances[blk_starts[bi] + k] = best_dist[bi][k];
+                            out_knn[blk_starts[bi] + k] = best_idx[bi][k];
+                        }
                     }
                 }
-            }
+            });
         }
     }
 
@@ -289,48 +314,63 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
         return InitialPartialD(vertical_d);
     }
     void UpdateCentroids(
+        ParallelExecutor& executor,
         const quantized_t* encoded_data,
         const uint32_t* assignments,
         float* centroid_accumulators,
         uint32_t* cluster_sizes,
         size_t n,
         size_t n_clusters,
-        size_t d,
-        uint32_t n_threads
+        size_t d
     ) const override {
         SKM_PROFILE_SCOPE("RQ::UpdateCentroids");
         assert(fitted_ && d == d_);
         const uint8_t* codes = reinterpret_cast<const uint8_t*>(encoded_data);
-#pragma omp parallel if (n_threads > 1) num_threads(n_threads)
-        {
-            uint32_t nt = n_threads;
-            uint32_t rank = omp_get_thread_num();
-            size_t c0 = (n_clusters * rank) / nt;
-            size_t c1 = (n_clusters * (rank + 1)) / nt;
+        // One rank per centroid range; the executor runs every rank exactly once.
+        const size_t nt = executor.NumWorkers();
+        executor.ParallelFor(nt, [&](size_t rank_begin, size_t rank_end, size_t) {
             std::unique_ptr<float[]> decode_buf(new float[d]);
-            for (size_t i = 0; i < n; ++i) {
-                uint32_t ci = assignments[i];
-                if (ci >= c0 && ci < c1) {
-                    RaBitQCodec::DecodeOne(
-                        codes + i * code_size_, decode_buf.get(), d, binary_bytes_, centroid_.data()
-                    );
-                    cluster_sizes[ci] += 1;
-                    float* acc = centroid_accumulators + ci * d;
-                    SKM_VECTORIZE_LOOP
-                    for (size_t j = 0; j < d; ++j) {
-                        acc[j] += decode_buf[j];
+            for (size_t rank = rank_begin; rank < rank_end; ++rank) {
+                const size_t c0 = (n_clusters * rank) / nt;
+                const size_t c1 = (n_clusters * (rank + 1)) / nt;
+                for (size_t i = 0; i < n; ++i) {
+                    uint32_t ci = assignments[i];
+                    if (ci >= c0 && ci < c1) {
+                        RaBitQCodec::DecodeOne(
+                            codes + i * code_size_,
+                            decode_buf.get(),
+                            d,
+                            binary_bytes_,
+                            centroid_.data()
+                        );
+                        cluster_sizes[ci] += 1;
+                        float* acc = centroid_accumulators + ci * d;
+                        SKM_VECTORIZE_LOOP
+                        for (size_t j = 0; j < d; ++j) {
+                            acc[j] += decode_buf[j];
+                        }
                     }
                 }
             }
-        }
+        });
     }
 
-    void CacheDataPartialNorms(const quantized_t* data, size_t n, size_t /*d*/, uint32_t partial_d)
-        override {
-        ComputeDataPartialNorms(data, n, partial_d);
+    void CacheDataPartialNorms(
+        ParallelExecutor& executor,
+        const quantized_t* data,
+        size_t n,
+        size_t /*d*/,
+        uint32_t partial_d
+    ) override {
+        ComputeDataPartialNorms(executor, data, n, partial_d);
     }
 
-    void ComputeDataPartialNorms(const quantized_t* data, size_t n, uint32_t partial_d) const {
+    void ComputeDataPartialNorms(
+        ParallelExecutor& executor,
+        const quantized_t* data,
+        size_t n,
+        uint32_t partial_d
+    ) const {
         SKM_PROFILE_SCOPE("RQ::CacheDataPartialNorms");
         const uint8_t* codes = reinterpret_cast<const uint8_t*>(data);
         const size_t front_bytes = partial_d / 8;
@@ -340,31 +380,33 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
         cached_partial_d_ = partial_d;
         pruning_partial_norms_dirty_ = true;
 
-#pragma omp parallel for num_threads(g_n_threads)
-        for (size_t i = 0; i < n; ++i) {
-            const uint8_t* code = codes + i * code_size_;
-            uint32_t pc = 0;
-            size_t b = 0;
-            for (; b < std::min(front_bytes, mid_bytes); ++b) {
-                pc += static_cast<uint32_t>(__builtin_popcount(code[b]));
-            }
-            if (front_bytes <= mid_bytes) {
-                cached_sum_q_front_[i] = pc;
-                for (; b < mid_bytes; ++b) {
-                    pc += static_cast<uint32_t>(__builtin_popcount(code[b]));
+        executor.ParallelFor(n, [&](size_t begin, size_t end, size_t) {
+            for (size_t i = begin; i < end; ++i) {
+                const uint8_t* code = codes + i * code_size_;
+                uint32_t pc = 0;
+                size_t b = 0;
+                for (; b < std::min(front_bytes, mid_bytes); ++b) {
+                    pc += static_cast<uint32_t>(SKM_POPCOUNT(code[b]));
                 }
-                cached_sum_q_mid_[i] = pc;
-            } else {
-                cached_sum_q_mid_[i] = pc;
-                for (; b < front_bytes; ++b) {
-                    pc += static_cast<uint32_t>(__builtin_popcount(code[b]));
+                if (front_bytes <= mid_bytes) {
+                    cached_sum_q_front_[i] = pc;
+                    for (; b < mid_bytes; ++b) {
+                        pc += static_cast<uint32_t>(SKM_POPCOUNT(code[b]));
+                    }
+                    cached_sum_q_mid_[i] = pc;
+                } else {
+                    cached_sum_q_mid_[i] = pc;
+                    for (; b < front_bytes; ++b) {
+                        pc += static_cast<uint32_t>(SKM_POPCOUNT(code[b]));
+                    }
+                    cached_sum_q_front_[i] = pc;
                 }
-                cached_sum_q_front_[i] = pc;
             }
-        }
+        });
     }
 
     void CacheCentroidPartialNorms(
+        ParallelExecutor& /*executor*/,
         const quantized_t* /*centroids*/,
         size_t /*n*/,
         size_t /*d*/,
@@ -375,6 +417,7 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
     }
 
     void FindNearestNeighborWithPruning(
+        ParallelExecutor& executor,
         const quantized_t* x,
         const quantized_t* y,
         const float* x_float,
@@ -396,12 +439,12 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
         const uint8_t* x_codes = reinterpret_cast<const uint8_t*>(x);
 
         // Ensure data-side caches
-        EnsureCodeFactorsCache(x_codes, n_x);
-        EnsureTransposedBlocksCache(x_codes, n_x);
+        EnsureCodeFactorsCache(executor, x_codes, n_x);
+        EnsureTransposedBlocksCache(executor, x_codes, n_x);
         if (cached_sum_q_front_.size() != n_x || cached_partial_d_ != partial_d) {
-            ComputeDataPartialNorms(x, n_x, partial_d);
+            ComputeDataPartialNorms(executor, x, n_x, partial_d);
         }
-        EnsurePartialNormsCache(x_float, n_x, d, partial_d);
+        EnsurePartialNormsCache(executor, x_float, n_x, d, partial_d);
 
         const uint32_t* sum_q = cached_sum_q_.data();
         const float* or_c_l2sqr = cached_or_c_l2sqr_.data();
@@ -434,6 +477,7 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
         const size_t centroid_stride = (gap_chunks + rest_chunks) * qb_ * 16;
         std::vector<uint8_t> centroid_planes(n_y * centroid_stride, 0);
         QuantizeCentroidsAndBuildLUTsWithBounds(
+            executor,
             y_float,
             n_y,
             d,
@@ -468,8 +512,8 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
             constexpr size_t kBS = FastScanComputer::kBlockSize;
             const size_t n_groups = (n_blocks + kSuperBlock - 1) / kSuperBlock;
 
-#pragma omp parallel for num_threads(g_n_threads)
-            for (size_t group = 0; group < n_groups; ++group) {
+            executor.ParallelFor(n_groups, [&](size_t group_begin, size_t group_end, size_t) {
+            for (size_t group = group_begin; group < group_end; ++group) {
                 const size_t blk_base = group * kSuperBlock;
                 const size_t n_blks = std::min(kSuperBlock, n_blocks - blk_base);
 
@@ -657,12 +701,14 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
                     }
                 } // per-block loop
             } // group loop
+            });
         }
     }
 
   private:
     /// Extract per-code metadata: popcount, or_c_l2sqr, dp_multiplier.
     void PrecomputeCodeFactors(
+        ParallelExecutor& executor,
         const uint8_t* codes,
         size_t n,
         uint32_t* sum_q,
@@ -670,28 +716,29 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
         float* dp_mult
     ) const {
         SKM_PROFILE_SCOPE("RQ::PrecomputeCodeFactors");
-#pragma omp parallel for num_threads(g_n_threads)
-        for (size_t i = 0; i < n; ++i) {
-            const uint8_t* code = codes + i * code_size_;
+        executor.ParallelFor(n, [&](size_t begin, size_t end, size_t) {
+            for (size_t i = begin; i < end; ++i) {
+                const uint8_t* code = codes + i * code_size_;
 
-            // Popcount of the binary part
-            uint32_t pc = 0;
-            size_t b = 0;
-            for (; b + 8 <= binary_bytes_; b += 8) {
-                uint64_t word;
-                std::memcpy(&word, code + b, 8);
-                pc += static_cast<uint32_t>(__builtin_popcountll(word));
-            }
-            for (; b < binary_bytes_; ++b) {
-                pc += static_cast<uint32_t>(__builtin_popcount(code[b]));
-            }
-            sum_q[i] = pc;
+                // Popcount of the binary part
+                uint32_t pc = 0;
+                size_t b = 0;
+                for (; b + 8 <= binary_bytes_; b += 8) {
+                    uint64_t word;
+                    std::memcpy(&word, code + b, 8);
+                    pc += static_cast<uint32_t>(SKM_POPCOUNT64(word));
+                }
+                for (; b < binary_bytes_; ++b) {
+                    pc += static_cast<uint32_t>(SKM_POPCOUNT(code[b]));
+                }
+                sum_q[i] = pc;
 
-            RaBitQFactors fac;
-            std::memcpy(&fac, code + binary_bytes_, sizeof(fac));
-            or_c_l2sqr[i] = fac.or_minus_c_l2sqr;
-            dp_mult[i] = fac.dp_multiplier;
-        }
+                RaBitQFactors fac;
+                std::memcpy(&fac, code + binary_bytes_, sizeof(fac));
+                or_c_l2sqr[i] = fac.or_minus_c_l2sqr;
+                dp_mult[i] = fac.dp_multiplier;
+            }
+        });
     }
 
     /// SQ-quantize centroids to qb bits and build 16-entry LUTs for FastScan.
@@ -704,6 +751,7 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
     /// Sub-quantizers are ordered: byte 0 low nibble, byte 0 high nibble,
     ///                             byte 1 low nibble, byte 1 high nibble, ...
     void QuantizeCentroidsAndBuildLUTs(
+        ParallelExecutor& executor,
         const float* y_float,
         size_t n_y,
         size_t d,
@@ -715,6 +763,7 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
     ) const {
         SKM_PROFILE_SCOPE("RQ::QuantizeCentroidsAndBuildLUTs");
         QuantizeCentroidsAndBuildLUTsWithBounds(
+            executor,
             y_float,
             n_y,
             d,
@@ -766,7 +815,8 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
     }
 
     /// Cache PrecomputeCodeFactors results (depend only on x, not centroids).
-    void EnsureCodeFactorsCache(const uint8_t* x_codes, size_t n_x) const {
+    void EnsureCodeFactorsCache(ParallelExecutor& executor, const uint8_t* x_codes, size_t n_x)
+        const {
         SKM_PROFILE_SCOPE("RQ::EnsureCodeFactorsCache");
         if (cached_x_ptr_ == x_codes && cached_n_x_ == n_x)
             return;
@@ -780,7 +830,12 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
         cached_or_c_l2sqr_.resize(n_x);
         cached_dp_mult_.resize(n_x);
         PrecomputeCodeFactors(
-            x_codes, n_x, cached_sum_q_.data(), cached_or_c_l2sqr_.data(), cached_dp_mult_.data()
+            executor,
+            x_codes,
+            n_x,
+            cached_sum_q_.data(),
+            cached_or_c_l2sqr_.data(),
+            cached_dp_mult_.data()
         );
         cached_x_ptr_ = x_codes;
         cached_n_x_ = n_x;
@@ -805,7 +860,8 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
     mutable size_t cached_n_blocks_ = 0;
 
     /// Transpose all data blocks once and cache for reuse across iterations.
-    void EnsureTransposedBlocksCache(const uint8_t* x_codes, size_t n_x) const {
+    void EnsureTransposedBlocksCache(ParallelExecutor& executor, const uint8_t* x_codes, size_t n_x)
+        const {
         SKM_PROFILE_SCOPE("RQ::EnsureTransposedBlocksCache");
         // Piggyback on the same pointer check as code factors
         if (cached_n_blocks_ > 0 && cached_x_ptr_ == x_codes && cached_n_x_ == n_x)
@@ -815,19 +871,25 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
         cached_n_blocks_ = (n_x + FastScanComputer::kBlockSize - 1) / FastScanComputer::kBlockSize;
         cached_transposed_.reset(new uint8_t[cached_n_blocks_ * block_bytes]);
 
-#pragma omp parallel for num_threads(g_n_threads)
-        for (size_t blk = 0; blk < cached_n_blocks_; ++blk) {
-            const size_t blk_start = blk * FastScanComputer::kBlockSize;
-            const size_t blk_count = std::min(FastScanComputer::kBlockSize, n_x - blk_start);
-            TransposeBlock(
-                x_codes, blk_start, blk_count, cached_transposed_.get() + blk * block_bytes
-            );
-        }
+        executor.ParallelFor(cached_n_blocks_, [&](size_t blk_begin, size_t blk_end, size_t) {
+            for (size_t blk = blk_begin; blk < blk_end; ++blk) {
+                const size_t blk_start = blk * FastScanComputer::kBlockSize;
+                const size_t blk_count = std::min(FastScanComputer::kBlockSize, n_x - blk_start);
+                TransposeBlock(
+                    x_codes, blk_start, blk_count, cached_transposed_.get() + blk * block_bytes
+                );
+            }
+        });
     }
 
     /// Lazily compute or_c_l2sqr_front[i] and or_c_l2sqr_mid[i] from float data.
-    void EnsurePartialNormsCache(const float* x_float, size_t n_x, size_t d, uint32_t partial_d)
-        const {
+    void EnsurePartialNormsCache(
+        ParallelExecutor& executor,
+        const float* x_float,
+        size_t n_x,
+        size_t d,
+        uint32_t partial_d
+    ) const {
         if (!pruning_partial_norms_dirty_ && cached_pruning_partial_d_ == partial_d)
             return;
         SKM_PROFILE_SCOPE("RQ::EnsurePartialNormsCache");
@@ -837,34 +899,35 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
         cached_or_c_l2sqr_front_.resize(n_x);
         cached_or_c_l2sqr_mid_.resize(n_x);
 
-#pragma omp parallel for num_threads(g_n_threads)
-        for (size_t i = 0; i < n_x; ++i) {
-            const float* xi = x_float + i * d;
-            float sum_front = 0, sum_mid = 0;
-            const size_t min_fm = std::min(front_d, mid_d);
-            const size_t max_fm = std::max(front_d, mid_d);
-            size_t dim = 0;
-            for (; dim < min_fm; ++dim) {
-                const float diff = xi[dim] - centroid_[dim];
-                sum_front += diff * diff;
-            }
-            sum_mid = sum_front;
-            if (front_d <= mid_d) {
-                // front_d < mid_d: continue accumulating into mid
-                for (; dim < max_fm; ++dim) {
-                    const float diff = xi[dim] - centroid_[dim];
-                    sum_mid += diff * diff;
-                }
-            } else {
-                // front_d > mid_d: continue accumulating into front
-                for (; dim < max_fm; ++dim) {
+        executor.ParallelFor(n_x, [&](size_t begin, size_t end, size_t) {
+            for (size_t i = begin; i < end; ++i) {
+                const float* xi = x_float + i * d;
+                float sum_front = 0, sum_mid = 0;
+                const size_t min_fm = std::min(front_d, mid_d);
+                const size_t max_fm = std::max(front_d, mid_d);
+                size_t dim = 0;
+                for (; dim < min_fm; ++dim) {
                     const float diff = xi[dim] - centroid_[dim];
                     sum_front += diff * diff;
                 }
+                sum_mid = sum_front;
+                if (front_d <= mid_d) {
+                    // front_d < mid_d: continue accumulating into mid
+                    for (; dim < max_fm; ++dim) {
+                        const float diff = xi[dim] - centroid_[dim];
+                        sum_mid += diff * diff;
+                    }
+                } else {
+                    // front_d > mid_d: continue accumulating into front
+                    for (; dim < max_fm; ++dim) {
+                        const float diff = xi[dim] - centroid_[dim];
+                        sum_front += diff * diff;
+                    }
+                }
+                cached_or_c_l2sqr_front_[i] = sum_front;
+                cached_or_c_l2sqr_mid_[i] = sum_mid;
             }
-            cached_or_c_l2sqr_front_[i] = sum_front;
-            cached_or_c_l2sqr_mid_[i] = sum_mid;
-        }
+        });
 
         cached_pruning_partial_d_ = partial_d;
         pruning_partial_norms_dirty_ = false;
@@ -872,6 +935,7 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
 
     /// Extended LUT builder that also outputs partial centroid norms at front_d and mid_d.
     void QuantizeCentroidsAndBuildLUTsWithBounds(
+        ParallelExecutor& executor,
         const float* y_float,
         size_t n_y,
         size_t d,
@@ -895,8 +959,8 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
         const size_t front_d_clamped = std::min(front_d, d);
         const size_t mid_d_clamped = std::min(mid_d, d);
 
-#pragma omp parallel for num_threads(g_n_threads)
-        for (size_t j = 0; j < n_y; ++j) {
+        executor.ParallelFor(n_y, [&](size_t j_begin, size_t j_end, size_t) {
+        for (size_t j = j_begin; j < j_end; ++j) {
             std::vector<float> rotated(d);
             float v_min = std::numeric_limits<float>::max();
             float v_max = std::numeric_limits<float>::lowest();
@@ -1025,6 +1089,7 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
                 }
             }
         }
+        });
     }
 
     /// Compute full RaBitQ distance for a single (data, centroid) pair via LUT.

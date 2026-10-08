@@ -6,7 +6,6 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <omp.h>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -68,8 +67,7 @@ static void RunHierarchical(
 
     const size_t n_queries = bench_utils::N_QUERIES;
     const int n_iters = bench_utils::MAX_ITERS;
-    const size_t THREADS = omp_get_max_threads();
-    omp_set_num_threads(THREADS);
+    const size_t THREADS = skmeans::ResolveNumThreads(0);
 
     const bool has_quantizer = (Q != skmeans::Quantization::f32);
     const std::string experiment_name = "scalability";

@@ -6,7 +6,6 @@
 #include <fstream>
 #include <gtest/gtest.h>
 #include <map>
-#include <omp.h>
 #include <random>
 #include <tuple>
 #include <unordered_set>
@@ -17,10 +16,7 @@
 #include "superkmeans/hierarchical_superkmeans.h"
 #include "superkmeans/pdx/utils.h"
 
-class HierarchicalSuperKMeansTest : public ::testing::Test {
-  protected:
-    void SetUp() override { omp_set_num_threads(omp_get_max_threads()); }
-};
+class HierarchicalSuperKMeansTest : public ::testing::Test {};
 
 TEST_F(HierarchicalSuperKMeansTest, ConfigSynchronizationWithParent) {
     const size_t n_clusters = 256;
@@ -788,8 +784,6 @@ const std::map<std::pair<size_t, size_t>, float> HIERARCHICAL_GROUND_TRUTH = {
 
 class HierarchicalWCSSTest : public ::testing::TestWithParam<std::tuple<size_t, size_t>> {
   protected:
-    void SetUp() override { omp_set_num_threads(1); }
-
     static constexpr size_t N_SAMPLES = 10000;
     static constexpr size_t MAX_D = 1024;
     static constexpr unsigned int SEED = 42;
@@ -925,7 +919,6 @@ INSTANTIATE_TEST_SUITE_P(
 // IVF-recall ground truth (test_data.bin, mxbai 10k x 1024)
 
 TEST(HierarchicalRecallGroundTruthTest, F32_MatchesGroundTruth) {
-    omp_set_num_threads(1);
     float recall =
         skm_test::HierarchicalClusteringRecall<skmeans::Quantization::f32>(CMAKE_SOURCE_DIR
                                                                            "/tests/test_data.bin");
@@ -950,7 +943,6 @@ class HierarchicalQuantizedRecallTest : public ::testing::Test {};
 TYPED_TEST_SUITE(HierarchicalQuantizedRecallTest, QuantizedTags, QuantizerNames);
 
 TYPED_TEST(HierarchicalQuantizedRecallTest, MatchesGroundTruth) {
-    omp_set_num_threads(1);
     float recall = skm_test::HierarchicalClusteringRecall<TypeParam::value>(CMAKE_SOURCE_DIR
                                                                             "/tests/test_data.bin");
     const std::string gt_key =
@@ -959,7 +951,6 @@ TYPED_TEST(HierarchicalQuantizedRecallTest, MatchesGroundTruth) {
 }
 
 TEST(HierarchicalRecallGroundTruthTest, F32_TrainInPlace_RecallMatchesTrain) {
-    omp_set_num_threads(1);
     const char* path = CMAKE_SOURCE_DIR "/tests/test_data.bin";
     float recall = skm_test::HierarchicalClusteringRecall<skmeans::Quantization::f32>(path);
     float recall_in_place =
@@ -968,7 +959,6 @@ TEST(HierarchicalRecallGroundTruthTest, F32_TrainInPlace_RecallMatchesTrain) {
 }
 
 TYPED_TEST(HierarchicalQuantizedRecallTest, TrainInPlace_RecallMatchesTrain) {
-    omp_set_num_threads(1);
     const char* path = CMAKE_SOURCE_DIR "/tests/test_data.bin";
     float recall = skm_test::HierarchicalClusteringRecall<TypeParam::value>(path);
     float recall_in_place = skm_test::HierarchicalClusteringRecall<TypeParam::value, true>(path);
@@ -981,7 +971,6 @@ class HierarchicalQuantizedStateTest : public ::testing::Test {};
 TYPED_TEST_SUITE(HierarchicalQuantizedStateTest, QuantizedTags, QuantizerNames);
 
 TYPED_TEST(HierarchicalQuantizedStateTest, ExposesQuantizerAndQuantizedBuffer) {
-    omp_set_num_threads(1);
     const size_t n = 8000, d = 128, k = 300;
     auto data = skm_test::LoadTestDataSubdim(
         CMAKE_SOURCE_DIR "/tests/test_data.bin", n, skm_test::RECALL_D, d
