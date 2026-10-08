@@ -100,12 +100,21 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
   windows-msvc:
-    runs-on: windows-2022
+    name: windows-msvc (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            arch: x64
+          - os: windows-11-arm
+            arch: ARM64
     steps:
       - uses: actions/checkout@v4
 
       - name: Configure
-        run: cmake -B build -DSKMEANS_COMPILE_TESTS=ON -DSKMEANS_COMPILE_EXAMPLES=ON
+        run: cmake -B build -A ${{ matrix.arch }} -DSKMEANS_COMPILE_TESTS=ON -DSKMEANS_COMPILE_EXAMPLES=ON
 
       - name: Build tests
         run: cmake --build build --config Release --parallel --target tests
