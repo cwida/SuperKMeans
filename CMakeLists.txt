@@ -56,7 +56,7 @@ message(STATUS "CXX flags: ${CMAKE_CXX_FLAGS}")
 message(STATUS "CXX flags (Release): ${CMAKE_CXX_FLAGS_RELEASE}")
 
 # ── CMake modules ──
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/extern/findFFTW")
+set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(FetchContent)
 include(CheckCXXCompilerFlag)
 include(CMakePrintHelpers)
@@ -220,22 +220,27 @@ if(NOT PROJECT_IS_TOP_LEVEL)
 endif()
 
 # ── Eigen ──
-# Use consumer-provided or system Eigen when available to avoid leaking our
-# bundled headers into the consumer's include path. Fall back to bundled
-# extern/Eigen only when nothing else is available.
+# Use consumer-provided or system Eigen when available. Fetch Eigen only when
+# nothing else is available.
 if(TARGET Eigen3::Eigen)
     message(STATUS "Eigen: using existing Eigen3::Eigen target")
-    list(APPEND _SKMEANS_LINK_LIBS Eigen3::Eigen)
 else()
     find_package(Eigen3 QUIET)
     if(Eigen3_FOUND)
         message(STATUS "Eigen: using system Eigen3 (${Eigen3_VERSION})")
-        list(APPEND _SKMEANS_LINK_LIBS Eigen3::Eigen)
     else()
-        message(STATUS "Eigen: using bundled extern/Eigen")
-        list(APPEND _SKMEANS_INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/extern/Eigen)
+        message(STATUS "Eigen: fetching Eigen 5.0.0")
+        FetchContent_Declare(eigen
+            GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
+            GIT_TAG 5.0.0
+            GIT_SHALLOW TRUE
+            SYSTEM
+        )
+        set(EIGEN_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(eigen)
     endif()
 endif()
+list(APPEND _SKMEANS_LINK_LIBS Eigen3::Eigen)
 list(APPEND _SKMEANS_COMPILE_DEFS EIGEN_DONT_PARALLELIZE)
 if(EMSCRIPTEN)
     # Eigen's QR overflows the default Wasm stack with larger on-stack temporaries

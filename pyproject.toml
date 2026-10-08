@@ -53,6 +53,8 @@ cmake.source-dir = "."
 wheel.packages = ["python/superkmeans"]
 cmake.build-type = "Release"
 install.components = ["python"]
+# Test and benchmark data are not needed to build the package
+sdist.exclude = ["tests/test_data.bin", "benchmarks/ground_truth/", "benchmarks/results/"]
 
 cmake.args = [
     "-DSKMEANS_COMPILE_TESTS=OFF",

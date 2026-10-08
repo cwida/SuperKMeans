@@ -143,7 +143,6 @@ target_link_libraries(myapp PRIVATE superkmeans)
 ```bash
 git clone https://github.com/cwida/SuperKMeans.git
 cd SuperKMeans
-git submodule update --init
 pip install .
 
 # Run plug-and-play example
@@ -166,7 +165,6 @@ python ./examples/simple_clustering.py 200000 1536 1000
 ```bash
 git clone https://github.com/cwida/SuperKMeans.git
 cd SuperKMeans
-git submodule update --init
 
 # Set proper path to clang if needed
 export CXX="/usr/bin/clang++-18" 

@@ -40,8 +40,6 @@ jobs:
       CXX: clang++-18
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install dependencies
         run: |
@@ -83,8 +81,6 @@ jobs:
       OPENBLAS_NUM_THREADS: 1
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install dependencies
         run: |
@@ -107,8 +103,6 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Configure
         run: cmake -B build -DSKMEANS_COMPILE_TESTS=ON -DSKMEANS_COMPILE_EXAMPLES=ON
@@ -126,8 +120,6 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Configure
         run: cmake -B build -DSKMEANS_COMPILE_TESTS=ON -DSKMEANS_COMPILE_EXAMPLES=ON -DCMAKE_BUILD_TYPE=Release
@@ -145,8 +137,6 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - uses: emscripten-core/setup-emsdk@v16
         with:
@@ -168,8 +158,6 @@ jobs:
       CXX: clang++-18
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install system dependencies
         run: |
@@ -196,8 +184,6 @@ jobs:
       CXX: clang++-18
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install dependencies
         run: |
@@ -227,8 +213,6 @@ jobs:
       TSAN_OPTIONS: ignore_noninstrumented_modules=1
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install dependencies
         run: |
@@ -257,8 +241,6 @@ jobs:
       CXX: clang++-18
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install dependencies
         run: |

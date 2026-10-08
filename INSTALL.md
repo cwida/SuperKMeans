@@ -39,7 +39,6 @@ Once you have these requirements, you can install Python Bindings or compile our
 ```sh
 git clone https://github.com/cwida/SuperKMeans.git
 cd SuperKMeans
-git submodule update --init
 
 # Create a venv if needed
 python -m venv ./venv
@@ -55,7 +54,6 @@ pip install .
 ```sh
 git clone https://github.com/cwida/SuperKMeans.git
 cd SuperKMeans
-git submodule update --init
 
 # Set proper path to clang if needed
 export CXX="/usr/bin/clang++-18" 
@@ -99,7 +97,7 @@ brew install cmake
 ```
 
 ## Using an external BLAS (optional)
-By default, SuperKMeans multiplies matrices with Eigen (bundled), or with Apple Accelerate on macOS.
+By default, SuperKMeans multiplies matrices with Eigen (fetched by CMake), or with Apple Accelerate on macOS.
 
 ### MacOS
 **Silicon Chips (M1 to M5)**: You don't need to do anything special. We automatically use [Apple Accelerate](https://developer.apple.com/documentation/accelerate), which uses the [AMX](https://github.com/corsix/amx) unit. 
