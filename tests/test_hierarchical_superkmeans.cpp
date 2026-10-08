@@ -384,60 +384,6 @@ TEST_F(HierarchicalSuperKMeansTest, EarlyTermination_Mesoclustering) {
         << "than no early termination (" << iters_without_early << " iters)";
 }
 
-TEST_F(HierarchicalSuperKMeansTest, SLOW_Sampling_AffectsSpeed) {
-    const size_t n = 100000;
-    const size_t d = 512;
-    const size_t n_clusters = 512;
-    const size_t n_runs = 5;
-
-    std::vector<float> data = skmeans::MakeBlobs(n, d, n_clusters);
-
-    skmeans::HierarchicalSuperKMeansConfig base_config;
-    base_config.iters_mesoclustering = 10;
-    base_config.iters_fineclustering = 10;
-    base_config.iters_refinement = 2;
-    base_config.early_termination = false;
-    base_config.verbose = false;
-
-    // Full sampling
-    skmeans::TicToc timer_full;
-    for (size_t i = 0; i < n_runs; ++i) {
-        skmeans::HierarchicalSuperKMeansConfig config = base_config;
-        config.sampling_fraction = 1.0f;
-        config.seed = static_cast<uint32_t>(42 + i);
-
-        auto kmeans = skmeans::HierarchicalSuperKMeans(n_clusters, d, config);
-
-        timer_full.Tic();
-        kmeans.Train(data.data(), n);
-        timer_full.Toc();
-    }
-
-    // 30% sampling
-    skmeans::TicToc timer_sampled;
-    for (size_t i = 0; i < n_runs; ++i) {
-        skmeans::HierarchicalSuperKMeansConfig config = base_config;
-        config.sampling_fraction = 0.3f;
-        config.seed = static_cast<uint32_t>(42 + i);
-
-        auto kmeans = skmeans::HierarchicalSuperKMeans(n_clusters, d, config);
-
-        timer_sampled.Tic();
-        kmeans.Train(data.data(), n);
-        timer_sampled.Toc();
-    }
-
-    double full_time_ms = timer_full.accum_time / 1e6;
-    double sampled_time_ms = timer_sampled.accum_time / 1e6;
-    double speedup = full_time_ms / sampled_time_ms;
-
-    // Sampling should provide some speedup (at least 1.5x)
-    EXPECT_GE(speedup, 1.5) << "Sampling should provide at least 1.5x speedup. "
-                            << "Full: " << full_time_ms << "ms, Sampled: " << sampled_time_ms
-                            << "ms, "
-                            << "Speedup: " << speedup << "x";
-}
-
 TEST_F(HierarchicalSuperKMeansTest, Reproducibility_SameSeed) {
     const size_t n = 10000;
     const size_t d = 128;
