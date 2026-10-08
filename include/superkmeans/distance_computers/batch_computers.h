@@ -238,8 +238,7 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
                             out_knn[i_idx * k + ki] = candidates[ki].second;
                         }
                         for (size_t ki = actual_k; ki < k; ++ki) {
-                            out_distances[i_idx * k + ki] =
-                                std::numeric_limits<distance_t>::max();
+                            out_distances[i_idx * k + ki] = std::numeric_limits<distance_t>::max();
                             out_knn[i_idx * k + ki] = static_cast<uint32_t>(-1);
                         }
                     }

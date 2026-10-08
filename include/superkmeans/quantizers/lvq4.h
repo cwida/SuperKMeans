@@ -527,11 +527,11 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
                                 SKM_VECTORIZE_LOOP
                                 for (size_t s = 0; s < n_survivors; ++s) {
                                     const size_t j_idx = j + survivor_positions[s];
-                                    partial_dists[s] =
-                                        norm_x_mid_i + cf.norm_y_mid[j_idx] -
-                                        two_si * cf.scales[j_idx] * static_cast<float>(mid_dots[s]) -
-                                        two_A_x_mid_i * cf.biases[j_idx] -
-                                        two_bi * cf.sj_sum_cy_mid_f[j_idx];
+                                    partial_dists[s] = norm_x_mid_i + cf.norm_y_mid[j_idx] -
+                                                       two_si * cf.scales[j_idx] *
+                                                           static_cast<float>(mid_dots[s]) -
+                                                       two_A_x_mid_i * cf.biases[j_idx] -
+                                                       two_bi * cf.sj_sum_cy_mid_f[j_idx];
                                 }
 
                                 // Phase 3c: compact mid survivors
@@ -578,10 +578,10 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
                                     (sum_cx_sq_rest_i + sum_cy_sq_rest - rest_l2_int) / 2;
                                 uint32_t full_dot = dot_accumulated + rest_dot;
 
-                                float full_l2 =
-                                    norm_x_full_i + cf.norm_y_full[j_idx] -
-                                    two_si * sj * static_cast<float>(full_dot) -
-                                    two_A_x_full_i * bj - two_bi * cf.sj_sum_cy_full[j_idx];
+                                float full_l2 = norm_x_full_i + cf.norm_y_full[j_idx] -
+                                                two_si * sj * static_cast<float>(full_dot) -
+                                                two_A_x_full_i * bj -
+                                                two_bi * cf.sj_sum_cy_full[j_idx];
 
                                 if (full_l2 < best_dist) {
                                     best_dist = full_l2;
@@ -801,8 +801,7 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
 
                 sc_f = static_cast<float>(cf.sum_cy_front[j]);
                 scsq_f = static_cast<float>(cf.sum_cy_sq_front[j]);
-                cf.norm_y_front[j] =
-                    sj * sj * scsq_f + 2.0f * bj * sj * sc_f + front_d_f * bj * bj;
+                cf.norm_y_front[j] = sj * sj * scsq_f + 2.0f * bj * sj * sc_f + front_d_f * bj * bj;
                 cf.sj_sum_cy_front_f[j] = sj * sc_f;
 
                 sc_f = static_cast<float>(cf.sum_cy_mid[j]);

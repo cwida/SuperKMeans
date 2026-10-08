@@ -380,7 +380,19 @@ class ADSamplingPruner : public ExecutorHolder {
         auto make_plan = [&](size_t rows) {
             const int howmany = static_cast<int>(rows);
             return fftwf_plan_many_r2r(
-                1, &n0, howmany, scratch.get(), NULL, 1, n0, scratch.get(), NULL, 1, n0, &kind, flag
+                1,
+                &n0,
+                howmany,
+                scratch.get(),
+                nullptr,
+                1,
+                n0,
+                scratch.get(),
+                nullptr,
+                1,
+                n0,
+                &kind,
+                flag
             );
         };
         fftwf_plan block_plan = make_plan(block_rows);

@@ -517,7 +517,11 @@ inline void WriteResultsToCsv(
     auto now = std::chrono::system_clock::now();
     auto now_time_t = std::chrono::system_clock::to_time_t(now);
     std::tm now_tm;
+#if defined(_WIN32)
+    localtime_s(&now_tm, &now_time_t);
+#else
     localtime_r(&now_time_t, &now_tm);
+#endif
     char timestamp[32];
     std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &now_tm);
     csv_file << timestamp << "," << algorithm << "," << dataset << "," << n_iters << ","
@@ -701,7 +705,11 @@ inline void WriteResultsToCsvV2(
     auto now = std::chrono::system_clock::now();
     auto now_time_t = std::chrono::system_clock::to_time_t(now);
     std::tm now_tm;
+#if defined(_WIN32)
+    localtime_s(&now_tm, &now_time_t);
+#else
     localtime_r(&now_time_t, &now_tm);
+#endif
     char timestamp[32];
     std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &now_tm);
 

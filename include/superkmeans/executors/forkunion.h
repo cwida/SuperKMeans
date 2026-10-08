@@ -35,7 +35,7 @@ class ForkUnionExecutor final : public ParallelExecutor {
     void ReleaseThreads() override {
         if (pool != nullptr && pid != CurrentPid()) {
             // Inherited through fork(): its threads do not exist here, so it must never be joined.
-            (void) pool.release();
+            [[maybe_unused]] auto* leaked_pool = pool.release();
         }
         pool.reset();
     }
@@ -83,10 +83,7 @@ class ForkUnionExecutor final : public ParallelExecutor {
         if (pool != nullptr && pid == CurrentPid()) {
             return;
         }
-        if (pool != nullptr) {
-            // Inherited through fork(): its threads do not exist here, so it must never be joined.
-            (void) pool.release();
-        }
+        ReleaseThreads();
         pool = std::make_unique<ashvardanian::forkunion::flat_pool_t>();
         if (!pool->try_spawn(n_workers)) {
             pool.reset();

@@ -1989,7 +1989,7 @@ class SuperKMeans : protected ExecutorHolder {
     // Quantization state
     std::unique_ptr<skmeans_quantizer_t<q>> quantizer;
     F32Quantizer f32_quantizer; // float centroid updates (quantized_centroid_update off)
-    size_t code_size = 0; // bytes per encoded vector (= d for SQ8, variable for RaBitQ)
+    size_t code_size = 0;       // bytes per encoded vector (= d for SQ8, variable for RaBitQ)
     std::unique_ptr<vector_value_t[]> quantized_data;
     std::unique_ptr<vector_value_t[]> quantized_centroids;
     std::unique_ptr<vector_value_t[]> pdxified_quantized_centroids;
