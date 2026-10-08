@@ -19,6 +19,7 @@ set(SKMEANS_ENABLE_GPU OFF CACHE BOOL "Whether to use the GPU-based implementati
 set(SKMEANS_COMPILE_TESTS OFF CACHE BOOL "Whether to compile tests")
 set(SKMEANS_COMPILE_BENCHMARKS OFF CACHE BOOL "Whether to compile benchmarks")
 set(SKMEANS_COMPILE_EXAMPLES ${PROJECT_IS_TOP_LEVEL} CACHE BOOL "Whether to compile examples")
+set(SKMEANS_COMPILE_PYTHON ${PROJECT_IS_TOP_LEVEL} CACHE BOOL "Whether to compile the Python bindings")
 
 # Executor
 if(EMSCRIPTEN)
@@ -311,11 +312,13 @@ if(SKMEANS_COMPILE_EXAMPLES)
 endif()
 
 # ── Python bindings ──
-find_package(Python COMPONENTS Interpreter Development.Module QUIET)
-set(PYBIND11_FINDPYTHON ON)
-find_package(pybind11 CONFIG QUIET)
+if(SKMEANS_COMPILE_PYTHON)
+    find_package(Python COMPONENTS Interpreter Development.Module QUIET)
+    set(PYBIND11_FINDPYTHON ON)
+    find_package(pybind11 CONFIG QUIET)
+endif()
 
-if(Python_FOUND AND pybind11_FOUND)
+if(SKMEANS_COMPILE_PYTHON AND Python_FOUND AND pybind11_FOUND)
     message(STATUS "Python bindings enabled")
     message(STATUS "Python executable: ${Python_EXECUTABLE}")
     message(STATUS "Python include dirs: ${Python_INCLUDE_DIRS}")
@@ -329,5 +332,5 @@ if(Python_FOUND AND pybind11_FOUND)
         COMPONENT python
     )
 else()
-    message(STATUS "Python bindings disabled (pybind11 not found)")
+    message(STATUS "Python bindings disabled")
 endif()
