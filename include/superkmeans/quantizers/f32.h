@@ -27,35 +27,26 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
     using MatrixR = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
     using VectorR = Eigen::VectorXf;
 
-    void Fit(ParallelExecutor& /*executor*/, const float* /*data*/, size_t /*n*/, size_t d)
-        override {
+    void Fit(const float* /*data*/, size_t /*n*/, size_t d) override {
         dim = d;
         fitted = true;
     }
 
-    void Encode(ParallelExecutor& /*executor*/, const float* in, float* out, size_t n, size_t d)
-        const override {
+    void Encode(const float* in, float* out, size_t n, size_t d) const override {
         assert(fitted);
         if (in != out) {
             memcpy(out, in, n * d * sizeof(float));
         }
     }
 
-    void Decode(ParallelExecutor& /*executor*/, const float* in, float* out, size_t n, size_t d)
-        const override {
+    void Decode(const float* in, float* out, size_t n, size_t d) const override {
         assert(fitted);
         if (in != out) {
             memcpy(out, in, n * d * sizeof(float));
         }
     }
 
-    void ComputeNorms(
-        ParallelExecutor& /*executor*/,
-        const float* data,
-        size_t n,
-        size_t d,
-        float* out_norms
-    ) const override {
+    void ComputeNorms(const float* data, size_t n, size_t d, float* out_norms) const override {
         assert(fitted);
         Eigen::Map<const MatrixR> e_data(data, n, d);
         Eigen::Map<VectorR> e_norms(out_norms, n);
@@ -63,7 +54,6 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
     }
 
     void FindNearestNeighbor(
-        ParallelExecutor& executor,
         const quantized_t* x,
         const quantized_t* y,
         const float* /*x_float*/,
@@ -79,17 +69,12 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
     ) const override {
         assert(fitted);
         batch_computer::FindNearestNeighbor(
-            executor, x, y, n_x, n_y, d, norms_x, norms_y, out_knn, out_distances, tmp_buf
+            GetExecutor(), x, y, n_x, n_y, d, norms_x, norms_y, out_knn, out_distances, tmp_buf
         );
     }
 
-    void CacheDataPartialNorms(
-        ParallelExecutor& /*executor*/,
-        const quantized_t* data,
-        size_t n,
-        size_t d,
-        uint32_t partial_d
-    ) override {
+    void CacheDataPartialNorms(const quantized_t* data, size_t n, size_t d, uint32_t partial_d)
+        override {
         cached_data_partial_norms.resize(n);
         Eigen::Map<const MatrixR> e_data(data, n, d);
         Eigen::Map<VectorR> e_norms(cached_data_partial_norms.data(), n);
@@ -97,7 +82,6 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
     }
 
     void CacheCentroidPartialNorms(
-        ParallelExecutor& /*executor*/,
         const quantized_t* centroids,
         size_t n,
         size_t d,
@@ -110,7 +94,6 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
     }
 
     void FindNearestNeighborWithPruning(
-        ParallelExecutor& executor,
         const quantized_t* x,
         const quantized_t* y,
         const float* /*x_float*/,
@@ -133,7 +116,7 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
         );
 
         batch_computer::FindNearestNeighborWithPruning(
-            executor,
+            GetExecutor(),
             x,
             y,
             n_x,
@@ -151,7 +134,6 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
     }
 
     void UpdateCentroids(
-        ParallelExecutor& executor,
         const quantized_t* encoded_data,
         const uint32_t* assignments,
         float* centroid_accumulators,
@@ -161,6 +143,7 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
         size_t d
     ) const override {
         SKM_PROFILE_SCOPE("F32::UpdateCentroids");
+        ParallelExecutor& executor = GetExecutor();
         // One rank per centroid range; the executor runs every rank exactly once.
         const size_t nt = executor.NumWorkers();
         executor.ParallelFor(nt, [&](size_t rank_begin, size_t rank_end, size_t) {

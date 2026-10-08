@@ -119,7 +119,7 @@ pip install superkmeans
 > For maximum performance, we recommend compiling from source.
 
 ### C++
-As a header-only library with CMake `FetchContent`:
+With CMake `FetchContent`. There are no dependencies to install: CMake fetches and builds everything it needs.
 
 ```cmake
 FetchContent_Declare(
@@ -138,8 +138,6 @@ target_link_libraries(myapp PRIVATE superkmeans)
 ### Prerequisites
 - Clang 17 or GCC 13
 - CMake 3.26
-- OpenMP
-- A BLAS implementation
 - Python 3 (only for Python bindings)
 
 ```bash
@@ -164,8 +162,6 @@ python ./examples/simple_clustering.py 200000 1536 1000
 ### Prerequisites
 - Clang 17 or GCC 13
 - CMake 3.26
-- OpenMP
-- A BLAS implementation
 
 ```bash
 git clone https://github.com/cwida/SuperKMeans.git

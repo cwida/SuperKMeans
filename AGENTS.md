@@ -26,7 +26,8 @@ efficient. Papers: **ADSampling** https://dl.acm.org/doi/pdf/10.1145/3589282 (al
 | --- | --- |
 | `include/superkmeans/superkmeans.h` | Core — `Train()`, assign family, pruning loop |
 | `include/superkmeans/hierarchical_superkmeans.h` | Hierarchical variant (use for n > 100K) |
-| `include/superkmeans/common.h` | Shared `constexpr` constants + macros/pragmas |
+| `include/superkmeans/common.h` | Shared `constexpr` constants + macros/pragmas, `Sgemm` (GEMM backend) |
+| `include/superkmeans/executor.h` | `ParallelExecutor` + `ExecutorHolder`/`ParallelSection`/`ExecutorScope`; backends in `executors/` |
 | `include/superkmeans/profiler.h` | `SKM_PROFILE_SCOPE` timing |
 | `include/superkmeans/distance_computers/` | **All** SIMD distance kernels |
 | `include/superkmeans/quantizers/` | `f32`/`sq8`/`lvq4`/`rabitq` + `quantizer.h`, `sq_common.h` |
@@ -50,6 +51,8 @@ Docs: `README.md`, `INSTALL.md`, `BENCHMARKING.md`, `CONTRIBUTING.md`, `python/R
 2. **Format** — `./scripts/format.sh`, then `./scripts/format_check.sh` clean.
 3. **Build** — `cmake . -DSKMEANS_COMPILE_TESTS=ON && make -j$(nproc) tests`, no errors.
 4. **C++ tests** — `ctest --output-on-failure` all pass (a few parametrized cases skip by design).
+   If the change touches `executor.h`/`executors/` or `Sgemm`, repeat 3–4 in separate build dirs
+   with `-DSKMEANS_EXECUTOR=openmp` and with `-DSKMEANS_GEMM=blas`.
 5. **Lint** — `./scripts/tidy_check.sh`: no `.clang-tidy` warnings from `include/superkmeans/`.
 6. **Python** — `venv/bin/pip install .` (builds the bindings), then `venv/bin/pytest python/tests/`.
 7. **Examples** — `make examples`, then run all of them to completion: the C++ ones
@@ -69,8 +72,13 @@ cmake . && make examples          # examples on by default; ./examples/simple_cl
 cmake . -DSKMEANS_COMPILE_BENCHMARKS=ON -DFAISS_OPT_LEVEL="avx512" && make benchmarks
 ./benchmarks/ad_hoc_superkmeans.out <dataset_id>   # base example + profiling logs
 ```
-Knobs: `-DSKMEANS_MARCH` (default `native`), `-DBLAS_LIBRARIES` (a good BLAS is critical —
-distro/apt OpenBLAS is slow, build from source). See INSTALL.md.
+Knobs (see INSTALL.md):
+- `-DSKMEANS_EXECUTOR` — default executor: `forkunion` (default; `serial` under Emscripten), `openmp`, `serial`.
+- `-DSKMEANS_GEMM` — `auto` (Accelerate on Apple, Eigen elsewhere), `eigen`, `accelerate`, `blas`. With
+  `blas`, workers call `sgemm_` concurrently, so the BLAS must be sequential and thread-safe (MKL
+  `sequential`; OpenBLAS `USE_THREAD=0 USE_LOCKING=1`, or `OPENBLAS_NUM_THREADS=1`).
+- `-DSKMEANS_MARCH` (default `native`), `-DSKMEANS_PORTABLE` (wheels: `-mavx2 -mfma` on x86_64, plain
+  `-O3` elsewhere), `-DSKMEANS_SKIP_FFTW`. The default build needs no OpenMP and no BLAS.
 
 ## Code style
 
@@ -92,6 +100,15 @@ Performance-critical — weigh every copy/allocation.
   sync when changing a kernel. `sq4` tags the legacy 4-bit nibble kernels + PDX machinery of a
   former quantizer — kept because they're non-trivial to reimplement and **lvq4 uses them**, but
   `SuperKMeans<Quantization::sq4>` itself `static_assert`s (not implemented).
+- **Parallelism goes through the executor.** No OpenMP pragmas or `omp_*` in library code (only
+  `executors/openmp.h` includes `<omp.h>`). A parallel loop is
+  `GetExecutor().ParallelFor(n, [&](size_t begin, size_t end, size_t worker) { ... })`: static
+  ranges, dense `worker < NumWorkers()`. Per-thread scratch is indexed by `worker`; reductions use
+  per-worker partials combined after the loop; never call `ParallelFor` inside a `ParallelFor` body.
+- **GEMMs are single-threaded.** f32 assignment is one `ParallelFor` per pass over
+  `MINI_BATCH_SIZE`-row (256) blocks of X; each worker runs `Sgemm` per Y tile, then argmin/pruning
+  on the spot. Scratch: `BatchComputer::ScratchSize(executor)`. `EIGEN_DONT_PARALLELIZE` is set on
+  the target.
 - **`SKM_VECTORIZE_LOOP`** (`common.h`) forces loop autovectorization (esp. FP reductions).
   Other macros there: `SKM_RESTRICT`, `SKM_ALWAYS_INLINE`, `SKM_NO_INLINE`,
   `SKM_LIKELY`/`SKM_UNLIKELY`, `SKM_PREFETCH`.
@@ -119,7 +136,9 @@ Performance-critical — weigh every copy/allocation.
 ## Testing
 
 - C++ in `tests/` (GoogleTest), Python in `python/tests/`. Compile with
-  `-DSKMEANS_COMPILE_TESTS=ON`, run via `ctest`.
+  `-DSKMEANS_COMPILE_TESTS=ON`, run via `ctest`. Executor backends: `tests/test_executor.cpp`.
+- CI (`.github/workflows/ci.yml`) also runs the tests with the `openmp`/`serial` executors and the
+  `blas` GEMM, on Windows MSVC, on macOS (Accelerate) and as Wasm under Node.
 - Quantized tests are **typed tests** (`TYPED_TEST_SUITE` + `TYPED_TEST`) over a
   `skmeans::QuantizationTag<...>` type list; the scheme is `TypeParam::value` and
   `SuperKMeans<TypeParam::value>` is constructed directly. Shared integration/pruning tests live
@@ -203,6 +222,31 @@ refinement; **`iters_refinement` defaults to 0**. `partial_d` is shrunk to the r
 a small `partial_d` with a partial-norms cache keyed to the fineclustering `partial_d`. A later
 `AssignTrainingPoints` (pruning reuse) reads that mismatch — the SIGSEGV above, survived only by
 the self-heal. Preserve it if you touch these caches.
+
+### Executor binding
+
+`SuperKMeans` (protected), `IQuantizer` and `ADSamplingPruner` inherit `ExecutorHolder`: a
+**borrowed** executor bound once with `SetExecutor`; unbound, `GetExecutor()` returns a static
+`SerialExecutor`. The `SuperKMeans` constructor binds `config.executor` (or an owned
+`MakeDefaultExecutor(config.n_threads)`) to itself, its pruner, `f32_quantizer` and every
+`CreateQuantizer()` result.
+- A helper object you add must be bound too: unbound it runs **serially** — right results,
+  silently slow.
+- Public entry points (`Train`, `Assign`, `QuantizedAssign`, `AssignTrainingPoints`, hierarchical
+  `Train`, pruner `Rotate`/`Unrotate`) open a `ParallelSection`, which calls `ReleaseThreads()` on
+  return: ForkUnion's idle workers busy-wait, so its pool stops between calls (respawned lazily).
+  A new public entry point needs one too.
+- Code without an object (static `BatchComputer`, `U8Gemm`/`U4Gemm`,
+  `ComputeScalarQuantizationParams`) takes a `ParallelExecutor&`. Free utilities (`ComputeWCSS`,
+  `MakeBlobs`, `ComputeNorms`, brute-force kNN) take a trailing `ParallelExecutor* = nullptr` and
+  open an `ExecutorScope` (null: a default pool for that call).
+
+### Portability (MSVC, Wasm)
+
+- No GCC builtins (`SKM_POPCOUNT`/`SKM_POPCOUNT64` in `common.h`); POSIX-only code goes behind
+  `#if !defined(_WIN32)`.
+- Wasm builds have no threads (serial executor) and no ruy/cpuinfo: NumKong runs every 8-bit GEMM
+  (`IS_WASM`).
 
 ## Python bindings
 

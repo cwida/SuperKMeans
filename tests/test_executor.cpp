@@ -29,7 +29,8 @@ std::vector<std::unique_ptr<ParallelExecutor>> MakeExecutors() {
     return executors;
 }
 
-// Every index is visited once, by a valid worker that gets at most one range.
+// Every index is visited once, by a valid worker that gets at most one range, also after the
+// threads are released.
 TEST(ExecutorTest, ParallelForCoversEveryIndexOnce) {
     for (auto& executor : MakeExecutors()) {
         for (const size_t n : LOOP_SIZES) {
@@ -56,6 +57,7 @@ TEST(ExecutorTest, ParallelForCoversEveryIndexOnce) {
             for (const auto& ranges : ranges_per_worker) {
                 EXPECT_LE(ranges, 1);
             }
+            executor->ReleaseThreads();
         }
     }
 }

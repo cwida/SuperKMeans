@@ -28,10 +28,8 @@ class LVQ4QuantizerTest : public ::testing::Test {
     static constexpr size_t d = 128;
     std::vector<float> data;
     float data_min = 0.0f, data_max = 0.0f;
-    std::unique_ptr<ParallelExecutor> executor;
 
     void SetUp() override {
-        executor = MakeDefaultExecutor(0);
         std::mt19937 rng(42);
         std::normal_distribution<float> dist(0.0f, 1.0f);
         data.resize(n * d);
@@ -48,16 +46,16 @@ class LVQ4QuantizerTest : public ::testing::Test {
 TEST_F(LVQ4QuantizerTest, FitEncodeDecode_Roundtrip) {
     LVQ4Quantizer quantizer;
     EXPECT_FALSE(quantizer.IsFitted());
-    quantizer.Fit(*executor, data.data(), n, d);
+    quantizer.Fit(data.data(), n, d);
     EXPECT_TRUE(quantizer.IsFitted());
 
     const size_t cs = quantizer.CodeSize(d);
     EXPECT_EQ(cs, d / 2 + 8);
 
     std::vector<uint8_t> encoded(n * cs);
-    quantizer.Encode(*executor, data.data(), encoded.data(), n, d);
+    quantizer.Encode(data.data(), encoded.data(), n, d);
     std::vector<float> decoded(n * d);
-    quantizer.Decode(*executor, encoded.data(), decoded.data(), n, d);
+    quantizer.Decode(encoded.data(), decoded.data(), n, d);
 
     // 4-bit per-vector quantization: error bounded by the per-vector step,
     // which is at most global_range / 15.
@@ -69,19 +67,19 @@ TEST_F(LVQ4QuantizerTest, FitEncodeDecode_Roundtrip) {
 
 TEST_F(LVQ4QuantizerTest, OddDimensionality_Throws) {
     std::vector<float> tiny(63, 0.1f);
-    EXPECT_THROW(LVQ4Quantizer().Fit(*executor, tiny.data(), 1, 63), std::invalid_argument);
+    EXPECT_THROW(LVQ4Quantizer().Fit(tiny.data(), 1, 63), std::invalid_argument);
     // Even dimensionality must not throw.
-    EXPECT_NO_THROW(LVQ4Quantizer().Fit(*executor, tiny.data(), 1, 62));
+    EXPECT_NO_THROW(LVQ4Quantizer().Fit(tiny.data(), 1, 62));
 }
 
 TEST_F(LVQ4QuantizerTest, EncodedNibbles_InRange) {
     LVQ4Quantizer quantizer;
-    quantizer.Fit(*executor, data.data(), n, d);
+    quantizer.Fit(data.data(), n, d);
     const size_t cs = quantizer.CodeSize(d);
     const size_t nibble_bytes = d / 2;
 
     std::vector<uint8_t> encoded(n * cs);
-    quantizer.Encode(*executor, data.data(), encoded.data(), n, d);
+    quantizer.Encode(data.data(), encoded.data(), n, d);
     for (size_t i = 0; i < n; ++i) {
         const uint8_t* code = encoded.data() + i * cs;
         for (size_t b = 0; b < nibble_bytes; ++b) {
@@ -93,16 +91,16 @@ TEST_F(LVQ4QuantizerTest, EncodedNibbles_InRange) {
 
 TEST_F(LVQ4QuantizerTest, FindNearestNeighbor_MatchesBruteForce) {
     LVQ4Quantizer quantizer;
-    quantizer.Fit(*executor, data.data(), n, d);
+    quantizer.Fit(data.data(), n, d);
     const size_t cs = quantizer.CodeSize(d);
 
     size_t n_centroids = 50;
     size_t n_queries = 200;
 
     std::vector<uint8_t> codes(n * cs);
-    quantizer.Encode(*executor, data.data(), codes.data(), n, d);
+    quantizer.Encode(data.data(), codes.data(), n, d);
     std::vector<float> norms(n);
-    quantizer.ComputeNorms(*executor, codes.data(), n, d, norms.data());
+    quantizer.ComputeNorms(codes.data(), n, d, norms.data());
 
     const uint8_t* queries = codes.data() + n_centroids * cs;
     const uint8_t* centroids = codes.data();
@@ -112,7 +110,6 @@ TEST_F(LVQ4QuantizerTest, FindNearestNeighbor_MatchesBruteForce) {
     std::vector<float> tmp_buf(X_BATCH_SIZE * Y_BATCH_SIZE);
 
     quantizer.FindNearestNeighbor(
-        *executor,
         queries,
         centroids,
         data.data() + n_centroids * d,
@@ -130,7 +127,7 @@ TEST_F(LVQ4QuantizerTest, FindNearestNeighbor_MatchesBruteForce) {
     // LVQ4's distance is exact L2 on the decoded vectors, so the returned
     // distance must match the brute-force minimum (up to float rounding).
     std::vector<float> decoded(n * d);
-    quantizer.Decode(*executor, codes.data(), decoded.data(), n, d);
+    quantizer.Decode(codes.data(), decoded.data(), n, d);
     for (size_t i = 0; i < n_queries; ++i) {
         float bf_min = std::numeric_limits<float>::max();
         for (size_t j = 0; j < n_centroids; ++j) {
@@ -148,17 +145,17 @@ TEST_F(LVQ4QuantizerTest, FindNearestNeighbor_MatchesBruteForce) {
 
 TEST_F(LVQ4QuantizerTest, ComputeNorms_MatchDecodedNorm) {
     LVQ4Quantizer quantizer;
-    quantizer.Fit(*executor, data.data(), n, d);
+    quantizer.Fit(data.data(), n, d);
 
     const size_t cs = quantizer.CodeSize(d);
     std::vector<uint8_t> codes(n * cs);
-    quantizer.Encode(*executor, data.data(), codes.data(), n, d);
+    quantizer.Encode(data.data(), codes.data(), n, d);
 
     std::vector<float> norms(n);
-    quantizer.ComputeNorms(*executor, codes.data(), n, d, norms.data());
+    quantizer.ComputeNorms(codes.data(), n, d, norms.data());
 
     std::vector<float> decoded(n * d);
-    quantizer.Decode(*executor, codes.data(), decoded.data(), n, d);
+    quantizer.Decode(codes.data(), decoded.data(), n, d);
     for (size_t i = 0; i < std::min(n, size_t{200}); ++i) {
         double expected = 0.0;
         for (size_t j = 0; j < d; ++j) {
@@ -216,9 +213,8 @@ TEST(LVQ4CodeLayout, ScaleAndBiasSitAtTheDocumentedOffsets) {
     const size_t code_size = kmeans.GetState().code_size;
     ASSERT_EQ(code_size, nibble_bytes + 2 * sizeof(float));
 
-    auto executor = MakeDefaultExecutor(0);
     std::vector<float> decoded(n * d);
-    quantizer->Decode(*executor, codes, decoded.data(), n, d);
+    quantizer->Decode(codes, decoded.data(), n, d);
 
     for (size_t i = 0; i < n; i += 293) {
         const uint8_t* code = codes + i * code_size;

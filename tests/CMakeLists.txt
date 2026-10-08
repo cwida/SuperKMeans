@@ -1,5 +1,11 @@
 # Test suite for SuperKMeans
 
+# Wasm: the tests catch exceptions, read tests/test_data.bin from the host and need more memory
+if(EMSCRIPTEN)
+    add_compile_options(-fexceptions)
+    add_link_options(-fexceptions -sALLOW_MEMORY_GROWTH=1 -sNODERAWFS=1)
+endif()
+
 # Fetch GoogleTest
 include(FetchContent)
 FetchContent_Declare(

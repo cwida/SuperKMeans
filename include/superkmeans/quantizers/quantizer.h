@@ -21,7 +21,7 @@ class PDXLayout;
  * @tparam q Quantizer type that determines the quantized data type
  */
 template <Quantization q>
-class IQuantizer {
+class IQuantizer : public ExecutorHolder {
   public:
     using quantized_t = skmeans_value_t<q>;
 
@@ -30,34 +30,21 @@ class IQuantizer {
     /**
      * @brief Compute quantization parameters from float data.
      *
-     * @param executor Runs the parallel loops (every method below takes one)
      * @param data Row-major float matrix (n × d)
      * @param n Number of vectors
      * @param d Dimensionality
      */
-    virtual void Fit(ParallelExecutor& executor, const float* data, size_t n, size_t d) = 0;
+    virtual void Fit(const float* data, size_t n, size_t d) = 0;
 
     /**
      * @brief Quantize a batch of float vectors.
      */
-    virtual void Encode(
-        ParallelExecutor& executor,
-        const float* in,
-        quantized_t* out,
-        size_t n,
-        size_t d
-    ) const = 0;
+    virtual void Encode(const float* in, quantized_t* out, size_t n, size_t d) const = 0;
 
     /**
      * @brief Dequantize back to float.
      */
-    virtual void Decode(
-        ParallelExecutor& executor,
-        const quantized_t* in,
-        float* out,
-        size_t n,
-        size_t d
-    ) const = 0;
+    virtual void Decode(const quantized_t* in, float* out, size_t n, size_t d) const = 0;
 
     /**
      * @brief Compute float L2 squared norms of quantized vectors.
@@ -65,18 +52,12 @@ class IQuantizer {
      * The returned norms must be in the original float distance space
      * so that L2(x,y) = norm(x) + norm(y) - 2 * dot_scaled(x,y) holds.
      */
-    virtual void ComputeNorms(
-        ParallelExecutor& executor,
-        const quantized_t* data,
-        size_t n,
-        size_t d,
-        float* out_norms
-    ) const = 0;
+    virtual void ComputeNorms(const quantized_t* data, size_t n, size_t d, float* out_norms)
+        const = 0;
 
     /**
      * @brief Find top-1 nearest neighbor for each query vector.
      *
-     * @param executor Runs the assignment in parallel
      * @param x Quantized query vectors (n_x × code_size, row-major)
      * @param y Quantized reference vectors (n_y × code_size, row-major)
      * @param x_float Original float query vectors (n_x × d, row-major)
@@ -89,10 +70,9 @@ class IQuantizer {
      * @param out_knn Output: nearest reference index per query (length n_x)
      * @param out_distances Output: L2 squared distance to nearest (length n_x)
      * @param tmp_buf Scratch space: X_BATCH_SIZE * Y_BATCH_SIZE floats, or at least
-     * BatchComputer::ScratchSize(executor) when larger (f32 uses one tile per worker)
+     * BatchComputer::ScratchSize of the bound executor when larger (f32: one tile per worker)
      */
     virtual void FindNearestNeighbor(
-        ParallelExecutor& executor,
         const quantized_t* x,
         const quantized_t* y,
         const float* x_float,
@@ -175,9 +155,8 @@ class IQuantizer {
      *
      * Float-accumulating quantizers (f32, RaBitQ, LVQ4) write directly to
      * centroid_accumulators. SQ quantizers accumulate into internal uint32 buffers.
-     * Threading partitions by centroid range: each worker owns the centroids ParallelFor gives it.
+     * Threading partitions by centroid range.
      *
-     * @param executor Runs the centroid ranges in parallel
      * @param encoded_data Encoded vectors (n × code_size)
      * @param assignments Cluster assignment per vector (length n)
      * @param centroid_accumulators Float centroid sums [n_clusters × d], pre-zeroed
@@ -187,7 +166,6 @@ class IQuantizer {
      * @param d Dimensionality
      */
     virtual void UpdateCentroids(
-        ParallelExecutor& executor,
         const quantized_t* encoded_data,
         const uint32_t* assignments,
         float* centroid_accumulators,
@@ -196,7 +174,6 @@ class IQuantizer {
         size_t n_clusters,
         size_t d
     ) const {
-        (void) executor;
         (void) encoded_data;
         (void) assignments;
         (void) centroid_accumulators;
@@ -214,13 +191,11 @@ class IQuantizer {
      * SQ overrides: integer-divide internal uint32 → quantized → decode → float.
      */
     virtual void FinalizeCentroids(
-        ParallelExecutor& executor,
         float* centroids,
         const uint32_t* cluster_sizes,
         size_t n_clusters,
         size_t d
     ) const {
-        (void) executor;
         for (size_t i = 0; i < n_clusters; ++i) {
             if (cluster_sizes[i] == 0)
                 continue;
@@ -245,13 +220,11 @@ class IQuantizer {
      * @param partial_d Number of leading dimensions to compute norms over
      */
     virtual void CacheDataPartialNorms(
-        ParallelExecutor& executor,
         const quantized_t* data,
         size_t n,
         size_t d,
         uint32_t partial_d
     ) {
-        (void) executor;
         (void) data;
         (void) n;
         (void) d;
@@ -266,13 +239,11 @@ class IQuantizer {
      * Must be called before each pruning iteration (centroids change every iteration).
      */
     virtual void CacheCentroidPartialNorms(
-        ParallelExecutor& executor,
         const quantized_t* centroids,
         size_t n,
         size_t d,
         uint32_t partial_d
     ) {
-        (void) executor;
         (void) centroids;
         (void) n;
         (void) d;
@@ -301,10 +272,9 @@ class IQuantizer {
      * @param partial_d Number of dimensions covered by partial GEMM
      * @param out_not_pruned_counts Output: count of non-pruned vectors per query (length n_x)
      * @param tmp_buf Scratch space: X_BATCH_SIZE * Y_BATCH_SIZE floats, or at least
-     * BatchComputer::ScratchSize(executor) when larger (f32 uses one tile per worker)
+     * BatchComputer::ScratchSize of the bound executor when larger (f32: one tile per worker)
      */
     virtual void FindNearestNeighborWithPruning(
-        ParallelExecutor& executor,
         const quantized_t* x,
         const quantized_t* y,
         const float* x_float,
@@ -319,7 +289,6 @@ class IQuantizer {
         size_t* out_not_pruned_counts,
         float* tmp_buf
     ) const {
-        (void) executor;
         (void) x;
         (void) y;
         (void) x_float;

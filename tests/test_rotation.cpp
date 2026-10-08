@@ -45,11 +45,7 @@ std::string GetRotationMethod(size_t d) {
     return uses_dct ? "DCT" : "Orthonormal Matrix";
 }
 
-class RotationTest : public ::testing::Test {
-  protected:
-    void SetUp() override { executor = skmeans::MakeDefaultExecutor(0); }
-    std::unique_ptr<skmeans::ParallelExecutor> executor;
-};
+class RotationTest : public ::testing::Test {};
 
 /**
  * @brief Test that Rotate followed by Unrotate returns original vectors (low dim)
@@ -63,10 +59,10 @@ TEST_F(RotationTest, RotateUnrotateInverse_LowDim) {
     skmeans::ADSamplingPruner pruner(d, 2.1f);
 
     std::vector<float> rotated(n * d);
-    pruner.Rotate(*executor, original.data(), rotated.data(), n);
+    pruner.Rotate(original.data(), rotated.data(), n);
 
     std::vector<float> recovered(n * d);
-    pruner.Unrotate(*executor, rotated.data(), recovered.data(), n);
+    pruner.Unrotate(rotated.data(), recovered.data(), n);
 
     double max_error = 0.0;
     double sum_error = 0.0;
@@ -96,10 +92,10 @@ TEST_F(RotationTest, RotateUnrotateInverse_HighDim_DCT) {
     skmeans::ADSamplingPruner pruner(d, 2.1f);
 
     std::vector<float> rotated(n * d);
-    pruner.Rotate(*executor, original.data(), rotated.data(), n);
+    pruner.Rotate(original.data(), rotated.data(), n);
 
     std::vector<float> recovered(n * d);
-    pruner.Unrotate(*executor, rotated.data(), recovered.data(), n);
+    pruner.Unrotate(rotated.data(), recovered.data(), n);
 
     double max_error = 0.0;
     double sum_error = 0.0;
@@ -129,10 +125,10 @@ TEST_F(RotationTest, RotateUnrotateInverse_MultipleDimensions) {
         skmeans::ADSamplingPruner pruner(d, 2.1f);
 
         std::vector<float> rotated(n * d);
-        pruner.Rotate(*executor, original.data(), rotated.data(), n);
+        pruner.Rotate(original.data(), rotated.data(), n);
 
         std::vector<float> recovered(n * d);
-        pruner.Unrotate(*executor, rotated.data(), recovered.data(), n);
+        pruner.Unrotate(rotated.data(), recovered.data(), n);
 
         double max_error = 0.0;
         double sum_error = 0.0;
@@ -171,7 +167,7 @@ TEST_F(RotationTest, BothRotationMethodsPreserveNorms) {
         skmeans::ADSamplingPruner pruner(d, 2.1f);
 
         std::vector<float> rotated(n * d);
-        pruner.Rotate(*executor, original.data(), rotated.data(), n);
+        pruner.Rotate(original.data(), rotated.data(), n);
 
         for (size_t i = 0; i < n; ++i) {
             float original_norm = ComputeNorm(original.data() + i * d, d);
@@ -192,7 +188,7 @@ TEST_F(RotationTest, BothRotationMethodsPreserveNorms) {
         skmeans::ADSamplingPruner pruner(d, 2.1f);
 
         std::vector<float> rotated(n * d);
-        pruner.Rotate(*executor, original.data(), rotated.data(), n);
+        pruner.Rotate(original.data(), rotated.data(), n);
 
         for (size_t i = 0; i < n; ++i) {
             float original_norm = ComputeNorm(original.data() + i * d, d);
@@ -227,7 +223,7 @@ TEST_F(RotationTest, RotationPreservesInnerProducts) {
         skmeans::ADSamplingPruner pruner(d, 2.1f);
 
         std::vector<float> rotated(n * d);
-        pruner.Rotate(*executor, vectors.data(), rotated.data(), n);
+        pruner.Rotate(vectors.data(), rotated.data(), n);
 
         for (size_t i = 0; i < n; ++i) {
             for (size_t j = i + 1; j < n; ++j) {
@@ -274,7 +270,7 @@ TEST_F(RotationTest, RotationPreservesDistances) {
         skmeans::ADSamplingPruner pruner(d, 2.1f);
 
         std::vector<float> rotated(n * d);
-        pruner.Rotate(*executor, vectors.data(), rotated.data(), n);
+        pruner.Rotate(vectors.data(), rotated.data(), n);
 
         // Check distances for all pairs
         for (size_t i = 0; i < n; ++i) {
@@ -318,10 +314,10 @@ TEST_F(RotationTest, SingleVector) {
         skmeans::ADSamplingPruner pruner(d, 2.1f);
 
         std::vector<float> rotated(d);
-        pruner.Rotate(*executor, original.data(), rotated.data(), 1);
+        pruner.Rotate(original.data(), rotated.data(), 1);
 
         std::vector<float> recovered(d);
-        pruner.Unrotate(*executor, rotated.data(), recovered.data(), 1);
+        pruner.Unrotate(rotated.data(), recovered.data(), 1);
 
         float max_error = 0.0f;
         for (size_t i = 0; i < d; ++i) {
@@ -347,8 +343,8 @@ TEST_F(RotationTest, DifferentSeedsProduceDifferentRotations) {
     std::vector<float> rotated1(n * d);
     std::vector<float> rotated2(n * d);
 
-    pruner1.Rotate(*executor, original.data(), rotated1.data(), n);
-    pruner2.Rotate(*executor, original.data(), rotated2.data(), n);
+    pruner1.Rotate(original.data(), rotated1.data(), n);
+    pruner2.Rotate(original.data(), rotated2.data(), n);
 
     // Rotated vectors should be different
     bool found_difference = false;
@@ -377,8 +373,8 @@ TEST_F(RotationTest, SameSeedProducesIdenticalRotations) {
     std::vector<float> rotated1(n * d);
     std::vector<float> rotated2(n * d);
 
-    pruner1.Rotate(*executor, original.data(), rotated1.data(), n);
-    pruner2.Rotate(*executor, original.data(), rotated2.data(), n);
+    pruner1.Rotate(original.data(), rotated1.data(), n);
+    pruner2.Rotate(original.data(), rotated2.data(), n);
 
     // Rotated vectors should be identical
     for (size_t i = 0; i < n * d; ++i) {
@@ -420,7 +416,7 @@ TEST_F(RotationTest, SuperKMeansWithPreRotatedDataProducesIdenticalResults) {
 
     skmeans::ADSamplingPruner pruner(d, 1.5f, seed);
     std::vector<float> rotated_data(n * d);
-    pruner.Rotate(*executor, data.data(), rotated_data.data(), n);
+    pruner.Rotate(data.data(), rotated_data.data(), n);
 
     skmeans::SuperKMeansConfig config2;
     config2.iters = 10;
@@ -468,13 +464,12 @@ void ExpectInPlaceRotationMatchesOutOfPlace(const size_t n, const size_t d) {
     auto original = skmeans::GenerateRandomVectors(n, d, -1.0f, 1.0f, 42);
 
     skmeans::ADSamplingPruner pruner(d, 1.5f, 42);
-    auto executor = skmeans::MakeDefaultExecutor(0);
 
     std::vector<float> out_of_place(n * d);
-    pruner.Rotate(*executor, original.data(), out_of_place.data(), n);
+    pruner.Rotate(original.data(), out_of_place.data(), n);
 
     std::vector<float> in_place(original);
-    pruner.Rotate<true>(*executor, in_place.data(), in_place.data(), n);
+    pruner.Rotate<true>(in_place.data(), in_place.data(), n);
 
     double max_error = 0.0;
     for (size_t i = 0; i < n * d; ++i) {
@@ -513,7 +508,7 @@ TEST_F(RotationTest, TrainInPlaceMatchesTrainOnPreRotatedData) {
 
     skmeans::ADSamplingPruner pruner(d, 1.5f, seed);
     std::vector<float> pre_rotated(n * d);
-    pruner.Rotate(*executor, data.data(), pre_rotated.data(), n);
+    pruner.Rotate(data.data(), pre_rotated.data(), n);
 
     auto reference_config = config;
     reference_config.data_already_rotated = true;
@@ -578,7 +573,7 @@ TEST_F(RotationTest, StateRecordsHowTrainingWasCarriedOut) {
         auto kmeans = SKM(k, d, pre_rotated_config);
         skmeans::ADSamplingPruner pruner(d, skmeans::PRUNER_INITIAL_THRESHOLD, config.seed);
         std::vector<float> pre_rotated(n * d);
-        pruner.Rotate(*executor, data.data(), pre_rotated.data(), n);
+        pruner.Rotate(data.data(), pre_rotated.data(), n);
         kmeans.Train(pre_rotated.data(), n);
         EXPECT_TRUE(kmeans.GetState().trained);
         EXPECT_FALSE(kmeans.GetState().trained_in_place);
@@ -638,9 +633,8 @@ void ExpectStateRotatorRecoversOriginal(const size_t n, const size_t d) {
     const auto* rotator = kmeans.GetState().rotator;
     ASSERT_NE(rotator, nullptr);
 
-    auto executor = skmeans::MakeDefaultExecutor(0);
     std::vector<float> recovered(n * d);
-    rotator->Unrotate(*executor, rotated.data(), recovered.data(), n);
+    rotator->Unrotate(rotated.data(), recovered.data(), n);
 
     double max_error = 0.0;
     for (size_t i = 0; i < n * d; ++i) {
@@ -679,7 +673,7 @@ TEST_F(RotationTest, StateRotatorRotatesNewVectorsIntoTheTrainedDomain) {
     // Rotating the original vectors through the exposed rotator must reproduce what TrainInPlace
     // left in the buffer
     std::vector<float> rotated_again(n * d);
-    kmeans.GetState().rotator->Rotate(*executor, data.data(), rotated_again.data(), n);
+    kmeans.GetState().rotator->Rotate(data.data(), rotated_again.data(), n);
 
     double max_error = 0.0;
     for (size_t i = 0; i < n * d; ++i) {

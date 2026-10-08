@@ -66,8 +66,7 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
         cached_partial_d_ = 0;
     }
 
-    void Fit(ParallelExecutor& /*executor*/, const float* /*data*/, size_t /*n*/, size_t d)
-        override {
+    void Fit(const float* /*data*/, size_t /*n*/, size_t d) override {
         SKM_PROFILE_SCOPE("LVQ4::Fit");
         if (d % 2 != 0) {
             throw std::invalid_argument(
@@ -100,7 +99,6 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
     }
 
     void MatrixMultiplication(
-        ParallelExecutor& executor,
         const quantized_t* a,
         const quantized_t* b,
         uint32_t* out,
@@ -112,6 +110,7 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
         bool a_changed = true,
         bool b_changed = true
     ) const {
+        ParallelExecutor& executor = GetExecutor();
         const bool decode_to_u8 = has_amx || IS_ARM || (k <= THIN_MATRIX_THRESHOLD);
 
         if (decode_to_u8) {
@@ -153,41 +152,34 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
         U4Gemm(executor, a, b, out, m, n, k, a_stride, b_stride, packed_buf_, b_changed);
     }
 
-    void Encode(ParallelExecutor& executor, const float* in, quantized_t* out, size_t n, size_t d)
-        const override {
+    void Encode(const float* in, quantized_t* out, size_t n, size_t d) const override {
         SKM_PROFILE_SCOPE("LVQ4::Encode");
         assert(fitted_ && d == d_);
 
-        executor.ParallelFor(n, [&](size_t begin, size_t end, size_t) {
+        GetExecutor().ParallelFor(n, [&](size_t begin, size_t end, size_t) {
             for (size_t i = begin; i < end; ++i) {
                 LVQ4Codec::EncodeOne(in + i * d, out + i * code_size_, d, nibble_bytes_);
             }
         });
     }
 
-    void Decode(ParallelExecutor& executor, const quantized_t* in, float* out, size_t n, size_t d)
-        const override {
+    void Decode(const quantized_t* in, float* out, size_t n, size_t d) const override {
         SKM_PROFILE_SCOPE("LVQ4::Decode");
         assert(fitted_ && d == d_);
 
-        executor.ParallelFor(n, [&](size_t begin, size_t end, size_t) {
+        GetExecutor().ParallelFor(n, [&](size_t begin, size_t end, size_t) {
             for (size_t i = begin; i < end; ++i) {
                 LVQ4Codec::DecodeOne(in + i * code_size_, out + i * d, d, nibble_bytes_);
             }
         });
     }
 
-    void ComputeNorms(
-        ParallelExecutor& executor,
-        const quantized_t* data,
-        size_t n,
-        size_t d,
-        float* out_norms
-    ) const override {
+    void ComputeNorms(const quantized_t* data, size_t n, size_t d, float* out_norms)
+        const override {
         SKM_PROFILE_SCOPE("LVQ4::ComputeNorms");
         assert(fitted_ && d == d_);
 
-        executor.ParallelFor(n, [&](size_t begin, size_t end, size_t) {
+        GetExecutor().ParallelFor(n, [&](size_t begin, size_t end, size_t) {
             for (size_t i = begin; i < end; ++i) {
                 const uint8_t* code = data + i * code_size_;
                 float s, b;
@@ -204,7 +196,6 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
     }
 
     void FindNearestNeighbor(
-        ParallelExecutor& executor,
         const quantized_t* x,
         const quantized_t* y,
         const float* /*x_float*/,
@@ -221,11 +212,12 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
         SKM_PROFILE_SCOPE("search");
         SKM_PROFILE_SCOPE("search/1st_blas");
         assert(fitted_);
+        ParallelExecutor& executor = GetExecutor();
 
-        EnsureCodeFactorsCache(executor, reinterpret_cast<const uint8_t*>(x), n_x);
+        EnsureCodeFactorsCache(reinterpret_cast<const uint8_t*>(x), n_x);
 
         CentroidFactors cf;
-        ExtractCentroidFactors(executor, reinterpret_cast<const uint8_t*>(y), n_y, 0, 0, cf);
+        ExtractCentroidFactors(reinterpret_cast<const uint8_t*>(y), n_y, 0, 0, cf);
 
         std::fill_n(out_distances, n_x, std::numeric_limits<float>::max());
 
@@ -239,7 +231,6 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
                 const bool b_changed = true;
 
                 MatrixMultiplication(
-                    executor,
                     x + i * code_size_,
                     y + j * code_size_,
                     dots_buf_.get(),
@@ -289,22 +280,12 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
         }
     }
 
-    void CacheDataPartialNorms(
-        ParallelExecutor& executor,
-        const quantized_t* data,
-        size_t n,
-        size_t /*d*/,
-        uint32_t partial_d
-    ) override {
-        ComputeDataPartialNorms(executor, data, n, partial_d);
+    void CacheDataPartialNorms(const quantized_t* data, size_t n, size_t /*d*/, uint32_t partial_d)
+        override {
+        ComputeDataPartialNorms(data, n, partial_d);
     }
 
-    void ComputeDataPartialNorms(
-        ParallelExecutor& executor,
-        const quantized_t* data,
-        size_t n,
-        uint32_t partial_d
-    ) const {
+    void ComputeDataPartialNorms(const quantized_t* data, size_t n, uint32_t partial_d) const {
         SKM_PROFILE_SCOPE("LVQ4::CacheDataPartialNorms");
         const uint8_t* codes = reinterpret_cast<const uint8_t*>(data);
         const size_t front_bytes = partial_d / 2;
@@ -320,7 +301,7 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
         cached_A_x_mid_.resize(n);
         cached_partial_d_ = partial_d;
 
-        executor.ParallelFor(n, [&](size_t begin, size_t end, size_t) {
+        GetExecutor().ParallelFor(n, [&](size_t begin, size_t end, size_t) {
             for (size_t i = begin; i < end; ++i) {
                 const uint8_t* code = codes + i * code_size_;
                 float si, bi;
@@ -363,7 +344,6 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
     }
 
     void CacheCentroidPartialNorms(
-        ParallelExecutor& /*executor*/,
         const quantized_t* /*centroids*/,
         size_t /*n*/,
         size_t /*d*/,
@@ -373,7 +353,6 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
     }
 
     void FindNearestNeighborWithPruning(
-        ParallelExecutor& executor,
         const quantized_t* x,
         const quantized_t* y,
         const float* /*x_float*/,
@@ -390,14 +369,15 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
     ) const override {
         SKM_PROFILE_SCOPE("search");
         assert(fitted_);
+        ParallelExecutor& executor = GetExecutor();
 
         const uint8_t* x_codes = reinterpret_cast<const uint8_t*>(x);
         const uint8_t* y_codes = reinterpret_cast<const uint8_t*>(y);
 
-        EnsureCodeFactorsCache(executor, x_codes, n_x);
+        EnsureCodeFactorsCache(x_codes, n_x);
 
         if (cached_partial_d_ != partial_d || cached_norm_x_front_.size() != n_x) {
-            ComputeDataPartialNorms(executor, x, n_x, partial_d);
+            ComputeDataPartialNorms(x, n_x, partial_d);
         }
 
         // Pruning geometry
@@ -413,7 +393,7 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
             use_mid ? ComputeADSamplingRatio(mid_d, d, PRUNER_INITIAL_THRESHOLD) : 1.0f;
 
         CentroidFactors cf;
-        ExtractCentroidFactors(executor, y_codes, n_y, front_d, mid_d, cf);
+        ExtractCentroidFactors(y_codes, n_y, front_d, mid_d, cf);
 
         for (size_t i = 0; i < n_x; i += X_BATCH_SIZE) {
             const size_t batch_n_x = std::min(X_BATCH_SIZE, n_x - i);
@@ -426,7 +406,6 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
                     const bool a_changed = (j == 0);
                     const bool b_changed = true;
                     MatrixMultiplication(
-                        executor,
                         x + i * code_size_,
                         y + j * code_size_,
                         dots_buf_.get(),
@@ -634,7 +613,6 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
         return std::min((partial_d + 7) & ~7u, vertical_d);
     }
     void UpdateCentroids(
-        ParallelExecutor& executor,
         const quantized_t* encoded_data,
         const uint32_t* assignments,
         float* centroid_accumulators,
@@ -645,6 +623,7 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
     ) const override {
         SKM_PROFILE_SCOPE("LVQ4::UpdateCentroids");
         assert(fitted_ && d == d_);
+        ParallelExecutor& executor = GetExecutor();
         // One rank per centroid range; the executor runs every rank exactly once.
         const size_t nt = executor.NumWorkers();
         executor.ParallelFor(nt, [&](size_t rank_begin, size_t rank_end, size_t) {
@@ -712,8 +691,7 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
         std::vector<float> norm_y_mid, sj_sum_cy_mid_f;
     };
 
-    void EnsureCodeFactorsCache(ParallelExecutor& executor, const uint8_t* x_codes, size_t n_x)
-        const {
+    void EnsureCodeFactorsCache(const uint8_t* x_codes, size_t n_x) const {
         if (cached_x_ptr_ == x_codes && cached_n_x_ == n_x)
             return;
         SKM_PROFILE_SCOPE("LVQ4::EnsureCodeFactorsCache");
@@ -726,7 +704,7 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
 
         const float d_f = static_cast<float>(d_);
 
-        executor.ParallelFor(n_x, [&](size_t begin, size_t end, size_t) {
+        GetExecutor().ParallelFor(n_x, [&](size_t begin, size_t end, size_t) {
             for (size_t i = begin; i < end; ++i) {
                 const uint8_t* code = x_codes + i * code_size_;
                 float si, bi;
@@ -752,7 +730,6 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
     }
 
     void ExtractCentroidFactors(
-        ParallelExecutor& executor,
         const uint8_t* y_codes,
         size_t n_y,
         size_t front_d,
@@ -782,7 +759,7 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
         const float front_d_f = static_cast<float>(front_d);
         const float mid_d_f = static_cast<float>(mid_d);
 
-        executor.ParallelFor(n_y, [&](size_t begin, size_t end, size_t) {
+        GetExecutor().ParallelFor(n_y, [&](size_t begin, size_t end, size_t) {
             for (size_t j = begin; j < end; ++j) {
                 const uint8_t* code_j = y_codes + j * code_size_;
                 std::memcpy(&cf.scales[j], code_j + nibble_bytes_, sizeof(float));

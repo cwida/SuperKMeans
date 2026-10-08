@@ -54,7 +54,6 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
      * Rows are split across the executor's workers inside U8Gemm.
      */
     void MatrixMultiplication(
-        ParallelExecutor& executor,
         const quantized_t* a,
         const quantized_t* b,
         uint32_t* out,
@@ -66,7 +65,7 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
     ) const {
         const bool use_numkong = !IS_ARM && (has_amx || k > THIN_MATRIX_THRESHOLD);
         U8Gemm(
-            executor,
+            GetExecutor(),
             a,
             b,
             out,
@@ -81,11 +80,11 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
         );
     }
 
-    void Fit(ParallelExecutor& executor, const float* embeddings, size_t n, size_t d) override {
+    void Fit(const float* embeddings, size_t n, size_t d) override {
         SKM_PROFILE_SCOPE("fitting");
         const size_t total_elements = n * d;
         params = ComputeScalarQuantizationParams(
-            executor, embeddings, total_elements, static_cast<float>(MAX_VALUE)
+            GetExecutor(), embeddings, total_elements, static_cast<float>(MAX_VALUE)
         );
         if (!tmp_dots_buf) {
             tmp_dots_buf.reset(new uint32_t[X_BATCH_SIZE * Y_BATCH_SIZE]);
@@ -95,7 +94,6 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
     }
 
     void Encode(
-        ParallelExecutor& executor,
         const float* embeddings,
         quantized_t* output_quantized_embeddings,
         size_t n,
@@ -103,6 +101,7 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
     ) const override {
         SKM_PROFILE_SCOPE("encoding");
         assert(fitted);
+        ParallelExecutor& executor = GetExecutor();
         const float quantization_base = params.quantization_base;
         const float quantization_scale = params.quantization_scale;
 
@@ -127,7 +126,6 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
     }
 
     void Decode(
-        ParallelExecutor& executor,
         const quantized_t* quantized_embeddings,
         float* output_embeddings,
         size_t n,
@@ -135,6 +133,7 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
     ) const override {
         SKM_PROFILE_SCOPE("decoding");
         assert(fitted);
+        ParallelExecutor& executor = GetExecutor();
         const float quantization_base = params.quantization_base;
         const float inv_quantization_scale = params.inv_quantization_scale;
 
@@ -157,14 +156,10 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
      * Since base cancels in L2 distance:
      *   norm[i] = inv_scale² * Σ q[i][dim]²
      */
-    void ComputeNorms(
-        ParallelExecutor& executor,
-        const quantized_t* quantized_embeddings,
-        size_t n,
-        size_t d,
-        float* out_norms
-    ) const override {
+    void ComputeNorms(const quantized_t* quantized_embeddings, size_t n, size_t d, float* out_norms)
+        const override {
         assert(fitted);
+        ParallelExecutor& executor = GetExecutor();
         const float inv_scale_sq = params.inv_quantization_scale * params.inv_quantization_scale;
 
         executor.ParallelFor(n, [&](size_t begin, size_t end, size_t) {
@@ -188,7 +183,6 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
      * norms: L2²(x,y) = ||x||² + ||y||² - 2·dot(x,y).
      */
     void FindNearestNeighbor(
-        ParallelExecutor& executor,
         const quantized_t* x,
         const quantized_t* y,
         const float* x_float,
@@ -207,6 +201,7 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
         assert(fitted);
         (void) x_float;
         (void) y_float;
+        ParallelExecutor& executor = GetExecutor();
         const float inv_scale_sq = params.inv_quantization_scale * params.inv_quantization_scale;
         std::fill_n(out_distances, n_x, std::numeric_limits<float>::max());
 
@@ -217,7 +212,7 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
                 const size_t batch_n_y = std::min(Y_BATCH_SIZE, n_y - j);
 
                 MatrixMultiplication(
-                    executor, x + i * d, y + j * d, tmp_dots_buf.get(), batch_n_x, batch_n_y, d, d, d
+                    x + i * d, y + j * d, tmp_dots_buf.get(), batch_n_x, batch_n_y, d, d, d
                 );
 
                 // L2²(x,y) = ||x||² + ||y||² - 2·inv_scale²·dot(x,y)
@@ -250,25 +245,19 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
         }
     }
 
-    void CacheDataPartialNorms(
-        ParallelExecutor& executor,
-        const quantized_t* data,
-        size_t n,
-        size_t d,
-        uint32_t partial_d
-    ) override {
-        CachePartialNorms(executor, data, n, d, partial_d, cached_data_partial_norms);
+    void CacheDataPartialNorms(const quantized_t* data, size_t n, size_t d, uint32_t partial_d)
+        override {
+        CachePartialNorms(data, n, d, partial_d, cached_data_partial_norms);
         cached_data_partial_d_ = partial_d;
     }
 
     void CacheCentroidPartialNorms(
-        ParallelExecutor& executor,
         const quantized_t* centroids,
         size_t n,
         size_t d,
         uint32_t partial_d
     ) override {
-        CachePartialNorms(executor, centroids, n, d, partial_d, cached_centroid_partial_norms);
+        CachePartialNorms(centroids, n, d, partial_d, cached_centroid_partial_norms);
     }
 
     /**
@@ -281,7 +270,6 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
      * Partial norms must be cached via CacheDataPartialNorms / CacheCentroidPartialNorms.
      */
     void FindNearestNeighborWithPruning(
-        ParallelExecutor& executor,
         const quantized_t* x,
         const quantized_t* y,
         const float* x_float,
@@ -299,9 +287,10 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
         SKM_PROFILE_SCOPE("search");
         (void) x_float;
         (void) y_float;
+        ParallelExecutor& executor = GetExecutor();
 
         if (cached_data_partial_norms.size() != n_x || cached_data_partial_d_ != partial_d) {
-            CachePartialNorms(executor, x, n_x, d, partial_d, cached_data_partial_norms);
+            CachePartialNorms(x, n_x, d, partial_d, cached_data_partial_norms);
             cached_data_partial_d_ = partial_d;
         }
 
@@ -323,7 +312,6 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
                 {
                     SKM_PROFILE_SCOPE("search/blas");
                     MatrixMultiplication(
-                        executor,
                         x + i * d,
                         y + j * d,
                         tmp_dots_buf.get(),
@@ -396,7 +384,6 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
     }
 
     void UpdateCentroids(
-        ParallelExecutor& executor,
         const quantized_t* encoded_data,
         const uint32_t* assignments,
         float* /*centroid_accumulators_float*/,
@@ -407,6 +394,7 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
     ) const override {
         SKM_PROFILE_SCOPE("SQ8::UpdateCentroids");
         assert(fitted);
+        ParallelExecutor& executor = GetExecutor();
         // One rank per centroid range; the executor runs every rank exactly once.
         const size_t nt = executor.NumWorkers();
         executor.ParallelFor(nt, [&](size_t rank_begin, size_t rank_end, size_t) {
@@ -430,13 +418,13 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
     }
 
     void FinalizeCentroids(
-        ParallelExecutor& executor,
         float* centroids,
         const uint32_t* cluster_sizes,
         size_t n_clusters,
         size_t d
     ) const override {
         assert(fitted);
+        ParallelExecutor& executor = GetExecutor();
         const float quantization_base = params.quantization_base;
         const float inv_quantization_scale = params.inv_quantization_scale;
 
@@ -465,7 +453,6 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
 
   private:
     void CachePartialNorms(
-        ParallelExecutor& executor,
         const quantized_t* vecs,
         size_t n,
         size_t d,
@@ -473,7 +460,7 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
         std::vector<uint32_t>& out
     ) const {
         out.resize(n);
-        executor.ParallelFor(n, [&](size_t begin, size_t end, size_t) {
+        GetExecutor().ParallelFor(n, [&](size_t begin, size_t end, size_t) {
             for (size_t idx = begin; idx < end; ++idx) {
                 uint32_t sum = 0;
                 const quantized_t* row = vecs + idx * d;

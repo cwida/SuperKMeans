@@ -50,8 +50,11 @@ inline float ComputeADSamplingRatio(
  *
  * For high-dimensional data (>= D_THRESHOLD_FOR_DCT_ROTATION), uses DCT-based rotation
  * which is more efficient than full matrix multiplication.
+ *
+ * Rotations run on the bound executor (SetExecutor), serially when unbound. Rotate and Unrotate
+ * release its threads when they return.
  */
-class ADSamplingPruner {
+class ADSamplingPruner : public ExecutorHolder {
     using MatrixR = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
 
   public:
@@ -153,13 +156,12 @@ class ADSamplingPruner {
     /**
      * @brief Applies sign flipping for DCT-based rotation (FFTW path).
      *
-     * @param executor Runs the rows in parallel
      * @param data Input vectors (row-major, n × num_dimensions)
      * @param out Output vectors (row-major, n × num_dimensions)
      * @param n Number of vectors
      */
-    void FlipSign(ParallelExecutor& executor, const float* data, float* out, const size_t n) const {
-        executor.ParallelFor(n, [&](size_t begin, size_t end, size_t) {
+    void FlipSign(const float* data, float* out, const size_t n) const {
+        GetExecutor().ParallelFor(n, [&](size_t begin, size_t end, size_t) {
             for (size_t i = begin; i < end; ++i) {
                 const size_t offset = i * num_dimensions;
                 UtilsComputer<Quantization::f32>::FlipSign(
@@ -183,18 +185,13 @@ class ADSamplingPruner {
      * so it walks blocks of INPLACE_ROTATION_BLOCK_ROWS through a scratch buffer.
      *
      * @tparam IN_PLACE Whether vectors and out_buffer are the same buffer
-     * @param executor Runs the rotation in parallel over blocks of rows
      * @param vectors Input vectors (row-major, n × num_dimensions)
      * @param out_buffer Output buffer for rotated vectors (n × num_dimensions)
      * @param n Number of vectors to rotate
      */
     template <bool IN_PLACE = false>
-    void Rotate(
-        ParallelExecutor& executor,
-        const float* vectors,
-        float* out_buffer,
-        const uint32_t n
-    ) const {
+    void Rotate(const float* vectors, float* out_buffer, const uint32_t n) const {
+        ParallelSection parallel_section(GetExecutor());
         if (WarnIfNoRotation(vectors, out_buffer, n)) {
             return;
         }
@@ -206,8 +203,8 @@ class ADSamplingPruner {
 #else
         if (num_dimensions >= D_THRESHOLD_FOR_DCT_ROTATION) {
 #endif
-            FlipSign(executor, vectors, out_buffer, n);
-            ParallelDCT(executor, FFTW_REDFT10, out_buffer, n);
+            FlipSign(vectors, out_buffer, n);
+            ParallelDCT(FFTW_REDFT10, out_buffer, n);
             const float s0 = std::sqrt(1.0f / (4.0f * num_dimensions));
             const float s = std::sqrt(1.0f / (2.0f * num_dimensions));
             out.col(0) *= s0;
@@ -222,10 +219,10 @@ class ADSamplingPruner {
                 const size_t n_rows = std::min(n_block_rows, static_cast<size_t>(n) - i);
                 float* dst = out_buffer + i * num_dimensions;
                 std::memcpy(tmp_block.get(), dst, n_rows * num_dimensions * sizeof(float));
-                RotateImpl(executor, tmp_block.get(), dst, static_cast<uint32_t>(n_rows));
+                RotateImpl(tmp_block.get(), dst, static_cast<uint32_t>(n_rows));
             }
         } else {
-            RotateImpl(executor, vectors, out_buffer, n);
+            RotateImpl(vectors, out_buffer, n);
         }
     }
 
@@ -234,13 +231,11 @@ class ADSamplingPruner {
      *
      * Single-threaded GEMMs over blocks of MINI_BATCH_SIZE rows, run in parallel.
      *
-     * @param executor Runs the row blocks in parallel
      * @param vectors Input vectors (row-major, n × num_dimensions)
      * @param out_buffer Output buffer for rotated vectors (n × num_dimensions)
      * @param n Number of vectors to rotate
      */
     void RotateImpl(
-        ParallelExecutor& executor,
         const float* SKM_RESTRICT vectors,
         float* SKM_RESTRICT out_buffer,
         const uint32_t n
@@ -255,7 +250,7 @@ class ADSamplingPruner {
         int ldb = static_cast<int>(num_dimensions);
         int ldc = static_cast<int>(num_dimensions);
         const size_t n_blocks = (static_cast<size_t>(n) + MINI_BATCH_SIZE - 1) / MINI_BATCH_SIZE;
-        executor.ParallelFor(n_blocks, [&](size_t block_begin, size_t block_end, size_t) {
+        GetExecutor().ParallelFor(n_blocks, [&](size_t block_begin, size_t block_end, size_t) {
             for (size_t block = block_begin; block < block_end; ++block) {
                 const size_t row = block * MINI_BATCH_SIZE;
                 int n_rows =
@@ -286,11 +281,11 @@ class ADSamplingPruner {
      * Like Rotate, it runs in parallel over blocks of rows.
      */
     void Unrotate(
-        ParallelExecutor& executor,
         const float* SKM_RESTRICT rotated_vectors,
         float* SKM_RESTRICT out_buffer,
         const uint32_t n
     ) const {
+        ParallelSection parallel_section(GetExecutor());
         if (WarnIfNoRotation(rotated_vectors, out_buffer, n)) {
             return;
         }
@@ -314,13 +309,13 @@ class ADSamplingPruner {
             out.rightCols(num_dimensions - 1) *= inv_s;
 
             // Apply inverse DCT (DCT-III = FFTW_REDFT01)
-            ParallelDCT(executor, FFTW_REDFT01, out_buffer, n);
+            ParallelDCT(FFTW_REDFT01, out_buffer, n);
 
             // FFTW's DCT-III needs normalization by 1/(2*n)
             out *= (1.0f / (2.0f * num_dimensions));
 
             // Undo FlipSign (FlipSign is its own inverse)
-            FlipSign(executor, out_buffer, out_buffer, n);
+            FlipSign(out_buffer, out_buffer, n);
             return;
         }
 #endif
@@ -335,7 +330,7 @@ class ADSamplingPruner {
         int ldb = static_cast<int>(num_dimensions);
         int ldc = static_cast<int>(num_dimensions);
         const size_t n_blocks = (static_cast<size_t>(n) + MINI_BATCH_SIZE - 1) / MINI_BATCH_SIZE;
-        executor.ParallelFor(n_blocks, [&](size_t block_begin, size_t block_end, size_t) {
+        GetExecutor().ParallelFor(n_blocks, [&](size_t block_begin, size_t block_end, size_t) {
             for (size_t block = block_begin; block < block_end; ++block) {
                 const size_t row = block * MINI_BATCH_SIZE;
                 int n_rows =
@@ -372,7 +367,7 @@ class ADSamplingPruner {
      * arrays it plans on) by the calling thread (the planner is not thread-safe), executed on
      * blocks of MINI_BATCH_SIZE rows in parallel (fftwf_execute_r2r is thread-safe).
      */
-    void ParallelDCT(ParallelExecutor& executor, fftw_r2r_kind kind, float* out, size_t n) const {
+    void ParallelDCT(fftw_r2r_kind kind, float* out, size_t n) const {
         if (n == 0) {
             return;
         }
@@ -391,7 +386,7 @@ class ADSamplingPruner {
         fftwf_plan block_plan = make_plan(block_rows);
         fftwf_plan tail_plan = tail_rows > 0 ? make_plan(tail_rows) : nullptr;
         const size_t n_blocks = (n + block_rows - 1) / block_rows;
-        executor.ParallelFor(n_blocks, [&](size_t block_begin, size_t block_end, size_t) {
+        GetExecutor().ParallelFor(n_blocks, [&](size_t block_begin, size_t block_end, size_t) {
             for (size_t block = block_begin; block < block_end; ++block) {
                 const size_t row = block * block_rows;
                 float* rows_p = out + row * num_dimensions;

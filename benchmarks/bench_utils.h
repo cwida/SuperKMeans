@@ -13,11 +13,14 @@
 #include <random>
 #include <sstream>
 #include <string>
-#include <sys/resource.h>
-#include <sys/stat.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#if !defined(_WIN32)
+#include <sys/resource.h>
+#include <sys/stat.h>
+#endif
 
 #include "superkmeans/common.h"
 #include "superkmeans/distance_computers/batch_computers.h"
@@ -60,12 +63,16 @@ inline std::string GetGroundTruthPath(const std::string& dataset) {
  * this under-report; "peak memory footprint" from /usr/bin/time -l is the reliable figure there.
  */
 inline double PeakRSSGiB() {
+#if defined(_WIN32)
+    return 0.0;
+#else
     rusage usage{};
     getrusage(RUSAGE_SELF, &usage);
 #ifdef __APPLE__
     return static_cast<double>(usage.ru_maxrss) / (1024.0 * 1024.0 * 1024.0);
 #else
     return static_cast<double>(usage.ru_maxrss) / (1024.0 * 1024.0);
+#endif
 #endif
 }
 
@@ -408,6 +415,10 @@ inline void PrintRecallResults(
  * @brief Create directory recursively if it doesn't exist.
  */
 inline bool CreateDirectoryRecursive(const std::string& path) {
+#if defined(_WIN32)
+    (void) path;
+    return false;
+#else
     std::string current_path;
     std::istringstream path_stream(path);
     std::string segment;
@@ -425,6 +436,7 @@ inline bool CreateDirectoryRecursive(const std::string& path) {
         }
     }
     return true;
+#endif
 }
 
 /**

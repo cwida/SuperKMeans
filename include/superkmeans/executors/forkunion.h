@@ -30,11 +30,14 @@ class ForkUnionExecutor final : public ParallelExecutor {
   public:
     explicit ForkUnionExecutor(size_t n_workers) : n_workers(std::max<size_t>(n_workers, 1)) {}
 
-    ~ForkUnionExecutor() override {
+    ~ForkUnionExecutor() override { ReleaseThreads(); }
+
+    void ReleaseThreads() override {
         if (pool != nullptr && pid != CurrentPid()) {
             // Inherited through fork(): its threads do not exist here, so it must never be joined.
             (void) pool.release();
         }
+        pool.reset();
     }
 
     size_t NumWorkers() const override { return n_workers; }

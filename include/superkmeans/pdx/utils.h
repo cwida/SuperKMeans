@@ -16,7 +16,7 @@ namespace skmeans {
 
 class TicToc {
   public:
-    size_t accum_time = 0;
+    uint64_t accum_time = 0;
     std::chrono::high_resolution_clock::time_point start =
         std::chrono::high_resolution_clock::now();
 

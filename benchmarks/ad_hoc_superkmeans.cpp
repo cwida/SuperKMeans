@@ -163,8 +163,7 @@ int main(int argc, char* argv[]) {
         if (in_place) {
             skmeans::ADSamplingPruner pruner(d, skmeans::PRUNER_INITIAL_THRESHOLD, config.seed);
             rotated_queries.resize(n_queries * d);
-            skmeans::ExecutorScope executor_scope(nullptr, THREADS);
-            pruner.Rotate(executor_scope.Get(), queries.data(), rotated_queries.data(), n_queries);
+            pruner.Rotate(queries.data(), rotated_queries.data(), n_queries);
             queries_p = rotated_queries.data();
         }
 

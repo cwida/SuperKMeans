@@ -74,13 +74,11 @@ test-command = "pytest {project}/python/tests -v"
 manylinux-x86_64-image = "manylinux_2_28"
 manylinux-aarch64-image = "manylinux_2_28"
 archs = ["auto64"]
-before-all = "bash {project}/scripts/ci/build_linux_deps.sh"
 environment = { SKMEANS_PORTABLE="ON", SKMEANS_SKIP_FFTW="ON" }
 
 [tool.cibuildwheel.macos]
 archs = ["auto"]
-before-all = "bash {project}/scripts/ci/build_macos_deps.sh"
-environment = { CC="clang", CXX="clang++", SKMEANS_PORTABLE="ON", SKMEANS_SKIP_FFTW="ON", OpenMP_ROOT="/usr/local" }
+environment = { CC="clang", CXX="clang++", SKMEANS_PORTABLE="ON", SKMEANS_SKIP_FFTW="ON" }
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]

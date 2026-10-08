@@ -20,6 +20,9 @@ class ParallelExecutor {
     virtual ~ParallelExecutor() = default;
     virtual size_t NumWorkers() const = 0;
     virtual void ParallelFor(size_t n, const std::function<void(size_t, size_t, size_t)>& fn) = 0;
+    /// No parallel work is expected soon: a pool may stop its threads (the next ParallelFor
+    /// restarts them). Does nothing by default.
+    virtual void ReleaseThreads() {}
 };
 
 class SerialExecutor final : public ParallelExecutor {
@@ -59,6 +62,38 @@ class ExecutorScope {
   private:
     ParallelExecutor* borrowed;
     std::unique_ptr<ParallelExecutor> owned;
+};
+
+/**
+ * @brief Base of the classes whose methods run on a bound executor (borrowed, not owned).
+ * Unbound, they run serially.
+ */
+class ExecutorHolder {
+  public:
+    void SetExecutor(ParallelExecutor* executor) { this->executor = executor; }
+
+  protected:
+    ParallelExecutor& GetExecutor() const {
+        static SerialExecutor serial;
+        return executor != nullptr ? *executor : serial;
+    }
+
+  private:
+    ParallelExecutor* executor = nullptr;
+};
+
+/**
+ * @brief One public call: releases the executor's threads when it ends.
+ */
+class ParallelSection {
+  public:
+    explicit ParallelSection(ParallelExecutor& executor) : executor(executor) {}
+    ~ParallelSection() { executor.ReleaseThreads(); }
+    ParallelSection(const ParallelSection&) = delete;
+    ParallelSection& operator=(const ParallelSection&) = delete;
+
+  private:
+    ParallelExecutor& executor;
 };
 
 } // namespace skmeans
