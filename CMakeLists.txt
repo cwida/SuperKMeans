@@ -258,15 +258,17 @@ target_compile_features(superkmeans INTERFACE cxx_std_17)
 
 # Architecture flags on the target (propagated to consumers)
 if(MSVC)
+    # NumKong enables its x86 kernels by MSVC version, not by /arch or target: x64 keeps the AVX2 ones
+    target_compile_definitions(superkmeans INTERFACE
+        NK_TARGET_SKYLAKE=0 NK_TARGET_ICELAKE=0 NK_TARGET_GENOA=0 NK_TARGET_SAPPHIRE=0
+        NK_TARGET_SAPPHIREAMX=0 NK_TARGET_GRANITEAMX=0 NK_TARGET_DIAMOND=0 NK_TARGET_TURIN=0
+        NK_TARGET_ALDER=0 NK_TARGET_SIERRA=0
+    )
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64|AMD64)")
         target_compile_options(superkmeans INTERFACE $<$<CONFIG:Release>:/arch:AVX2>)
-        # NumKong enables its x86 kernels by MSVC version, not by /arch: keep it to the AVX2 ones
-        target_compile_definitions(superkmeans INTERFACE
-            NK_TARGET_SKYLAKE=0 NK_TARGET_ICELAKE=0 NK_TARGET_GENOA=0 NK_TARGET_SAPPHIRE=0
-            NK_TARGET_SAPPHIREAMX=0 NK_TARGET_GRANITEAMX=0 NK_TARGET_DIAMOND=0 NK_TARGET_TURIN=0
-            NK_TARGET_ALDER=0 NK_TARGET_SIERRA=0
-        )
         message(STATUS "MSVC: /arch:AVX2")
+    else()
+        target_compile_definitions(superkmeans INTERFACE NK_TARGET_HASWELL=0)
     endif()
 elseif(EMSCRIPTEN)
     target_compile_options(superkmeans INTERFACE $<$<CONFIG:Release>:-O3 -msimd128>)
