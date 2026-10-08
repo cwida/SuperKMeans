@@ -112,6 +112,9 @@ extern "C" void skm_cblas_sgemm_newlapack(
 
 #if defined(__GNUC__) || defined(__clang__)
 #define SKM_PREFETCH(addr, rw, locality) __builtin_prefetch((addr), (rw), (locality))
+#elif defined(_MSC_VER) && defined(_M_ARM64)
+#include <intrin.h>
+#define SKM_PREFETCH(addr, rw, locality) __prefetch(addr)
 #elif defined(_MSC_VER)
 #include <xmmintrin.h>
 #define SKM_PREFETCH(addr, rw, locality)                                                           \

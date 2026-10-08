@@ -59,13 +59,14 @@ jobs:
           ./scripts/tidy_check.sh
 
   cpp-build-and-test:
-    name: cpp-build-and-test (${{ matrix.name }})
-    runs-on: ubuntu-24.04
+    name: cpp-build-and-test (${{ matrix.name }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        name: [default, openmp-executor, serial-executor, blas-gemm]
         include:
-          - name: default
           - name: openmp-executor
             cmake-args: -DSKMEANS_EXECUTOR=openmp
             packages: libomp-18-dev
