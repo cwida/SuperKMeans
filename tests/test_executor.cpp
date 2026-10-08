@@ -85,8 +85,19 @@ TEST(ExecutorTest, ExceptionReachesCaller) {
 }
 
 #if defined(SKMEANS_EXECUTOR_FORKUNION) && !defined(_WIN32)
+#if defined(__SANITIZE_THREAD__)
+#define SKM_TEST_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define SKM_TEST_TSAN 1
+#endif
+#endif
+
 // A child forked while the parent's pool is alive runs a ParallelFor to completion.
 TEST(ExecutorTest, ForkedChildRunsParallelFor) {
+#if defined(SKM_TEST_TSAN)
+    GTEST_SKIP() << "TSan does not support starting threads after a multi-threaded fork";
+#endif
     const size_t n = 1000;
     auto executor = skmeans::MakeDefaultExecutor(4);
     std::atomic<size_t> visited{0};
