@@ -108,7 +108,9 @@ Performance-critical — weigh every copy/allocation.
 - **GEMMs are single-threaded.** f32 assignment is one `ParallelFor` per pass over
   `MINI_BATCH_SIZE`-row (256) blocks of X; each worker runs `Sgemm` per Y tile, then argmin/pruning
   on the spot. Scratch: `BatchComputer::ScratchSize(executor)`. `EIGEN_DONT_PARALLELIZE` is set on
-  the target.
+  the target. The pruner's rotations (GEMM and DCT) run `ROTATION_BLOCK_SIZE`-row (2048) blocks;
+  the in-place `Rotate<true>` copies `ROTATION_BLOCK_SIZE × NumWorkers()` rows at a time through
+  scratch, so every worker gets a block.
 - **`SKM_VECTORIZE_LOOP`** (`common.h`) forces loop autovectorization (esp. FP reductions).
   Other macros there: `SKM_RESTRICT`, `SKM_ALWAYS_INLINE`, `SKM_NO_INLINE`,
   `SKM_LIKELY`/`SKM_UNLIKELY`, `SKM_PREFETCH`.

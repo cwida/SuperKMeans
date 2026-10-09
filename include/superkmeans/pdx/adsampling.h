@@ -182,7 +182,7 @@ class ADSamplingPruner : public ExecutorHolder {
      *
      * With IN_PLACE, callers pass the same pointer for vectors and out_buffer. The DCT path
      * already transforms out_buffer in place. The matrix path cannot alias its GEMM operands,
-     * so it walks blocks of INPLACE_ROTATION_BLOCK_ROWS through a scratch buffer.
+     * so it walks ROTATION_BLOCK_SIZE rows per worker at a time through a scratch buffer.
      *
      * @tparam IN_PLACE Whether vectors and out_buffer are the same buffer
      * @param vectors Input vectors (row-major, n × num_dimensions)
@@ -213,7 +213,8 @@ class ADSamplingPruner : public ExecutorHolder {
         }
 #endif
         if constexpr (IN_PLACE) {
-            const size_t n_block_rows = std::min<size_t>(INPLACE_ROTATION_BLOCK_ROWS, n);
+            const size_t n_block_rows =
+                std::min<size_t>(ROTATION_BLOCK_SIZE * GetExecutor().NumWorkers(), n);
             std::unique_ptr<float[]> tmp_block(new float[n_block_rows * num_dimensions]);
             for (size_t i = 0; i < n; i += n_block_rows) {
                 const size_t n_rows = std::min(n_block_rows, static_cast<size_t>(n) - i);
@@ -229,7 +230,7 @@ class ADSamplingPruner : public ExecutorHolder {
     /**
      * @brief Computes out = vectors * matrix^T. Operands must not alias.
      *
-     * Single-threaded GEMMs over blocks of MINI_BATCH_SIZE rows, run in parallel.
+     * Single-threaded GEMMs over blocks of ROTATION_BLOCK_SIZE rows, run in parallel.
      *
      * @param vectors Input vectors (row-major, n × num_dimensions)
      * @param out_buffer Output buffer for rotated vectors (n × num_dimensions)
@@ -249,12 +250,13 @@ class ADSamplingPruner : public ExecutorHolder {
         int lda = static_cast<int>(num_dimensions);
         int ldb = static_cast<int>(num_dimensions);
         int ldc = static_cast<int>(num_dimensions);
-        const size_t n_blocks = (static_cast<size_t>(n) + MINI_BATCH_SIZE - 1) / MINI_BATCH_SIZE;
+        const size_t n_blocks =
+            (static_cast<size_t>(n) + ROTATION_BLOCK_SIZE - 1) / ROTATION_BLOCK_SIZE;
         GetExecutor().ParallelFor(n_blocks, [&](size_t block_begin, size_t block_end, size_t) {
             for (size_t block = block_begin; block < block_end; ++block) {
-                const size_t row = block * MINI_BATCH_SIZE;
+                const size_t row = block * ROTATION_BLOCK_SIZE;
                 int n_rows =
-                    static_cast<int>(std::min(MINI_BATCH_SIZE, static_cast<size_t>(n) - row));
+                    static_cast<int>(std::min(ROTATION_BLOCK_SIZE, static_cast<size_t>(n) - row));
                 Sgemm(
                     trans_a,
                     trans_b,
@@ -329,12 +331,13 @@ class ADSamplingPruner : public ExecutorHolder {
         int lda = static_cast<int>(num_dimensions);
         int ldb = static_cast<int>(num_dimensions);
         int ldc = static_cast<int>(num_dimensions);
-        const size_t n_blocks = (static_cast<size_t>(n) + MINI_BATCH_SIZE - 1) / MINI_BATCH_SIZE;
+        const size_t n_blocks =
+            (static_cast<size_t>(n) + ROTATION_BLOCK_SIZE - 1) / ROTATION_BLOCK_SIZE;
         GetExecutor().ParallelFor(n_blocks, [&](size_t block_begin, size_t block_end, size_t) {
             for (size_t block = block_begin; block < block_end; ++block) {
-                const size_t row = block * MINI_BATCH_SIZE;
+                const size_t row = block * ROTATION_BLOCK_SIZE;
                 int n_rows =
-                    static_cast<int>(std::min(MINI_BATCH_SIZE, static_cast<size_t>(n) - row));
+                    static_cast<int>(std::min(ROTATION_BLOCK_SIZE, static_cast<size_t>(n) - row));
                 Sgemm(
                     trans_a,
                     trans_b,
@@ -365,7 +368,7 @@ class ADSamplingPruner : public ExecutorHolder {
      *
      * One single-threaded plan per block size, made on scratch (FFTW_MEASURE overwrites the
      * arrays it plans on) by the calling thread (the planner is not thread-safe), executed on
-     * blocks of MINI_BATCH_SIZE rows in parallel (fftwf_execute_r2r is thread-safe).
+     * blocks of ROTATION_BLOCK_SIZE rows in parallel (fftwf_execute_r2r is thread-safe).
      */
     void ParallelDCT(fftw_r2r_kind kind, float* out, size_t n) const {
         if (n == 0) {
@@ -374,7 +377,7 @@ class ADSamplingPruner : public ExecutorHolder {
         const int n0 = static_cast<int>(num_dimensions);
         const unsigned flag =
             (IsPowerOf2(num_dimensions) ? FFTW_ESTIMATE : FFTW_MEASURE) | FFTW_UNALIGNED;
-        const size_t block_rows = std::min(MINI_BATCH_SIZE, n);
+        const size_t block_rows = std::min(ROTATION_BLOCK_SIZE, n);
         const size_t tail_rows = n % block_rows;
         std::unique_ptr<float[]> scratch(new float[block_rows * num_dimensions]);
         auto make_plan = [&](size_t rows) {

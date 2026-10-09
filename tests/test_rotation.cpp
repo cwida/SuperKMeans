@@ -484,7 +484,7 @@ TEST_F(RotationTest, RotateInPlaceMatchesOutOfPlace_MatrixPath) {
 }
 
 TEST_F(RotationTest, RotateInPlaceMatchesOutOfPlace_MatrixPathMultipleBlocks) {
-    ExpectInPlaceRotationMatchesOutOfPlace(skmeans::INPLACE_ROTATION_BLOCK_ROWS * 2 + 137, 128);
+    ExpectInPlaceRotationMatchesOutOfPlace(skmeans::ROTATION_BLOCK_SIZE * 2 + 137, 128);
 }
 
 TEST_F(RotationTest, RotateInPlaceMatchesOutOfPlace_DCTPath) {

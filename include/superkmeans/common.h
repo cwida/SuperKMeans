@@ -221,7 +221,6 @@ inline void Sgemm(
 static inline constexpr float PROPORTION_HORIZONTAL_DIM = 0.75;
 static inline constexpr size_t D_THRESHOLD_FOR_DCT_ROTATION = 512;
 static inline constexpr size_t H_DIM_SIZE = 64;
-static inline constexpr size_t INPLACE_ROTATION_BLOCK_ROWS = 4096;
 
 // Below 32, GEMM stops accelerating
 static inline constexpr uint32_t MIN_PARTIAL_D = 32;
@@ -242,6 +241,10 @@ static inline constexpr size_t Y_BATCH_SIZE = 1024;
 // Rows of X per single-threaded GEMM call in the assignment pass (each worker runs its own).
 // Measured as the best value on AMD Zen 5, Intel Granite Rapids, Apple M4 Pro and AWS Graviton4.
 static inline constexpr size_t MINI_BATCH_SIZE = 256;
+
+// Rows per single-threaded rotation GEMM or DCT call (each worker runs its own).
+// Measured on AMD Zen 5, Intel Granite Rapids, Apple M4 Pro and AWS Graviton4.
+static inline constexpr size_t ROTATION_BLOCK_SIZE = 2048;
 
 static inline constexpr size_t VECTOR_CHUNK_SIZE = Y_BATCH_SIZE;
 
