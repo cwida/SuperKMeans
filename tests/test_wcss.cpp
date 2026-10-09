@@ -8,7 +8,6 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
-#include <omp.h>
 #include <tuple>
 #include <vector>
 
@@ -66,8 +65,6 @@ const std::map<std::pair<size_t, size_t>, float> GROUND_TRUTH = {
 
 class WCSSTest : public ::testing::TestWithParam<std::tuple<size_t, size_t>> {
   protected:
-    void SetUp() override { omp_set_num_threads(1); }
-
     static constexpr size_t N_SAMPLES = 10000;
     static constexpr size_t MAX_D = 1024;
     static constexpr unsigned int SEED = 42;
@@ -314,14 +311,12 @@ INSTANTIATE_TEST_SUITE_P(
 //  IVF-recall ground truth (test_data.bin, mxbai 10k x 1024)
 
 TEST(RecallGroundTruthTest, F32_MatchesGroundTruth) {
-    omp_set_num_threads(1);
     float recall = skm_test::ClusteringRecall<skmeans::Quantization::f32>(CMAKE_SOURCE_DIR
                                                                           "/tests/test_data.bin");
     EXPECT_GE(recall, skm_test::RECALL_GROUND_TRUTH.at("f32") - skm_test::RECALL_TOL);
 }
 
 TEST(RecallGroundTruthTest, F32_TrainInPlace_RecallMatchesTrain) {
-    omp_set_num_threads(1);
     const char* path = CMAKE_SOURCE_DIR "/tests/test_data.bin";
     float recall = skm_test::ClusteringRecall<skmeans::Quantization::f32>(path);
     float recall_in_place = skm_test::ClusteringRecall<skmeans::Quantization::f32, true>(path);

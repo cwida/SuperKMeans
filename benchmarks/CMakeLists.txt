@@ -50,10 +50,11 @@ function(skmeans_add_benchmark name source)
     target_compile_definitions(${name} PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 endfunction()
 
-# Helper: add a FAISS benchmark executable
+# Helper: add a FAISS benchmark executable (they set FAISS's OpenMP threads)
+find_package(OpenMP REQUIRED)
 function(skmeans_add_faiss_benchmark name source)
     add_executable(${name} ${source})
-    target_link_libraries(${name} PRIVATE ${FAISS_COMMON_LIBS} ${BENCH_COMMON_LIBS})
+    target_link_libraries(${name} PRIVATE ${FAISS_COMMON_LIBS} ${BENCH_COMMON_LIBS} OpenMP::OpenMP_CXX)
     target_compile_definitions(${name} PRIVATE CMAKE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 endfunction()
 

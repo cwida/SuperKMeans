@@ -13,11 +13,14 @@
 #include <random>
 #include <sstream>
 #include <string>
-#include <sys/resource.h>
-#include <sys/stat.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#if !defined(_WIN32)
+#include <sys/resource.h>
+#include <sys/stat.h>
+#endif
 
 #include "superkmeans/common.h"
 #include "superkmeans/distance_computers/batch_computers.h"
@@ -60,12 +63,16 @@ inline std::string GetGroundTruthPath(const std::string& dataset) {
  * this under-report; "peak memory footprint" from /usr/bin/time -l is the reliable figure there.
  */
 inline double PeakRSSGiB() {
+#if defined(_WIN32)
+    return 0.0;
+#else
     rusage usage{};
     getrusage(RUSAGE_SELF, &usage);
 #ifdef __APPLE__
     return static_cast<double>(usage.ru_maxrss) / (1024.0 * 1024.0 * 1024.0);
 #else
     return static_cast<double>(usage.ru_maxrss) / (1024.0 * 1024.0);
+#endif
 #endif
 }
 
@@ -408,6 +415,10 @@ inline void PrintRecallResults(
  * @brief Create directory recursively if it doesn't exist.
  */
 inline bool CreateDirectoryRecursive(const std::string& path) {
+#if defined(_WIN32)
+    (void) path;
+    return false;
+#else
     std::string current_path;
     std::istringstream path_stream(path);
     std::string segment;
@@ -425,6 +436,7 @@ inline bool CreateDirectoryRecursive(const std::string& path) {
         }
     }
     return true;
+#endif
 }
 
 /**
@@ -505,7 +517,11 @@ inline void WriteResultsToCsv(
     auto now = std::chrono::system_clock::now();
     auto now_time_t = std::chrono::system_clock::to_time_t(now);
     std::tm now_tm;
+#if defined(_WIN32)
+    localtime_s(&now_tm, &now_time_t);
+#else
     localtime_r(&now_time_t, &now_tm);
+#endif
     char timestamp[32];
     std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &now_tm);
     csv_file << timestamp << "," << algorithm << "," << dataset << "," << n_iters << ","
@@ -689,7 +705,11 @@ inline void WriteResultsToCsvV2(
     auto now = std::chrono::system_clock::now();
     auto now_time_t = std::chrono::system_clock::to_time_t(now);
     std::tm now_tm;
+#if defined(_WIN32)
+    localtime_s(&now_tm, &now_time_t);
+#else
     localtime_r(&now_time_t, &now_tm);
+#endif
     char timestamp[32];
     std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &now_tm);
 
@@ -840,9 +860,11 @@ inline void ComputeAndStoreTopkDistances(
     // Allocate outputs
     std::vector<uint32_t> out_knn(sample_size * k);
     std::vector<float> out_distances(sample_size * k);
-    std::unique_ptr<float[]> tmp_buf(new float[skmeans::X_BATCH_SIZE * skmeans::Y_BATCH_SIZE]);
+    auto executor = skmeans::MakeDefaultExecutor(0);
+    std::unique_ptr<float[]> tmp_buf(new float[batch_computer::ScratchSize(*executor)]);
 
     batch_computer::FindKNearestNeighbors(
+        *executor,
         sampled.data(),
         centroids,
         sample_size,

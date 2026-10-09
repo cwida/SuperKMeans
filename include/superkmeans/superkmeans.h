@@ -6,12 +6,12 @@
 #include <cmath>
 #include <iomanip>
 #include <numeric>
-#include <omp.h>
 #include <random>
 
 #include "superkmeans/common.h"
 #include "superkmeans/distance_computers/base_computers.h"
 #include "superkmeans/distance_computers/batch_computers.h"
+#include "superkmeans/executor.h"
 #include "superkmeans/pdx/adsampling.h"
 #include "superkmeans/pdx/pdxearch.h"
 #include "superkmeans/pdx/utils.h"
@@ -36,7 +36,7 @@ struct SuperKMeansConfig {
     float sampling_fraction = 0.3f; // Fraction of data to sample (0.0 to 1.0)
     uint32_t max_points_per_cluster =
         256;                    // Maximum number of points per cluster to sample (FAISS style)
-    uint32_t n_threads = 0;     // Number of CPU threads (0 = max)
+    uint32_t n_threads = 0;     // Threads of the default executor (0 = max); unused with executor
     uint32_t seed = 42;         // Random seed for reproducibility
     bool use_blas_only = false; // Use BLAS-only computation for all iterations
 
@@ -63,6 +63,9 @@ struct SuperKMeansConfig {
     bool data_already_rotated = false;     // Whether input data is already rotated (skip rotation)
     bool quantized_centroid_update = true; // Accumulate centroids in quantized domain (u8 only)
     bool full_precision_final_centroids = false; // Recompute final centroids from raw float data
+
+    // Runs the parallel loops (not owned). nullptr: SuperKMeans creates a default one of n_threads.
+    ParallelExecutor* executor = nullptr;
 };
 
 /**
@@ -183,7 +186,7 @@ struct ClusterBalanceStats {
 };
 
 template <Quantization q = Quantization::f32>
-class SuperKMeans {
+class SuperKMeans : protected ExecutorHolder {
     static_assert(q != Quantization::sq4, "sq4 is not implemented as a quantizer");
 
   public:
@@ -229,9 +232,15 @@ class SuperKMeans {
                 std::to_string(dimensionality)
             );
         }
-        n_threads = (config.n_threads == 0) ? omp_get_max_threads() : config.n_threads;
-        g_n_threads = n_threads;
-        pruner = std::make_unique<pruner_t>(dimensionality, PRUNER_INITIAL_THRESHOLD, config.seed);
+        if (config.executor == nullptr) {
+            owned_executor = MakeDefaultExecutor(config.n_threads);
+        }
+        SetExecutor(config.executor != nullptr ? config.executor : owned_executor.get());
+        f32_quantizer.SetExecutor(&GetExecutor());
+        pruner = std::make_unique<pruner_t>(
+            dimensionality, PRUNER_INITIAL_THRESHOLD, config.seed, config.data_already_rotated
+        );
+        pruner->SetExecutor(&GetExecutor());
 
         // If data is already rotated, we must not unrotate output centroids
         if (this->config.data_already_rotated) {
@@ -280,6 +289,7 @@ class SuperKMeans {
                 "Queries must be provided if n_queries > 0 and sample_queries is false"
             );
         }
+        ParallelSection parallel_section(GetExecutor());
         const float* SKM_RESTRICT data_p = data;
         n_samples = GetNVectorsToSample(n, n_clusters);
         n_train = n;
@@ -477,17 +487,16 @@ class SuperKMeans {
         if constexpr (q != Quantization::f32) {
             if (config.quantized_centroid_update && config.full_precision_final_centroids) {
                 ResetCentroids(n_clusters);
-                F32Quantizer().UpdateCentroids(
+                f32_quantizer.UpdateCentroids(
                     data_to_cluster,
                     assignments.get(),
                     horizontal_centroids.get(),
                     cluster_sizes.get(),
                     n_samples,
                     n_clusters,
-                    d,
-                    n_threads
+                    d
                 );
-                F32Quantizer().FinalizeCentroids(
+                f32_quantizer.FinalizeCentroids(
                     horizontal_centroids.get(), cluster_sizes.get(), n_clusters, d
                 );
                 if (config.angular) {
@@ -548,6 +557,7 @@ class SuperKMeans {
         const size_t n_centroids
     ) {
         SKM_PROFILE_SCOPE("assign");
+        ParallelSection parallel_section(GetExecutor());
         using f32_batch_computer = BatchComputer<DistanceFunction::l2, Quantization::f32>;
         EnsureTmpDistancesBuffer();
 
@@ -566,6 +576,7 @@ class SuperKMeans {
         c_norms.noalias() = centroids_mat.rowwise().squaredNorm();
 
         f32_batch_computer::FindNearestNeighbor(
+            GetExecutor(),
             vectors,
             centroids,
             n_vectors,
@@ -602,6 +613,7 @@ class SuperKMeans {
         const size_t n_centroids
     ) {
         SKM_PROFILE_SCOPE("quantized_assign");
+        ParallelSection parallel_section(GetExecutor());
         EnsureTmpDistancesBuffer();
 
         auto local_quantizer = CreateQuantizer();
@@ -685,6 +697,7 @@ class SuperKMeans {
                 "(n_vectors must equal the training set size)"
             );
         }
+        ParallelSection parallel_section(GetExecutor());
 
         if constexpr (q != Quantization::f32) {
             if (config.sampling_fraction == 1.0f && quantizer->SupportsPruning() &&
@@ -713,6 +726,7 @@ class SuperKMeans {
                     );
                 }
 
+                EnsureTmpDistancesBuffer();
                 quantizer->FindNearestNeighborWithPruning(
                     quantized_data.get(),
                     quantized_centroids.get(),
@@ -725,7 +739,8 @@ class SuperKMeans {
                     result_distances.data(),
                     pdx_wrapper,
                     partial_d,
-                    not_pruned_counts.data()
+                    not_pruned_counts.data(),
+                    tmp_distances_buffer.get()
                 );
 
                 return result_assignments;
@@ -804,6 +819,7 @@ class SuperKMeans {
 
             if (config.sampling_fraction == 1.0f) {
                 quantizer->CacheDataPartialNorms(data_p, n_vectors, d, partial_d);
+                EnsureTmpDistancesBuffer();
                 quantizer->FindNearestNeighborWithPruning(
                     data_p,
                     horizontal_centroids.get(),
@@ -816,7 +832,8 @@ class SuperKMeans {
                     distances.get(),
                     pdx_centroids,
                     partial_d,
-                    not_pruned_counts.get()
+                    not_pruned_counts.get(),
+                    tmp_distances_buffer.get()
                 );
                 memcpy(result_assignments.data(), assignments.get(), n_vectors * sizeof(uint32_t));
                 return result_assignments;
@@ -835,6 +852,7 @@ class SuperKMeans {
                 }
 
                 quantizer->CacheDataPartialNorms(data_p, n_vectors, d, partial_d);
+                EnsureTmpDistancesBuffer();
                 quantizer->FindNearestNeighborWithPruning(
                     data_p,
                     horizontal_centroids.get(),
@@ -847,7 +865,8 @@ class SuperKMeans {
                     distances.get(),
                     pdx_centroids,
                     partial_d,
-                    not_pruned_counts.get()
+                    not_pruned_counts.get(),
+                    tmp_distances_buffer.get()
                 );
                 return result_assignments;
             } else {
@@ -864,6 +883,7 @@ class SuperKMeans {
                 tmp_config.seed = config.seed;
                 tmp_config.angular = config.angular;
                 tmp_config.data_already_rotated = state.training_data_rotated;
+                tmp_config.executor = &GetExecutor();
                 auto new_n_centroids = static_cast<size_t>(std::sqrt(n_centroids));
                 SuperKMeans tmp_kmeans(new_n_centroids, d, tmp_config);
                 auto meso_centroids = tmp_kmeans.Train(centroids, n_centroids);
@@ -889,6 +909,7 @@ class SuperKMeans {
                 }
 
                 quantizer->CacheDataPartialNorms(data_p, n_vectors, d, partial_d);
+                EnsureTmpDistancesBuffer();
                 quantizer->FindNearestNeighborWithPruning(
                     data_p,
                     horizontal_centroids.get(),
@@ -901,7 +922,8 @@ class SuperKMeans {
                     distances.get(),
                     pdx_centroids,
                     partial_d,
-                    not_pruned_counts.get()
+                    not_pruned_counts.get(),
+                    tmp_distances_buffer.get()
                 );
                 return result_assignments;
             }
@@ -1068,6 +1090,7 @@ class SuperKMeans {
      * @param assignments Cluster assignment for each vector [n_vectors]
      * @param n_vectors Number of data vectors
      * @param d Dimensionality
+     * @param executor Runs the loop; nullptr uses a default one on all cores
      * @return WCSS (sum of squared L2 distances to assigned centroids)
      */
     [[nodiscard]] static double ComputeWCSS(
@@ -1075,17 +1098,22 @@ class SuperKMeans {
         const float* SKM_RESTRICT centroids,
         const uint32_t* assignments,
         size_t n_vectors,
-        size_t d
+        size_t d,
+        ParallelExecutor* executor = nullptr
     ) {
         using f32_l2 = DistanceComputer<DistanceFunction::l2, Quantization::f32>;
-        double wcss = 0.0;
-#pragma omp parallel for reduction(+ : wcss)
-        for (size_t i = 0; i < n_vectors; ++i) {
-            wcss += static_cast<double>(
-                f32_l2::Horizontal(data + i * d, centroids + assignments[i] * d, d)
-            );
-        }
-        return wcss;
+        ExecutorScope executor_scope(executor, 0);
+        std::vector<double> worker_wcss(executor_scope.Get().NumWorkers(), 0.0);
+        executor_scope.Get().ParallelFor(n_vectors, [&](size_t begin, size_t end, size_t worker) {
+            double local_wcss = 0.0;
+            for (size_t i = begin; i < end; ++i) {
+                local_wcss += static_cast<double>(
+                    f32_l2::Horizontal(data + i * d, centroids + assignments[i] * d, d)
+                );
+            }
+            worker_wcss[worker] = local_wcss;
+        });
+        return std::accumulate(worker_wcss.begin(), worker_wcss.end(), 0.0);
     }
 
   protected:
@@ -1171,6 +1199,7 @@ class SuperKMeans {
             quantizer->CacheCentroidPartialNorms(
                 quantized_centroids.get(), n_clusters, d, partial_d
             );
+            EnsureTmpDistancesBuffer();
             quantizer->FindNearestNeighborWithPruning(
                 encoded_data_p,
                 quantized_centroids.get(),
@@ -1183,7 +1212,8 @@ class SuperKMeans {
                 distances.get(),
                 centroids_pdx_wrapper,
                 partial_d,
-                not_pruned_counts
+                not_pruned_counts,
+                tmp_distances_buffer.get()
             );
             ResetCentroids(n_clusters);
             quantizer->ResetCentroidAccumulators(n_clusters, d);
@@ -1197,19 +1227,17 @@ class SuperKMeans {
                 cluster_sizes.get(),
                 n_samples,
                 n_clusters,
-                d,
-                n_threads
+                d
             );
         } else {
-            F32Quantizer().UpdateCentroids(
+            f32_quantizer.UpdateCentroids(
                 data_to_cluster,
                 assignments.get(),
                 horizontal_centroids.get(),
                 cluster_sizes.get(),
                 n_samples,
                 n_clusters,
-                d,
-                n_threads
+                d
             );
         }
 
@@ -1331,7 +1359,7 @@ class SuperKMeans {
                     horizontal_centroids.get(), cluster_sizes.get(), n_clusters, d
                 );
             } else {
-                F32Quantizer().FinalizeCentroids(
+                f32_quantizer.FinalizeCentroids(
                     horizontal_centroids.get(), cluster_sizes.get(), n_clusters, d
                 );
             }
@@ -1387,14 +1415,18 @@ class SuperKMeans {
      */
     void ComputeShift(const size_t n_clusters) {
         SKM_PROFILE_SCOPE("shift");
+        ParallelExecutor& executor = GetExecutor();
         Eigen::Map<const MatrixR> new_mat(horizontal_centroids.get(), n_clusters, d);
         Eigen::Map<const MatrixR> prev_mat(prev_centroids.get(), n_clusters, d);
-        float total_shift = 0.0f;
-#pragma omp parallel for reduction(+ : total_shift) if (n_threads > 1) num_threads(n_threads)
-        for (size_t i = 0; i < n_clusters; ++i) {
-            total_shift += (new_mat.row(i) - prev_mat.row(i)).squaredNorm();
-        }
-        shift = total_shift;
+        std::vector<float> worker_shift(executor.NumWorkers(), 0.0f);
+        executor.ParallelFor(n_clusters, [&](size_t begin, size_t end, size_t worker) {
+            float local_shift = 0.0f;
+            for (size_t i = begin; i < end; ++i) {
+                local_shift += (new_mat.row(i) - prev_mat.row(i)).squaredNorm();
+            }
+            worker_shift[worker] = local_shift;
+        });
+        shift = std::accumulate(worker_shift.begin(), worker_shift.end(), 0.0f);
     }
 
     /**
@@ -1416,6 +1448,7 @@ class SuperKMeans {
         std::vector<distance_t> gt_query_norms(n_queries);
         GetL2NormsRowMajor(queries, n_queries, gt_query_norms.data());
         batch_computer::FindKNearestNeighbors(
+            GetExecutor(),
             queries,
             data,
             n_queries,
@@ -1444,6 +1477,7 @@ class SuperKMeans {
     float ComputeRecall(const float* SKM_RESTRICT queries, const size_t n_queries) {
         SKM_PROFILE_SCOPE("recall");
         batch_computer::FindKNearestNeighbors(
+            GetExecutor(),
             queries,
             horizontal_centroids.get(),
             n_queries,
@@ -1573,13 +1607,22 @@ class SuperKMeans {
     }
 
     void EnsureTmpDistancesBuffer() {
-        if (!tmp_distances_buffer) {
-            tmp_distances_buffer.reset(new distance_t[X_BATCH_SIZE * Y_BATCH_SIZE]);
+        size_t needed =
+            BatchComputer<DistanceFunction::l2, Quantization::f32>::ScratchSize(GetExecutor());
+        if constexpr (q != Quantization::f32) {
+            // The quantizers' assignment tiles are X_BATCH_SIZE x Y_BATCH_SIZE
+            needed = std::max(needed, X_BATCH_SIZE * Y_BATCH_SIZE);
+        }
+        if (needed > tmp_distances_buffer_size) {
+            tmp_distances_buffer.reset(new distance_t[needed]);
+            tmp_distances_buffer_size = needed;
         }
     }
 
     std::unique_ptr<skmeans_quantizer_t<q>> CreateQuantizer() const {
-        return std::make_unique<skmeans_quantizer_t<q>>();
+        auto created = std::make_unique<skmeans_quantizer_t<q>>();
+        created->SetExecutor(&GetExecutor());
+        return created;
     }
 
     /**
@@ -1665,7 +1708,7 @@ class SuperKMeans {
         for (size_t i = 0; i < n_samples; ++i) {
             avg_not_pruned_pct += static_cast<float>(not_pruned_counts[i]);
         }
-        avg_not_pruned_pct /= static_cast<float>(n_samples * n_y);
+        avg_not_pruned_pct /= static_cast<float>(n_samples) * static_cast<float>(n_y);
 
         uint32_t old_partial_d = partial_d;
         if (avg_not_pruned_pct > config.max_not_pruned_pct) {
@@ -1785,18 +1828,19 @@ class SuperKMeans {
      */
     void PostprocessCentroids(const size_t n_clusters) {
         auto horizontal_centroids_p = horizontal_centroids.get();
-#pragma omp parallel for if (n_threads > 1) num_threads(n_threads)
-        for (size_t i = 0; i < n_clusters; ++i) {
-            auto horizontal_centroids_p_i = horizontal_centroids_p + i * d;
-            float sum = 0.0f;
-            for (size_t j = 0; j < d; ++j) {
-                sum += horizontal_centroids_p_i[j] * horizontal_centroids_p_i[j];
+        GetExecutor().ParallelFor(n_clusters, [&](size_t begin, size_t end, size_t) {
+            for (size_t i = begin; i < end; ++i) {
+                auto horizontal_centroids_p_i = horizontal_centroids_p + i * d;
+                float sum = 0.0f;
+                for (size_t j = 0; j < d; ++j) {
+                    sum += horizontal_centroids_p_i[j] * horizontal_centroids_p_i[j];
+                }
+                float norm = 1.0f / std::sqrt(sum);
+                for (size_t j = 0; j < d; ++j) {
+                    horizontal_centroids_p_i[j] *= norm;
+                }
             }
-            float norm = 1.0f / std::sqrt(sum);
-            for (size_t j = 0; j < d; ++j) {
-                horizontal_centroids_p_i[j] *= norm;
-            }
-        }
+        });
     }
 
     /**
@@ -1849,6 +1893,7 @@ class SuperKMeans {
         const size_t n_samples,
         const bool rotate = true
     ) {
+        ParallelExecutor& executor = GetExecutor();
         // Intermediate buffer needed only when both sampling and rotating
         // (we have not yet implemented rotation in-place)
         std::unique_ptr<float[]> samples_tmp;
@@ -1868,25 +1913,27 @@ class SuperKMeans {
             if (rotate) {
                 samples_tmp.reset(new float[n_samples * d]);
                 // Need intermediate buffer: sample first, then rotate
-#pragma omp parallel for if (n_threads > 1) num_threads(n_threads)
-                for (size_t i = 0; i < n_samples; ++i) {
-                    memcpy(
-                        static_cast<void*>(samples_tmp.get() + i * d),
-                        static_cast<const void*>(data + sampled_indices[i] * d),
-                        sizeof(float) * d
-                    );
-                }
+                executor.ParallelFor(n_samples, [&](size_t begin, size_t end, size_t) {
+                    for (size_t i = begin; i < end; ++i) {
+                        memcpy(
+                            static_cast<void*>(samples_tmp.get() + i * d),
+                            static_cast<const void*>(data + sampled_indices[i] * d),
+                            sizeof(float) * d
+                        );
+                    }
+                });
                 src_data = samples_tmp.get();
             } else {
                 // No rotation: copy directly into output buffer
-#pragma omp parallel for if (n_threads > 1) num_threads(n_threads)
-                for (size_t i = 0; i < n_samples; ++i) {
-                    memcpy(
-                        static_cast<void*>(out + i * d),
-                        static_cast<const void*>(data + sampled_indices[i] * d),
-                        sizeof(float) * d
-                    );
-                }
+                executor.ParallelFor(n_samples, [&](size_t begin, size_t end, size_t) {
+                    for (size_t i = begin; i < end; ++i) {
+                        memcpy(
+                            static_cast<void*>(out + i * d),
+                            static_cast<const void*>(data + sampled_indices[i] * d),
+                            sizeof(float) * d
+                        );
+                    }
+                });
                 return out;
             }
         }
@@ -1906,7 +1953,6 @@ class SuperKMeans {
     const size_t n_clusters;
     SuperKMeansConfig config;
 
-    uint32_t n_threads;
     size_t n_samples = 0;
     size_t n_train = 0;
     uint32_t partial_d = 0; // d'
@@ -1922,6 +1968,7 @@ class SuperKMeans {
     float recall = 0.0f;
 
     std::unique_ptr<pruner_t> pruner;
+    std::unique_ptr<ParallelExecutor> owned_executor; // the default, when config.executor is null
 
     // Centroids data (unoptimized space)
     // TODO(@lkuffo, high): 3 copies of the centroids? Can we do better?
@@ -1941,7 +1988,8 @@ class SuperKMeans {
 
     // Quantization state
     std::unique_ptr<skmeans_quantizer_t<q>> quantizer;
-    size_t code_size = 0; // bytes per encoded vector (= d for SQ8, variable for RaBitQ)
+    F32Quantizer f32_quantizer; // float centroid updates (quantized_centroid_update off)
+    size_t code_size = 0;       // bytes per encoded vector (= d for SQ8, variable for RaBitQ)
     std::unique_ptr<vector_value_t[]> quantized_data;
     std::unique_ptr<vector_value_t[]> quantized_centroids;
     std::unique_ptr<vector_value_t[]> pdxified_quantized_centroids;
@@ -1952,6 +2000,7 @@ class SuperKMeans {
     std::unique_ptr<distance_t[]> gt_distances;
     std::unique_ptr<distance_t[]> query_norms;
     std::unique_ptr<distance_t[]> tmp_distances_buffer;
+    size_t tmp_distances_buffer_size = 0;
     std::unique_ptr<uint32_t[]> promising_centroids;
     std::unique_ptr<distance_t[]> recall_distances;
 

@@ -21,8 +21,10 @@
 - **Faster clustering** of vector embeddings (Cohere, OpenAI, MXBAI, CLIP, MiniLM) than FAISS.
 - Index 10M embeddings of 1024 dimensions [**in less than a minute**](https://www.lkuffo.com/superkmeans/) on a single CPU.
 - Faster **without compromising clustering quality**.
-- Support for [**quantized clustering**](#quantized-clustering) (8-bit Scalar Quantization, LVQ, and RabitQ)
+- Support for [**quantized clustering**](#quantized-clustering) (8-bit Scalar Quantization, LVQ, and RaBitQ)
 - Efficient on **CPUs** (ARM and x86) and **GPUs**.
+- **Lightweight**: no external dependencies.
+- **Portable**: Linux (x86, ARM), macOS, Windows (x86, ARM), Wasm.
 
 ## Our secret sauce
 - Carefully interleaving GEMM routines and pruning kernels that **prune dimensions** efficiently
@@ -115,11 +117,8 @@ Check [our wiki](https://github.com/cwida/SuperKMeans/wiki/Documentation) for ad
 pip install superkmeans
 ```
 
-> [!TIP]
-> For maximum performance, we recommend compiling from source.
-
 ### C++
-As a header-only library with CMake `FetchContent`:
+With CMake `FetchContent`. There are no dependencies to install: CMake fetches and builds everything it needs.
 
 ```cmake
 FetchContent_Declare(
@@ -138,14 +137,11 @@ target_link_libraries(myapp PRIVATE superkmeans)
 ### Prerequisites
 - Clang 17 or GCC 13
 - CMake 3.26
-- OpenMP
-- A BLAS implementation
 - Python 3 (only for Python bindings)
 
 ```bash
 git clone https://github.com/cwida/SuperKMeans.git
 cd SuperKMeans
-git submodule update --init
 pip install .
 
 # Run plug-and-play example
@@ -164,13 +160,10 @@ python ./examples/simple_clustering.py 200000 1536 1000
 ### Prerequisites
 - Clang 17 or GCC 13
 - CMake 3.26
-- OpenMP
-- A BLAS implementation
 
 ```bash
 git clone https://github.com/cwida/SuperKMeans.git
 cd SuperKMeans
-git submodule update --init
 
 # Set proper path to clang if needed
 export CXX="/usr/bin/clang++-18" 
@@ -191,9 +184,6 @@ cd examples
 
 For a more comprehensive installation and compilation guide, check [INSTALL.md](./INSTALL.md).
 
-## Getting the Best Performance
-Check [INSTALL.md](./INSTALL.md).
-
 ## Roadmap
 We are actively developing Super K-Means and accepting contributions! Check [CONTRIBUTING.md](./CONTRIBUTING.md).
 
@@ -201,15 +191,20 @@ We are actively developing Super K-Means and accepting contributions! Check [CON
 ## Benchmarking
 To run our benchmark suite in C++, refer to [BENCHMARKING.md](./BENCHMARKING.md).
 
+## Multithreading
+SuperKMeans uses [ForkUnion](https://github.com/ashvardanian/ForkUnion) for threading (also when doing GEMM). You can plug in OpenMP or your own threading library by inheriting our [ParallelExecutor class](./include/superkmeans/executor.h) and passing it in our config.
+
+## BLAS
+An efficient GEMM is key for performance. We use [Eigen](https://gitlab.com/libeigen/eigen) by default. In our benchmarks, Eigen is on par with OpenBLAS and BLIS, and 5–10% slower than Intel MKL end to end. You can also use your own BLAS (see [INSTALL.md](INSTALL.md#using-an-external-blas-optional)). However, it **must be single-threaded and thread-safe**.
+
 ## Adoption
 SuperKMeans' ideas have been adopted in:
 - [FAISS](https://github.com/facebookresearch/faiss/pull/5168)
-- [Zilliz](https://github.com/zilliztech/knowhere/pull/1635)
+- [Zilliz](https://github.com/zilliztech/knowhere/pull/1783)
 - [Elastic](https://github.com/elastic/elasticsearch/pull/144599)
-- [ParadeDB](https://github.com/paradedb/superkmeans-rs)
-
-## Other implementations of SuperKMeans
-- [Rust](https://github.com/paradedb/superkmeans-rs)
+- [ParadeDB](https://github.com/paradedb/superkmeans-rs) |  [Rust implementation](https://github.com/paradedb/superkmeans-rs)
+- [RaBitQ-Library](https://github.com/VectorDB-NTU/RaBitQ-Library/pull/120)
+- [DuckIR](https://github.com/Noorts/PDXearch): DuckDB extension for vector search
 
 ## Research behind SuperKMeans
 

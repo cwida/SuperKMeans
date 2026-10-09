@@ -47,8 +47,12 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
     )
         : SuperKMeans<q>(n_clusters, dimensionality, config), hierarchical_config(config) {
         this->pruner = std::make_unique<pruner_t>(
-            dimensionality, HIERARCHICAL_PRUNER_INITIAL_THRESHOLD, this->config.seed
+            dimensionality,
+            HIERARCHICAL_PRUNER_INITIAL_THRESHOLD,
+            this->config.seed,
+            this->config.data_already_rotated
         );
+        this->pruner->SetExecutor(&this->GetExecutor());
         SKMEANS_ENSURE_POSITIVE(config.iters_mesoclustering);
         SKMEANS_ENSURE_POSITIVE(config.iters_fineclustering);
 
@@ -107,6 +111,7 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
                 "The number of points should be at least as large as the number of clusters"
             );
         }
+        ParallelSection parallel_section(this->GetExecutor());
         const float* SKM_RESTRICT data_p = data;
         this->n_samples = this->GetNVectorsToSample(n, this->n_clusters);
         this->n_train = n;
@@ -615,17 +620,16 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
             if (this->hierarchical_config.quantized_centroid_update &&
                 this->hierarchical_config.full_precision_final_centroids) {
                 this->ResetCentroids(this->n_clusters);
-                F32Quantizer().UpdateCentroids(
+                this->f32_quantizer.UpdateCentroids(
                     data_to_cluster,
                     this->assignments.get(),
                     this->horizontal_centroids.get(),
                     this->cluster_sizes.get(),
                     this->n_samples,
                     this->n_clusters,
-                    this->d,
-                    this->n_threads
+                    this->d
                 );
-                F32Quantizer().FinalizeCentroids(
+                this->f32_quantizer.FinalizeCentroids(
                     this->horizontal_centroids.get(),
                     this->cluster_sizes.get(),
                     this->n_clusters,
@@ -841,17 +845,18 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
         const size_t* SKM_RESTRICT mesocluster_indices
     ) {
         SKM_PROFILE_SCOPE("compact_mesocluster");
-#pragma omp parallel for if (this->n_threads > 1) num_threads(this->n_threads)
-        for (size_t j = 0; j < mesocluster_size; ++j) {
-            size_t i = mesocluster_indices[j];
-            this->data_norms[j] = immutable_data_norms[i];
-            assignments_indirection_buffer[j] = i;
-            memcpy(
-                static_cast<void*>(mesocluster_buffer + j * this->d),
-                static_cast<const void*>(data + i * this->d),
-                sizeof(float) * this->d
-            );
-        }
+        this->GetExecutor().ParallelFor(mesocluster_size, [&](size_t begin, size_t end, size_t) {
+            for (size_t j = begin; j < end; ++j) {
+                size_t i = mesocluster_indices[j];
+                this->data_norms[j] = immutable_data_norms[i];
+                assignments_indirection_buffer[j] = i;
+                memcpy(
+                    static_cast<void*>(mesocluster_buffer + j * this->d),
+                    static_cast<const void*>(data + i * this->d),
+                    sizeof(float) * this->d
+                );
+            }
+        });
     }
 
     /*
@@ -866,15 +871,16 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
     ) {
         SKM_PROFILE_SCOPE("compact_encoded_mesocluster");
         const size_t cs = this->code_size;
-#pragma omp parallel for if (this->n_threads > 1) num_threads(this->n_threads)
-        for (size_t j = 0; j < mesocluster_size; ++j) {
-            size_t i = mesocluster_indices[j];
-            memcpy(
-                encoded_mesocluster_buffer + j * cs,
-                encoded_data + i * cs,
-                sizeof(vector_value_t) * cs
-            );
-        }
+        this->GetExecutor().ParallelFor(mesocluster_size, [&](size_t begin, size_t end, size_t) {
+            for (size_t j = begin; j < end; ++j) {
+                size_t i = mesocluster_indices[j];
+                memcpy(
+                    encoded_mesocluster_buffer + j * cs,
+                    encoded_data + i * cs,
+                    sizeof(vector_value_t) * cs
+                );
+            }
+        });
     }
 
     /**

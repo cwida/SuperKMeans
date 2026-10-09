@@ -1,5 +1,4 @@
 #include <gtest/gtest.h>
-#include <omp.h>
 #include <random>
 #include <unordered_set>
 #include <vector>

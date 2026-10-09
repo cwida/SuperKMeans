@@ -4,7 +4,6 @@
 
 #include <fstream>
 #include <iostream>
-#include <omp.h>
 #include <vector>
 
 #include "bench_utils.h"
@@ -28,8 +27,7 @@ void RunBenchmark(const std::string& dataset, bool blas_only) {
     const size_t n_clusters = bench_utils::GetDefaultNClusters(n);
     std::string filename = bench_utils::GetDataPath(dataset);
     std::string filename_queries = bench_utils::GetQueryPath(dataset);
-    const size_t THREADS = omp_get_max_threads();
-    omp_set_num_threads(THREADS);
+    const size_t THREADS = skmeans::ResolveNumThreads(0);
 
     const std::string algorithm = "hierarchical_superkmeans_" + quantizer_name;
     std::cout << "=== Running algorithm: " << algorithm << " ===" << std::endl;

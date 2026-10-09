@@ -29,7 +29,6 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
 
     void Fit(const float* /*data*/, size_t /*n*/, size_t d) override {
         dim = d;
-        pruning_tmp_distances.resize(X_BATCH_SIZE * Y_BATCH_SIZE);
         fitted = true;
     }
 
@@ -70,7 +69,7 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
     ) const override {
         assert(fitted);
         batch_computer::FindNearestNeighbor(
-            x, y, n_x, n_y, d, norms_x, norms_y, out_knn, out_distances, tmp_buf
+            GetExecutor(), x, y, n_x, n_y, d, norms_x, norms_y, out_knn, out_distances, tmp_buf
         );
     }
 
@@ -106,7 +105,8 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
         float* out_distances,
         layout_t& pdx_centroids,
         uint32_t partial_d,
-        size_t* out_not_pruned_counts
+        size_t* out_not_pruned_counts,
+        float* tmp_buf
     ) const override {
         assert(fitted);
         assert(!cached_data_partial_norms.empty() && "CacheDataPartialNorms must be called first");
@@ -116,6 +116,7 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
         );
 
         batch_computer::FindNearestNeighborWithPruning(
+            GetExecutor(),
             x,
             y,
             n_x,
@@ -125,7 +126,7 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
             cached_centroid_partial_norms.data(),
             out_knn,
             out_distances,
-            pruning_tmp_distances.data(),
+            tmp_buf,
             pdx_centroids,
             partial_d,
             out_not_pruned_counts
@@ -139,29 +140,30 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
         uint32_t* cluster_sizes,
         size_t n,
         size_t n_clusters,
-        size_t d,
-        uint32_t n_threads
+        size_t d
     ) const override {
         SKM_PROFILE_SCOPE("F32::UpdateCentroids");
-#pragma omp parallel if (n_threads > 1) num_threads(n_threads)
-        {
-            uint32_t nt = n_threads;
-            uint32_t rank = omp_get_thread_num();
-            size_t c0 = (n_clusters * rank) / nt;
-            size_t c1 = (n_clusters * (rank + 1)) / nt;
-            for (size_t i = 0; i < n; ++i) {
-                uint32_t ci = assignments[i];
-                if (ci >= c0 && ci < c1) {
-                    const float* vec = encoded_data + i * d;
-                    float* acc = centroid_accumulators + ci * d;
-                    cluster_sizes[ci] += 1;
-                    SKM_VECTORIZE_LOOP
-                    for (size_t j = 0; j < d; ++j) {
-                        acc[j] += vec[j];
+        ParallelExecutor& executor = GetExecutor();
+        // One rank per centroid range; the executor runs every rank exactly once.
+        const size_t nt = executor.NumWorkers();
+        executor.ParallelFor(nt, [&](size_t rank_begin, size_t rank_end, size_t) {
+            for (size_t rank = rank_begin; rank < rank_end; ++rank) {
+                const size_t c0 = (n_clusters * rank) / nt;
+                const size_t c1 = (n_clusters * (rank + 1)) / nt;
+                for (size_t i = 0; i < n; ++i) {
+                    uint32_t ci = assignments[i];
+                    if (ci >= c0 && ci < c1) {
+                        const float* vec = encoded_data + i * d;
+                        float* acc = centroid_accumulators + ci * d;
+                        cluster_sizes[ci] += 1;
+                        SKM_VECTORIZE_LOOP
+                        for (size_t j = 0; j < d; ++j) {
+                            acc[j] += vec[j];
+                        }
                     }
                 }
             }
-        }
+        });
     }
 
     bool IsFitted() const override { return fitted; }
@@ -173,7 +175,6 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
     size_t dim = 0;
     std::vector<float> cached_data_partial_norms;
     std::vector<float> cached_centroid_partial_norms;
-    mutable std::vector<float> pruning_tmp_distances;
 };
 
 } // namespace skmeans

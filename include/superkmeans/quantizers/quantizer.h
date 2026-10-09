@@ -1,6 +1,7 @@
 #pragma once
 
 #include "superkmeans/common.h"
+#include "superkmeans/executor.h"
 #include <cstddef>
 #include <cstdint>
 
@@ -20,7 +21,7 @@ class PDXLayout;
  * @tparam q Quantizer type that determines the quantized data type
  */
 template <Quantization q>
-class IQuantizer {
+class IQuantizer : public ExecutorHolder {
   public:
     using quantized_t = skmeans_value_t<q>;
 
@@ -68,7 +69,8 @@ class IQuantizer {
      * @param norms_y Pre-computed float norms for y (length n_y)
      * @param out_knn Output: nearest reference index per query (length n_x)
      * @param out_distances Output: L2 squared distance to nearest (length n_x)
-     * @param tmp_buf Scratch space (at least X_BATCH_SIZE * Y_BATCH_SIZE floats)
+     * @param tmp_buf Scratch space: X_BATCH_SIZE * Y_BATCH_SIZE floats, or at least
+     * BatchComputer::ScratchSize of the bound executor when larger (f32: one tile per worker)
      */
     virtual void FindNearestNeighbor(
         const quantized_t* x,
@@ -162,7 +164,6 @@ class IQuantizer {
      * @param n Number of data vectors
      * @param n_clusters Number of centroids
      * @param d Dimensionality
-     * @param n_threads Number of threads to use
      */
     virtual void UpdateCentroids(
         const quantized_t* encoded_data,
@@ -171,8 +172,7 @@ class IQuantizer {
         uint32_t* cluster_sizes,
         size_t n,
         size_t n_clusters,
-        size_t d,
-        uint32_t n_threads
+        size_t d
     ) const {
         (void) encoded_data;
         (void) assignments;
@@ -181,7 +181,6 @@ class IQuantizer {
         (void) n;
         (void) n_clusters;
         (void) d;
-        (void) n_threads;
         assert(false && "UpdateCentroids not supported by this quantizer");
     }
 
@@ -272,6 +271,8 @@ class IQuantizer {
      * @param pdx_centroids PDXLayout holding the PDXified centroid data
      * @param partial_d Number of dimensions covered by partial GEMM
      * @param out_not_pruned_counts Output: count of non-pruned vectors per query (length n_x)
+     * @param tmp_buf Scratch space: X_BATCH_SIZE * Y_BATCH_SIZE floats, or at least
+     * BatchComputer::ScratchSize of the bound executor when larger (f32: one tile per worker)
      */
     virtual void FindNearestNeighborWithPruning(
         const quantized_t* x,
@@ -285,7 +286,8 @@ class IQuantizer {
         float* out_distances,
         PDXLayout<q>& pdx_centroids,
         uint32_t partial_d,
-        size_t* out_not_pruned_counts
+        size_t* out_not_pruned_counts,
+        float* tmp_buf
     ) const {
         (void) x;
         (void) y;
@@ -299,6 +301,7 @@ class IQuantizer {
         (void) pdx_centroids;
         (void) partial_d;
         (void) out_not_pruned_counts;
+        (void) tmp_buf;
         assert(false && "FindNearestNeighborWithPruning not supported by this quantizer");
     }
 };

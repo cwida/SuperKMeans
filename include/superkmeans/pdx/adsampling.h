@@ -1,11 +1,12 @@
 #pragma once
 
 #include "superkmeans/distance_computers/base_computers.h"
+#include "superkmeans/executor.h"
 #include "superkmeans/pdx/utils.h"
 #include <algorithm>
 #include <cstring>
+#include <iostream>
 #include <memory>
-#include <omp.h>
 #include <random>
 
 #include <Eigen/Dense>
@@ -49,8 +50,11 @@ inline float ComputeADSamplingRatio(
  *
  * For high-dimensional data (>= D_THRESHOLD_FOR_DCT_ROTATION), uses DCT-based rotation
  * which is more efficient than full matrix multiplication.
+ *
+ * Rotations run on the bound executor (SetExecutor), serially when unbound. Rotate and Unrotate
+ * release its threads when they return.
  */
-class ADSamplingPruner {
+class ADSamplingPruner : public ExecutorHolder {
     using MatrixR = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
 
   public:
@@ -63,10 +67,20 @@ class ADSamplingPruner {
      * @param num_dimensions_
      * @param epsilon0 Pruning threshold parameter (higher = more aggressive pruning, less accuracy)
      * @param seed Random seed for reproducible rotation matrix generation
+     * @param data_already_rotated The caller rotates the data itself: no rotation is built, and
+     * Rotate/Unrotate warn and copy the vectors unchanged
      */
-    ADSamplingPruner(uint32_t num_dimensions_, float epsilon0, uint32_t seed = 42)
+    ADSamplingPruner(
+        uint32_t num_dimensions_,
+        float epsilon0,
+        uint32_t seed = 42,
+        bool data_already_rotated = false
+    )
         : num_dimensions(num_dimensions_), epsilon0(epsilon0) {
         InitializeRatios();
+        if (data_already_rotated) {
+            return;
+        }
         std::mt19937 gen(seed); // NOLINT(bugprone-narrowing-conversions)
         bool matrix_created = false;
 #ifdef HAS_FFTW
@@ -76,7 +90,6 @@ class ADSamplingPruner {
 #else
         if (num_dimensions >= D_THRESHOLD_FOR_DCT_ROTATION) {
 #endif
-            fftwf_init_threads();
             matrix.resize(1, num_dimensions);
             std::uniform_int_distribution<int> dist(0, 1);
             for (size_t i = 0; i < num_dimensions; ++i) {
@@ -148,13 +161,14 @@ class ADSamplingPruner {
      * @param n Number of vectors
      */
     void FlipSign(const float* data, float* out, const size_t n) const {
-#pragma omp parallel for num_threads(g_n_threads)
-        for (size_t i = 0; i < n; ++i) {
-            const size_t offset = i * num_dimensions;
-            UtilsComputer<Quantization::f32>::FlipSign(
-                data + offset, out + offset, flip_masks.data(), num_dimensions
-            );
-        }
+        GetExecutor().ParallelFor(n, [&](size_t begin, size_t end, size_t) {
+            for (size_t i = begin; i < end; ++i) {
+                const size_t offset = i * num_dimensions;
+                UtilsComputer<Quantization::f32>::FlipSign(
+                    data + offset, out + offset, flip_masks.data(), num_dimensions
+                );
+            }
+        });
     }
 
     /**
@@ -168,7 +182,7 @@ class ADSamplingPruner {
      *
      * With IN_PLACE, callers pass the same pointer for vectors and out_buffer. The DCT path
      * already transforms out_buffer in place. The matrix path cannot alias its GEMM operands,
-     * so it walks blocks of INPLACE_ROTATION_BLOCK_ROWS through a scratch buffer.
+     * so it walks ROTATION_BLOCK_SIZE rows per worker at a time through a scratch buffer.
      *
      * @tparam IN_PLACE Whether vectors and out_buffer are the same buffer
      * @param vectors Input vectors (row-major, n × num_dimensions)
@@ -177,6 +191,10 @@ class ADSamplingPruner {
      */
     template <bool IN_PLACE = false>
     void Rotate(const float* vectors, float* out_buffer, const uint32_t n) const {
+        ParallelSection parallel_section(GetExecutor());
+        if (WarnIfNoRotation(vectors, out_buffer, n)) {
+            return;
+        }
         Eigen::Map<MatrixR> out(out_buffer, n, num_dimensions);
 #ifdef HAS_FFTW
 #ifdef __AVX2__
@@ -186,20 +204,7 @@ class ADSamplingPruner {
         if (num_dimensions >= D_THRESHOLD_FOR_DCT_ROTATION) {
 #endif
             FlipSign(vectors, out_buffer, n);
-            int n0 = static_cast<int>(num_dimensions);
-            int howmany = static_cast<int>(n);
-            fftw_r2r_kind kind[1] = {FFTW_REDFT10};
-            auto flag = FFTW_MEASURE;
-            if (IsPowerOf2(num_dimensions)) {
-                flag = FFTW_ESTIMATE;
-            }
-            fftwf_plan plan;
-            fftwf_plan_with_nthreads(static_cast<int>(g_n_threads));
-            plan = fftwf_plan_many_r2r(
-                1, &n0, howmany, out.data(), NULL, 1, n0, out.data(), NULL, 1, n0, kind, flag
-            );
-            fftwf_execute(plan);
-            fftwf_destroy_plan(plan);
+            ParallelDCT(FFTW_REDFT10, out_buffer, n);
             const float s0 = std::sqrt(1.0f / (4.0f * num_dimensions));
             const float s = std::sqrt(1.0f / (2.0f * num_dimensions));
             out.col(0) *= s0;
@@ -208,7 +213,8 @@ class ADSamplingPruner {
         }
 #endif
         if constexpr (IN_PLACE) {
-            const size_t n_block_rows = std::min<size_t>(INPLACE_ROTATION_BLOCK_ROWS, n);
+            const size_t n_block_rows =
+                std::min<size_t>(ROTATION_BLOCK_SIZE * GetExecutor().NumWorkers(), n);
             std::unique_ptr<float[]> tmp_block(new float[n_block_rows * num_dimensions]);
             for (size_t i = 0; i < n; i += n_block_rows) {
                 const size_t n_rows = std::min(n_block_rows, static_cast<size_t>(n) - i);
@@ -224,6 +230,8 @@ class ADSamplingPruner {
     /**
      * @brief Computes out = vectors * matrix^T. Operands must not alias.
      *
+     * Single-threaded GEMMs over blocks of ROTATION_BLOCK_SIZE rows, run in parallel.
+     *
      * @param vectors Input vectors (row-major, n × num_dimensions)
      * @param out_buffer Output buffer for rotated vectors (n × num_dimensions)
      * @param n Number of vectors to rotate
@@ -236,40 +244,53 @@ class ADSamplingPruner {
         const char trans_a = 'T';
         const char trans_b = 'N';
         int m = static_cast<int>(num_dimensions);
-        int n_blas = static_cast<int>(n);
         int k = static_cast<int>(num_dimensions);
         float alpha = 1.0f;
         float beta = 0.0f;
         int lda = static_cast<int>(num_dimensions);
         int ldb = static_cast<int>(num_dimensions);
         int ldc = static_cast<int>(num_dimensions);
-        Sgemm(
-            trans_a,
-            trans_b,
-            m,
-            n_blas,
-            k,
-            alpha,
-            matrix.data(),
-            lda,
-            vectors,
-            ldb,
-            beta,
-            out_buffer,
-            ldc
-        );
+        const size_t n_blocks =
+            (static_cast<size_t>(n) + ROTATION_BLOCK_SIZE - 1) / ROTATION_BLOCK_SIZE;
+        GetExecutor().ParallelFor(n_blocks, [&](size_t block_begin, size_t block_end, size_t) {
+            for (size_t block = block_begin; block < block_end; ++block) {
+                const size_t row = block * ROTATION_BLOCK_SIZE;
+                int n_rows =
+                    static_cast<int>(std::min(ROTATION_BLOCK_SIZE, static_cast<size_t>(n) - row));
+                Sgemm(
+                    trans_a,
+                    trans_b,
+                    m,
+                    n_rows,
+                    k,
+                    alpha,
+                    matrix.data(),
+                    lda,
+                    vectors + row * num_dimensions,
+                    ldb,
+                    beta,
+                    out_buffer + row * num_dimensions,
+                    ldc
+                );
+            }
+        });
     }
 
     /**
      * @brief Unrotate vectors (inverse of Rotate).
      * For orthonormal matrix Q: Rotate does out = vectors * Q^T, so Unrotate does out = vectors * Q
      * For DCT: applies inverse scaling, then inverse DCT (DCT-III), then FlipSign
+     * Like Rotate, it runs in parallel over blocks of rows.
      */
     void Unrotate(
         const float* SKM_RESTRICT rotated_vectors,
         float* SKM_RESTRICT out_buffer,
         const uint32_t n
     ) const {
+        ParallelSection parallel_section(GetExecutor());
+        if (WarnIfNoRotation(rotated_vectors, out_buffer, n)) {
+            return;
+        }
         Eigen::Map<MatrixR> out(out_buffer, n, num_dimensions);
 #ifdef HAS_FFTW
 #ifdef __AVX2__
@@ -290,22 +311,7 @@ class ADSamplingPruner {
             out.rightCols(num_dimensions - 1) *= inv_s;
 
             // Apply inverse DCT (DCT-III = FFTW_REDFT01)
-            fftwf_init_threads();
-            fftwf_plan_with_nthreads(static_cast<int>(g_n_threads));
-            int n0 = static_cast<int>(num_dimensions);
-            int howmany = static_cast<int>(n);
-            fftw_r2r_kind kind[1] = {FFTW_REDFT01}; // DCT-III (inverse of DCT-II)
-            auto flag = FFTW_MEASURE;
-            if (IsPowerOf2(num_dimensions)) {
-                flag = FFTW_ESTIMATE;
-            }
-            fftwf_plan plan;
-            fftwf_plan_with_nthreads(static_cast<int>(g_n_threads));
-            plan = fftwf_plan_many_r2r(
-                1, &n0, howmany, out.data(), NULL, 1, n0, out.data(), NULL, 1, n0, kind, flag
-            );
-            fftwf_execute(plan);
-            fftwf_destroy_plan(plan);
+            ParallelDCT(FFTW_REDFT01, out_buffer, n);
 
             // FFTW's DCT-III needs normalization by 1/(2*n)
             out *= (1.0f / (2.0f * num_dimensions));
@@ -319,34 +325,95 @@ class ADSamplingPruner {
         const char trans_a = 'N';
         const char trans_b = 'N';
         int m = static_cast<int>(num_dimensions);
-        int n_blas = static_cast<int>(n);
         int k = static_cast<int>(num_dimensions);
         float alpha = 1.0f;
         float beta = 0.0f;
         int lda = static_cast<int>(num_dimensions);
         int ldb = static_cast<int>(num_dimensions);
         int ldc = static_cast<int>(num_dimensions);
-        Sgemm(
-            trans_a,
-            trans_b,
-            m,
-            n_blas,
-            k,
-            alpha,
-            matrix.data(),
-            lda,
-            rotated_vectors,
-            ldb,
-            beta,
-            out_buffer,
-            ldc
-        );
+        const size_t n_blocks =
+            (static_cast<size_t>(n) + ROTATION_BLOCK_SIZE - 1) / ROTATION_BLOCK_SIZE;
+        GetExecutor().ParallelFor(n_blocks, [&](size_t block_begin, size_t block_end, size_t) {
+            for (size_t block = block_begin; block < block_end; ++block) {
+                const size_t row = block * ROTATION_BLOCK_SIZE;
+                int n_rows =
+                    static_cast<int>(std::min(ROTATION_BLOCK_SIZE, static_cast<size_t>(n) - row));
+                Sgemm(
+                    trans_a,
+                    trans_b,
+                    m,
+                    n_rows,
+                    k,
+                    alpha,
+                    matrix.data(),
+                    lda,
+                    rotated_vectors + row * num_dimensions,
+                    ldb,
+                    beta,
+                    out_buffer + row * num_dimensions,
+                    ldc
+                );
+            }
+        });
     }
 
   private:
     float epsilon0 = 1.5f;            // Pruning aggressiveness parameter
     MatrixR matrix;                   // Rotation matrix (or sign vector for DCT)
     std::vector<uint32_t> flip_masks; // Sign flip masks for DCT-based rotation
+
+#ifdef HAS_FFTW
+    /**
+     * @brief Runs a DCT of the given kind in place on every row of out (n × num_dimensions).
+     *
+     * One single-threaded plan per block size, made on scratch (FFTW_MEASURE overwrites the
+     * arrays it plans on) by the calling thread (the planner is not thread-safe), executed on
+     * blocks of ROTATION_BLOCK_SIZE rows in parallel (fftwf_execute_r2r is thread-safe).
+     */
+    void ParallelDCT(fftw_r2r_kind kind, float* out, size_t n) const {
+        if (n == 0) {
+            return;
+        }
+        const int n0 = static_cast<int>(num_dimensions);
+        const unsigned flag =
+            (IsPowerOf2(num_dimensions) ? FFTW_ESTIMATE : FFTW_MEASURE) | FFTW_UNALIGNED;
+        const size_t block_rows = std::min(ROTATION_BLOCK_SIZE, n);
+        const size_t tail_rows = n % block_rows;
+        std::unique_ptr<float[]> scratch(new float[block_rows * num_dimensions]);
+        auto make_plan = [&](size_t rows) {
+            const int howmany = static_cast<int>(rows);
+            return fftwf_plan_many_r2r(
+                1,
+                &n0,
+                howmany,
+                scratch.get(),
+                nullptr,
+                1,
+                n0,
+                scratch.get(),
+                nullptr,
+                1,
+                n0,
+                &kind,
+                flag
+            );
+        };
+        fftwf_plan block_plan = make_plan(block_rows);
+        fftwf_plan tail_plan = tail_rows > 0 ? make_plan(tail_rows) : nullptr;
+        const size_t n_blocks = (n + block_rows - 1) / block_rows;
+        GetExecutor().ParallelFor(n_blocks, [&](size_t block_begin, size_t block_end, size_t) {
+            for (size_t block = block_begin; block < block_end; ++block) {
+                const size_t row = block * block_rows;
+                float* rows_p = out + row * num_dimensions;
+                fftwf_execute_r2r(row + block_rows <= n ? block_plan : tail_plan, rows_p, rows_p);
+            }
+        });
+        fftwf_destroy_plan(block_plan);
+        if (tail_plan != nullptr) {
+            fftwf_destroy_plan(tail_plan);
+        }
+    }
+#endif
 
     /**
      * @brief Computes the pruning ratio for a given number of visited dimensions.
@@ -359,6 +426,27 @@ class ADSamplingPruner {
      */
     float GetRatio(const size_t visited_dimensions) {
         return ComputeADSamplingRatio(visited_dimensions, num_dimensions, epsilon0);
+    }
+
+    /**
+     * @brief Warns when the pruner was built without a rotation (data_already_rotated), and
+     * copies the vectors unchanged.
+     *
+     * @return Whether there is no rotation (the Rotate/Unrotate call is then done)
+     */
+    bool WarnIfNoRotation(const float* vectors, float* out_buffer, const uint32_t n) const {
+        if (matrix.size() != 0) {
+            return false;
+        }
+        std::cout << "WARNING: the ADSampling pruner was built for already rotated data and has no "
+                     "rotation, the vectors are copied unchanged"
+                  << std::endl;
+        if (vectors != out_buffer) {
+            std::memcpy(
+                out_buffer, vectors, static_cast<size_t>(n) * num_dimensions * sizeof(float)
+            );
+        }
+        return true;
     }
 };
 

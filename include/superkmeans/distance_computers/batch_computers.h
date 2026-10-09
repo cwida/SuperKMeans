@@ -4,11 +4,12 @@
 #include <cstdint>
 #include <cstdio>
 #include <limits>
-#include <omp.h>
+#include <memory>
 #include <vector>
 
 #include "superkmeans/common.h"
 #include "superkmeans/distance_computers/base_computers.h"
+#include "superkmeans/executor.h"
 #include "superkmeans/pdx/layout.h"
 #include "superkmeans/profiler.h"
 #include <Eigen/Dense>
@@ -83,6 +84,12 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
     }
 
   public:
+    /// Floats of scratch the nearest-neighbor searches need: one mini-batch distance tile per
+    /// worker, so worker w writes to [w * MINI_BATCH_SIZE * Y_BATCH_SIZE, ...).
+    static size_t ScratchSize(const ParallelExecutor& executor) {
+        return executor.NumWorkers() * MINI_BATCH_SIZE * Y_BATCH_SIZE;
+    }
+
     /**
      * @brief Finds the top-1 nearest neighbor for each query vector.
      *
@@ -98,10 +105,13 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
      * @param norms_y Pre-computed squared L2 norms of reference vectors
      * @param out_knn Output: index of nearest neighbor for each query
      * @param out_distances Output: distance to nearest neighbor for each query
-     * @param tmp_distances_buf Buffer for batch distance computation (size: X_BATCH_SIZE ×
-     * Y_BATCH_SIZE)
+     * @param tmp_distances_buf Scratch of ScratchSize(executor) floats
+     *
+     * One parallel region over mini-batches of MINI_BATCH_SIZE rows of X: each worker multiplies
+     * its mini-batch by every Y tile in turn (single-threaded GEMM) and keeps the running top-1.
      */
     static void FindNearestNeighbor(
+        ParallelExecutor& executor,
         const data_t* SKM_RESTRICT x,
         const data_t* SKM_RESTRICT y,
         const size_t n_x,
@@ -114,60 +124,37 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
         float* SKM_RESTRICT tmp_distances_buf
     ) {
         SKM_PROFILE_SCOPE("search");
-        SKM_PROFILE_SCOPE("search/1st_blas");
-        std::fill_n(out_distances, n_x, std::numeric_limits<distance_t>::max());
-        for (size_t i = 0; i < n_x; i += X_BATCH_SIZE) {
-            auto batch_n_x = X_BATCH_SIZE;
-            auto batch_x_p = x + (i * d);
-            if (i + X_BATCH_SIZE > n_x) {
-                batch_n_x = n_x - i;
-            }
-            for (size_t j = 0; j < n_y; j += Y_BATCH_SIZE) {
-                auto batch_n_y = Y_BATCH_SIZE;
-                auto batch_y_p = y + (j * d);
-                if (j + Y_BATCH_SIZE > n_y) {
-                    batch_n_y = n_y - j;
-                }
-#if defined(__APPLE__)
-                // AMX (used with Apple Accelerate) benefits from a different strategy for
-                // parallelization
-#pragma omp parallel for num_threads(g_n_threads) schedule(static)
-                for (size_t r = 0; r < batch_n_x; r += MINI_BATCH_SIZE) {
-                    auto mini_batch_n_x = std::min(MINI_BATCH_SIZE, batch_n_x - r);
-                    BlasMatrixMultiplication(
-                        batch_x_p + r * d,
-                        batch_y_p,
-                        mini_batch_n_x,
-                        batch_n_y,
-                        d,
-                        0,
-                        tmp_distances_buf + r * batch_n_y
-                    );
-                }
-#else
-                BlasMatrixMultiplication(
-                    batch_x_p, batch_y_p, batch_n_x, batch_n_y, d, 0, tmp_distances_buf
-                );
-#endif
-                Eigen::Map<MatrixR> distances_matrix(tmp_distances_buf, batch_n_x, batch_n_y);
-#pragma omp parallel for num_threads(g_n_threads)
-                for (size_t r = 0; r < batch_n_x; ++r) {
-                    const auto i_idx = i + r;
-                    const float norm_x_i = norms_x[i_idx];
-                    float* row_p = distances_matrix.data() + r * batch_n_y;
-                    SKM_VECTORIZE_LOOP
-                    for (size_t c = 0; c < batch_n_y; ++c) {
-                        row_p[c] = -2.0f * row_p[c] + norm_x_i + norms_y[j + c];
-                    }
-                    uint32_t knn_idx;
-                    auto batch_top_1 = distances_matrix.row(r).minCoeff(&knn_idx);
-                    if (batch_top_1 < out_distances[i_idx]) {
-                        out_distances[i_idx] = std::max(0.0f, batch_top_1);
-                        out_knn[i_idx] = j + knn_idx;
+        const size_t n_blocks = (n_x + MINI_BATCH_SIZE - 1) / MINI_BATCH_SIZE;
+        executor.ParallelFor(n_blocks, [&](size_t block_begin, size_t block_end, size_t worker) {
+            float* buffer = tmp_distances_buf + worker * MINI_BATCH_SIZE * Y_BATCH_SIZE;
+            for (size_t block = block_begin; block < block_end; ++block) {
+                const size_t i = block * MINI_BATCH_SIZE;
+                const size_t rows = std::min(MINI_BATCH_SIZE, n_x - i);
+                std::fill_n(out_distances + i, rows, std::numeric_limits<distance_t>::max());
+                for (size_t j = 0; j < n_y; j += Y_BATCH_SIZE) {
+                    const size_t batch_n_y = std::min(Y_BATCH_SIZE, n_y - j);
+                    BlasMatrixMultiplication(x + i * d, y + j * d, rows, batch_n_y, d, 0, buffer);
+                    for (size_t r = 0; r < rows; ++r) {
+                        const auto i_idx = i + r;
+                        const float norm_x_i = norms_x[i_idx];
+                        float* row_p = buffer + r * batch_n_y;
+                        SKM_VECTORIZE_LOOP
+                        for (size_t c = 0; c < batch_n_y; ++c) {
+                            row_p[c] = -2.0f * row_p[c] + norm_x_i + norms_y[j + c];
+                        }
+                        Eigen::Map<Eigen::Matrix<distance_t, 1, Eigen::Dynamic>> row(
+                            row_p, batch_n_y
+                        );
+                        uint32_t knn_idx;
+                        auto batch_top_1 = row.minCoeff(&knn_idx);
+                        if (batch_top_1 < out_distances[i_idx]) {
+                            out_distances[i_idx] = std::max(0.0f, batch_top_1);
+                            out_knn[i_idx] = j + knn_idx;
+                        }
                     }
                 }
             }
-        }
+        });
     }
 
     /**
@@ -186,9 +173,10 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
      * @param k Number of nearest neighbors to find
      * @param out_knn Output: indices of k nearest neighbors for each query (size: n_x × k)
      * @param out_distances Output: distances to k nearest neighbors (size: n_x × k)
-     * @param tmp_distances_buf Scratch buffer for batch distance computation
+     * @param tmp_distances_buf Scratch of ScratchSize(executor) floats
      */
     static void FindKNearestNeighbors(
+        ParallelExecutor& executor,
         const data_t* SKM_RESTRICT x,
         const data_t* SKM_RESTRICT y,
         const size_t n_x,
@@ -204,73 +192,59 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
         std::fill_n(out_distances, n_x * k, std::numeric_limits<distance_t>::max());
         std::fill_n(out_knn, n_x * k, static_cast<uint32_t>(-1));
 
-        // Pre-allocate per-thread candidate buffers to avoid heap allocation in the hot loop
         const size_t max_candidates = k + Y_BATCH_SIZE;
-        const uint32_t num_threads = g_n_threads;
-        std::vector<std::vector<std::pair<float, uint32_t>>> thread_candidates(num_threads);
-        for (auto& tc : thread_candidates) {
-            tc.reserve(max_candidates);
-        }
+        const size_t n_blocks = (n_x + MINI_BATCH_SIZE - 1) / MINI_BATCH_SIZE;
+        executor.ParallelFor(n_blocks, [&](size_t block_begin, size_t block_end, size_t worker) {
+            float* buffer = tmp_distances_buf + worker * MINI_BATCH_SIZE * Y_BATCH_SIZE;
+            // Per-worker candidates, allocated once to keep the hot loop free of heap allocation
+            std::vector<std::pair<float, uint32_t>> candidates;
+            candidates.reserve(max_candidates);
+            for (size_t block = block_begin; block < block_end; ++block) {
+                const size_t i = block * MINI_BATCH_SIZE;
+                const size_t rows = std::min(MINI_BATCH_SIZE, n_x - i);
+                for (size_t j = 0; j < n_y; j += Y_BATCH_SIZE) {
+                    const size_t batch_n_y = std::min(Y_BATCH_SIZE, n_y - j);
+                    BlasMatrixMultiplication(x + i * d, y + j * d, rows, batch_n_y, d, 0, buffer);
+                    for (size_t r = 0; r < rows; ++r) {
+                        const auto i_idx = i + r;
+                        const float norm_x_i = norms_x[i_idx];
+                        float* row_p = buffer + r * batch_n_y;
+                        SKM_VECTORIZE_LOOP
+                        for (size_t c = 0; c < batch_n_y; ++c) {
+                            row_p[c] = -2.0f * row_p[c] + norm_x_i + norms_y[j + c];
+                        }
 
-        for (size_t i = 0; i < n_x; i += X_BATCH_SIZE) {
-            auto batch_n_x = X_BATCH_SIZE;
-            auto batch_x_p = x + (i * d);
-            if (i + X_BATCH_SIZE > n_x) {
-                batch_n_x = n_x - i;
-            }
-            for (size_t j = 0; j < n_y; j += Y_BATCH_SIZE) {
-                auto batch_n_y = Y_BATCH_SIZE;
-                auto batch_y_p = y + (j * d);
-                if (j + Y_BATCH_SIZE > n_y) {
-                    batch_n_y = n_y - j;
-                }
-
-                BlasMatrixMultiplication(
-                    batch_x_p, batch_y_p, batch_n_x, batch_n_y, d, 0, tmp_distances_buf
-                );
-                Eigen::Map<MatrixR> distances_matrix(tmp_distances_buf, batch_n_x, batch_n_y);
-
-#pragma omp parallel for num_threads(g_n_threads)
-                for (size_t r = 0; r < batch_n_x; ++r) {
-                    const auto i_idx = i + r;
-                    const float norm_x_i = norms_x[i_idx];
-                    float* row_p = distances_matrix.data() + r * batch_n_y;
-                    SKM_VECTORIZE_LOOP
-                    for (size_t c = 0; c < batch_n_y; ++c) {
-                        row_p[c] = -2.0f * row_p[c] + norm_x_i + norms_y[j + c];
-                    }
-
-                    // TODO(@lkuffo, low): I feel this can be improved
-                    auto& candidates = thread_candidates[omp_get_thread_num()];
-                    candidates.clear();
-                    // Add previous top-k
-                    for (size_t ki = 0; ki < k; ++ki) {
-                        if (out_distances[i_idx * k + ki] <
-                            std::numeric_limits<distance_t>::max()) {
-                            candidates.emplace_back(
-                                out_distances[i_idx * k + ki], out_knn[i_idx * k + ki]
-                            );
+                        // TODO(@lkuffo, low): I feel this can be improved
+                        candidates.clear();
+                        // Add previous top-k
+                        for (size_t ki = 0; ki < k; ++ki) {
+                            if (out_distances[i_idx * k + ki] <
+                                std::numeric_limits<distance_t>::max()) {
+                                candidates.emplace_back(
+                                    out_distances[i_idx * k + ki], out_knn[i_idx * k + ki]
+                                );
+                            }
+                        }
+                        // Add current batch candidates
+                        for (size_t c = 0; c < batch_n_y; ++c) {
+                            candidates.emplace_back(row_p[c], static_cast<uint32_t>(j + c));
+                        }
+                        size_t actual_k = std::min(k, candidates.size());
+                        std::partial_sort(
+                            candidates.begin(), candidates.begin() + actual_k, candidates.end()
+                        );
+                        for (size_t ki = 0; ki < actual_k; ++ki) {
+                            out_distances[i_idx * k + ki] = std::max(0.0f, candidates[ki].first);
+                            out_knn[i_idx * k + ki] = candidates[ki].second;
+                        }
+                        for (size_t ki = actual_k; ki < k; ++ki) {
+                            out_distances[i_idx * k + ki] = std::numeric_limits<distance_t>::max();
+                            out_knn[i_idx * k + ki] = static_cast<uint32_t>(-1);
                         }
                     }
-                    // Add current batch candidates
-                    for (size_t c = 0; c < batch_n_y; ++c) {
-                        candidates.emplace_back(row_p[c], static_cast<uint32_t>(j + c));
-                    }
-                    size_t actual_k = std::min(k, candidates.size());
-                    std::partial_sort(
-                        candidates.begin(), candidates.begin() + actual_k, candidates.end()
-                    );
-                    for (size_t ki = 0; ki < actual_k; ++ki) {
-                        out_distances[i_idx * k + ki] = std::max(0.0f, candidates[ki].first);
-                        out_knn[i_idx * k + ki] = candidates[ki].second;
-                    }
-                    for (size_t ki = actual_k; ki < k; ++ki) {
-                        out_distances[i_idx * k + ki] = std::numeric_limits<distance_t>::max();
-                        out_knn[i_idx * k + ki] = static_cast<uint32_t>(-1);
-                    }
                 }
             }
-        }
+        });
     }
 
     /**
@@ -289,12 +263,16 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
      * @param norms_y Pre-computed partial squared L2 norms of references (first partial_d dims)
      * @param out_knn Input/Output: current assignment indices (updated with better assignments)
      * @param out_distances Input/Output: current distances (updated with better distances)
-     * @param tmp_distances_buf Scratch buffer for batch distance computation
+     * @param tmp_distances_buf Scratch of ScratchSize(executor) floats
      * @param pdx_centroids PDX layout containing centroids and searcher for pruned search
      * @param partial_d Number of dimensions used for initial BLAS computation
      * @param out_not_pruned_counts count of non-pruned vectors per query (for tuning d')
+     *
+     * Same schedule as FindNearestNeighbor: each worker runs its mini-batches through every Y
+     * tile, the partial-d GEMM followed right away by the PDX pruned search.
      */
     static void FindNearestNeighborWithPruning(
+        ParallelExecutor& executor,
         const data_t* SKM_RESTRICT x,
         const data_t* SKM_RESTRICT y,
         const size_t n_x,
@@ -310,56 +288,23 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
         size_t* out_not_pruned_counts
     ) {
         SKM_PROFILE_SCOPE("search");
-        for (size_t i = 0; i < n_x; i += X_BATCH_SIZE) {
-            auto batch_n_x = X_BATCH_SIZE;
-            auto batch_x_p = x + (i * d);
-            if (i + X_BATCH_SIZE > n_x) {
-                batch_n_x = n_x - i;
-            }
-            for (size_t j = 0; j < n_y; j += Y_BATCH_SIZE) {
-                auto batch_n_y = Y_BATCH_SIZE;
-                auto batch_y_p = y + (j * d);
-                if (j + Y_BATCH_SIZE > n_y) {
-                    batch_n_y = n_y - j;
-                }
-                {
-                    SKM_PROFILE_SCOPE("search/blas");
-#if defined(__APPLE__)
-                    // AMX (used with Apple Accelerate) benefits from a different strategy for
-                    // parallelization
-#pragma omp parallel for num_threads(g_n_threads) schedule(static)
-                    for (size_t r = 0; r < batch_n_x; r += MINI_BATCH_SIZE) {
-                        auto mini_batch_n_x = std::min(MINI_BATCH_SIZE, batch_n_x - r);
-                        BlasMatrixMultiplication(
-                            batch_x_p + r * d,
-                            batch_y_p,
-                            mini_batch_n_x,
-                            batch_n_y,
-                            d,
-                            partial_d,
-                            tmp_distances_buf + r * batch_n_y
-                        );
-                    }
-#else
+        const size_t n_blocks = (n_x + MINI_BATCH_SIZE - 1) / MINI_BATCH_SIZE;
+        executor.ParallelFor(n_blocks, [&](size_t block_begin, size_t block_end, size_t worker) {
+            float* buffer = tmp_distances_buf + worker * MINI_BATCH_SIZE * Y_BATCH_SIZE;
+            for (size_t block = block_begin; block < block_end; ++block) {
+                const size_t i = block * MINI_BATCH_SIZE;
+                const size_t rows = std::min(MINI_BATCH_SIZE, n_x - i);
+                for (size_t j = 0; j < n_y; j += Y_BATCH_SIZE) {
+                    const size_t batch_n_y = std::min(Y_BATCH_SIZE, n_y - j);
                     BlasMatrixMultiplication(
-                        batch_x_p, batch_y_p, batch_n_x, batch_n_y, d, partial_d, tmp_distances_buf
+                        x + i * d, y + j * d, rows, batch_n_y, d, partial_d, buffer
                     );
-#endif
-                }
-                Eigen::Map<MatrixR> distances_matrix(tmp_distances_buf, batch_n_x, batch_n_y);
-                {
-                    SKM_PROFILE_SCOPE("search/pdx");
-#if defined(__clang__)
-#pragma omp parallel for num_threads(g_n_threads) schedule(dynamic, 8)
-#else
-#pragma omp parallel for num_threads(g_n_threads)
-#endif
-                    for (size_t r = 0; r < batch_n_x; ++r) {
+                    for (size_t r = 0; r < rows; ++r) {
                         const auto i_idx = i + r;
 
                         // Norms: convert dot products to squared L2 distances
                         const float norm_x_i = norms_x[i_idx];
-                        float* row_p = distances_matrix.data() + r * batch_n_y;
+                        float* row_p = buffer + r * batch_n_y;
                         SKM_VECTORIZE_LOOP
                         for (size_t c = 0; c < batch_n_y; ++c) {
                             row_p[c] = -2.0f * row_p[c] + norm_x_i + norms_y[j + c];
@@ -379,16 +324,14 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
                             dist_to_prev_centroid = out_distances[i_idx];
                         }
 
-                        knn_candidate_t assignment;
-                        auto partial_distances_p = distances_matrix.data() + r * batch_n_y;
                         size_t local_not_pruned = 0;
-                        assignment =
+                        knn_candidate_t assignment =
                             pdx_centroids.searcher
                                 ->Top1PartialSearchWithThresholdAndPartialDistances(
                                     data_p,
                                     dist_to_prev_centroid,
                                     prev_assignment,
-                                    partial_distances_p,
+                                    row_p,
                                     partial_d,
                                     j / VECTOR_CHUNK_SIZE, // start cluster_idx
                                     (j + Y_BATCH_SIZE) /
@@ -405,7 +348,7 @@ class BatchComputer<DistanceFunction::l2, Quantization::f32> {
                     }
                 }
             }
-        }
+        });
     }
 };
 

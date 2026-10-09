@@ -2,7 +2,6 @@
 
 #include <iomanip>
 #include <iostream>
-#include <omp.h>
 #include <string>
 #include <vector>
 
@@ -90,7 +89,6 @@ void PrintHierarchicalWCSS(const std::string& data_file) {
 } // namespace
 
 int main() {
-    omp_set_num_threads(1);
     const std::string data_file = CMAKE_SOURCE_DIR "/tests/test_data.bin";
 
     std::cout << std::scientific << std::setprecision(5);
