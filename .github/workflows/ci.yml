@@ -188,7 +188,12 @@ jobs:
         run: python examples/simple_clustering.py 10000 128 50
 
   sanitizers-asan-ubsan:
-    runs-on: ubuntu-24.04
+    name: sanitizers-asan-ubsan (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
     env:
       CC: clang-18
       CXX: clang++-18
@@ -216,7 +221,12 @@ jobs:
         run: ctest --test-dir build_asan --output-on-failure
 
   sanitizers-tsan:
-    runs-on: ubuntu-24.04
+    name: sanitizers-tsan (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
     env:
       CC: clang-18
       CXX: clang++-18
