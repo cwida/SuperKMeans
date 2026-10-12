@@ -194,6 +194,9 @@ To run our benchmark suite in C++, refer to [BENCHMARKING.md](./BENCHMARKING.md)
 ## Multithreading
 SuperKMeans uses [ForkUnion](https://github.com/ashvardanian/ForkUnion) for threading (also when doing GEMM). You can plug in OpenMP or your own threading library by inheriting our [ParallelExecutor class](./include/superkmeans/executor.h) and passing it in our config.
 
+## Memory Management
+You can inject your own memory allocator by inheriting our [MemoryAllocator class](./include/superkmeans/allocator.h) and passing it in our config. Your memory allocator must be thread-safe and outlive the `SuperKMeans` object.
+
 ## BLAS
 An efficient GEMM is key for performance. We use [Eigen](https://gitlab.com/libeigen/eigen) by default. In our benchmarks, Eigen is on par with OpenBLAS and BLIS, and 5–10% slower than Intel MKL end to end. You can also use your own BLAS (see [INSTALL.md](INSTALL.md#using-an-external-blas-optional)). However, it **must be single-threaded and thread-safe**.
 
