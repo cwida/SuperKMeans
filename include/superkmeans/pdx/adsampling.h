@@ -1,5 +1,6 @@
 #pragma once
 
+#include "superkmeans/allocator.h"
 #include "superkmeans/distance_computers/base_computers.h"
 #include "superkmeans/executor.h"
 #include "superkmeans/pdx/utils.h"
@@ -52,9 +53,9 @@ inline float ComputeADSamplingRatio(
  * which is more efficient than full matrix multiplication.
  *
  * Rotations run on the bound executor (SetExecutor), serially when unbound. Rotate and Unrotate
- * release its threads when they return.
+ * release its threads when they return. Their scratch comes from the bound allocator.
  */
-class ADSamplingPruner : public ExecutorHolder {
+class ADSamplingPruner : public ExecutorHolder, public AllocatorHolder {
     using MatrixR = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
 
   public:
@@ -69,14 +70,17 @@ class ADSamplingPruner : public ExecutorHolder {
      * @param seed Random seed for reproducible rotation matrix generation
      * @param data_already_rotated The caller rotates the data itself: no rotation is built, and
      * Rotate/Unrotate warn and copy the vectors unchanged
+     * @param allocator Allocates the rotation and the scratch (not owned); nullptr: the heap
      */
     ADSamplingPruner(
         uint32_t num_dimensions_,
         float epsilon0,
         uint32_t seed = 42,
-        bool data_already_rotated = false
+        bool data_already_rotated = false,
+        MemoryAllocator* allocator = nullptr
     )
         : num_dimensions(num_dimensions_), epsilon0(epsilon0) {
+        SetAllocator(allocator);
         InitializeRatios();
         if (data_already_rotated) {
             return;
@@ -90,30 +94,33 @@ class ADSamplingPruner : public ExecutorHolder {
 #else
         if (num_dimensions >= D_THRESHOLD_FOR_DCT_ROTATION) {
 #endif
-            matrix.resize(1, num_dimensions);
+            matrix = AllocateBuffer<float>(GetAllocator(), num_dimensions);
             std::uniform_int_distribution<int> dist(0, 1);
             for (size_t i = 0; i < num_dimensions; ++i) {
-                matrix(i) = dist(gen) ? 1.0f : -1.0f;
+                matrix[i] = dist(gen) ? 1.0f : -1.0f;
             }
             flip_masks.resize(num_dimensions);
             for (size_t i = 0; i < num_dimensions; ++i) {
-                // Use matrix(i) which has the random +1/-1 values, not flip_masks[i] which is
+                // Use matrix[i] which has the random +1/-1 values, not flip_masks[i] which is
                 // uninitialized
-                flip_masks[i] = (matrix(i) < 0.0f ? 0x80000000u : 0u);
+                flip_masks[i] = (matrix[i] < 0.0f ? 0x80000000u : 0u);
             }
             matrix_created = true;
         }
 #endif
         if (!matrix_created) {
-            matrix.resize(num_dimensions, num_dimensions);
+            matrix = AllocateBuffer<float>(
+                GetAllocator(), static_cast<size_t>(num_dimensions) * num_dimensions
+            );
+            Eigen::Map<MatrixR> rotation(matrix.get(), num_dimensions, num_dimensions);
             std::normal_distribution<float> dist(0.0f, 1.0f);
             for (uint32_t i = 0; i < num_dimensions; ++i) {
                 for (uint32_t j = 0; j < num_dimensions; ++j) {
-                    matrix(i, j) = dist(gen);
+                    rotation(i, j) = dist(gen);
                 }
             }
-            const Eigen::HouseholderQR<MatrixR> qr(matrix);
-            matrix = qr.householderQ() * MatrixR::Identity(num_dimensions, num_dimensions);
+            const Eigen::HouseholderQR<MatrixR> qr(rotation);
+            rotation = qr.householderQ() * MatrixR::Identity(num_dimensions, num_dimensions);
         }
     }
 
@@ -215,7 +222,7 @@ class ADSamplingPruner : public ExecutorHolder {
         if constexpr (IN_PLACE) {
             const size_t n_block_rows =
                 std::min<size_t>(ROTATION_BLOCK_SIZE * GetExecutor().NumWorkers(), n);
-            std::unique_ptr<float[]> tmp_block(new float[n_block_rows * num_dimensions]);
+            auto tmp_block = AllocateBuffer<float>(GetAllocator(), n_block_rows * num_dimensions);
             for (size_t i = 0; i < n; i += n_block_rows) {
                 const size_t n_rows = std::min(n_block_rows, static_cast<size_t>(n) - i);
                 float* dst = out_buffer + i * num_dimensions;
@@ -264,7 +271,7 @@ class ADSamplingPruner : public ExecutorHolder {
                     n_rows,
                     k,
                     alpha,
-                    matrix.data(),
+                    matrix.get(),
                     lda,
                     vectors + row * num_dimensions,
                     ldb,
@@ -345,7 +352,7 @@ class ADSamplingPruner : public ExecutorHolder {
                     n_rows,
                     k,
                     alpha,
-                    matrix.data(),
+                    matrix.get(),
                     lda,
                     rotated_vectors + row * num_dimensions,
                     ldb,
@@ -359,7 +366,7 @@ class ADSamplingPruner : public ExecutorHolder {
 
   private:
     float epsilon0 = 1.5f;            // Pruning aggressiveness parameter
-    MatrixR matrix;                   // Rotation matrix (or sign vector for DCT)
+    AllocatedBuffer<float> matrix;    // Rotation matrix, row-major (or sign vector for DCT)
     std::vector<uint32_t> flip_masks; // Sign flip masks for DCT-based rotation
 
 #ifdef HAS_FFTW
@@ -379,7 +386,7 @@ class ADSamplingPruner : public ExecutorHolder {
             (IsPowerOf2(num_dimensions) ? FFTW_ESTIMATE : FFTW_MEASURE) | FFTW_UNALIGNED;
         const size_t block_rows = std::min(ROTATION_BLOCK_SIZE, n);
         const size_t tail_rows = n % block_rows;
-        std::unique_ptr<float[]> scratch(new float[block_rows * num_dimensions]);
+        auto scratch = AllocateBuffer<float>(GetAllocator(), block_rows * num_dimensions);
         auto make_plan = [&](size_t rows) {
             const int howmany = static_cast<int>(rows);
             return fftwf_plan_many_r2r(
@@ -435,7 +442,7 @@ class ADSamplingPruner : public ExecutorHolder {
      * @return Whether there is no rotation (the Rotate/Unrotate call is then done)
      */
     bool WarnIfNoRotation(const float* vectors, float* out_buffer, const uint32_t n) const {
-        if (matrix.size() != 0) {
+        if (matrix) {
             return false;
         }
         std::cout << "WARNING: the ADSampling pruner was built for already rotated data and has no "

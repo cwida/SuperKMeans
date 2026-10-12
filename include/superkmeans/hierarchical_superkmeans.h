@@ -50,7 +50,8 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
             dimensionality,
             HIERARCHICAL_PRUNER_INITIAL_THRESHOLD,
             this->config.seed,
-            this->config.data_already_rotated
+            this->config.data_already_rotated,
+            &this->GetAllocator()
         );
         this->pruner->SetExecutor(&this->GetExecutor());
         SKMEANS_ENSURE_POSITIVE(config.iters_mesoclustering);
@@ -126,22 +127,27 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
         {
             SKM_PROFILE_SCOPE("allocator");
             // Buffers to concatenate each fineclustering assignments and centroids
-            this->final_assignments.reset(new uint32_t[this->n_samples]);
-            this->final_centroids.reset(new centroid_value_t[this->n_clusters * this->d]);
+            auto& allocator = this->GetAllocator();
+            this->final_assignments = AllocateBuffer<uint32_t>(allocator, this->n_samples);
+            this->final_centroids =
+                AllocateBuffer<centroid_value_t>(allocator, this->n_clusters * this->d);
             // These buffers are reused for all three phases
-            this->centroids.reset(new centroid_value_t[this->n_clusters * this->d]);
-            this->horizontal_centroids.reset(new centroid_value_t[this->n_clusters * this->d]);
-            this->prev_centroids.reset(new centroid_value_t[this->n_clusters * this->d]);
-            this->cluster_sizes.reset(new uint32_t[this->n_clusters]);
-            this->assignments.reset(new uint32_t[n]);
-            this->distances.reset(new distance_t[n]);
-            this->data_norms.reset(new float[this->n_samples]);
-            this->centroid_norms.reset(new float[this->n_clusters]);
+            this->centroids =
+                AllocateBuffer<centroid_value_t>(allocator, this->n_clusters * this->d);
+            this->horizontal_centroids =
+                AllocateBuffer<centroid_value_t>(allocator, this->n_clusters * this->d);
+            this->prev_centroids =
+                AllocateBuffer<centroid_value_t>(allocator, this->n_clusters * this->d);
+            this->cluster_sizes = AllocateBuffer<uint32_t>(allocator, this->n_clusters);
+            this->assignments = AllocateBuffer<uint32_t>(allocator, n);
+            this->distances = AllocateBuffer<distance_t>(allocator, n);
+            this->data_norms = AllocateBuffer<float>(allocator, this->n_samples);
+            this->centroid_norms = AllocateBuffer<float>(allocator, this->n_clusters);
         }
         this->EnsureTmpDistancesBuffer();
         this->vertical_d = PDXLayout<q>::GetDimensionSplit(this->PDXDim(this->d)).vertical_d;
-        this->partial_horizontal_centroids.reset(
-            new centroid_value_t[this->n_clusters * this->vertical_d]
+        this->partial_horizontal_centroids = AllocateBuffer<centroid_value_t>(
+            this->GetAllocator(), this->n_clusters * this->vertical_d
         );
 
         //
@@ -160,9 +166,10 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
             std::cout << "Sampling data..." << std::endl;
         }
         // Samples for both mesoclustering and fineclustering
-        std::unique_ptr<float[]> data_samples_buffer;
+        AllocatedBuffer<float> data_samples_buffer;
         if (this->n_samples < n || !this->hierarchical_config.data_already_rotated) {
-            data_samples_buffer.reset(new float[this->n_samples * this->d]);
+            data_samples_buffer =
+                AllocateBuffer<float>(this->GetAllocator(), this->n_samples * this->d);
         }
         auto data_to_cluster = this->SampleAndRotateVectors(
             data_p,
@@ -188,8 +195,8 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
         // Non-PDX quantizers must override vertical_d to full d
         if (this->quantizer->SupportsPruning() && !this->quantizer->NeedsPDXLayout()) {
             this->vertical_d = this->d;
-            this->partial_horizontal_centroids.reset(
-                new centroid_value_t[this->n_clusters * this->vertical_d]
+            this->partial_horizontal_centroids = AllocateBuffer<centroid_value_t>(
+                this->GetAllocator(), this->n_clusters * this->vertical_d
             );
         }
         this->partial_d = this->quantizer->InitialPartialD(this->vertical_d);
@@ -205,13 +212,17 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
         if constexpr (q == Quantization::f32) {
             encoded_data_p = data_to_cluster;
         } else {
-            this->quantized_data.reset(new vector_value_t[this->n_samples * this->code_size]);
+            this->quantized_data = AllocateBuffer<vector_value_t>(
+                this->GetAllocator(), this->n_samples * this->code_size
+            );
             this->quantizer->Encode(
                 data_to_cluster, this->quantized_data.get(), this->n_samples, this->d
             );
             encoded_data_p = this->quantized_data.get();
         }
-        this->quantized_centroids.reset(new vector_value_t[this->n_clusters * this->code_size]);
+        this->quantized_centroids = AllocateBuffer<vector_value_t>(
+            this->GetAllocator(), this->n_clusters * this->code_size
+        );
 
         // Encode initial centroids
         this->quantizer->Encode(
@@ -221,11 +232,11 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
         // Setup quantized PDX layout for pruning (f32 PDX is set up in GenerateCentroids)
         if constexpr (q != Quantization::f32) {
             if (this->quantizer->SupportsPruning() && this->quantizer->NeedsPDXLayout()) {
-                this->pdxified_quantized_centroids.reset(
-                    new vector_value_t[this->n_clusters * this->PDXDim(this->d)]
+                this->pdxified_quantized_centroids = AllocateBuffer<vector_value_t>(
+                    this->GetAllocator(), this->n_clusters * this->PDXDim(this->d)
                 );
-                this->partial_hor_quantized_centroids.reset(
-                    new vector_value_t[this->n_clusters * this->PDXDim(this->vertical_d)]
+                this->partial_hor_quantized_centroids = AllocateBuffer<vector_value_t>(
+                    this->GetAllocator(), this->n_clusters * this->PDXDim(this->vertical_d)
                 );
                 PDXLayout<q>::template PDXify<false>(
                     this->quantized_centroids.get(),
@@ -251,12 +262,12 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
             this->quantized_centroids.get(), n_mesoclusters, this->d, this->centroid_norms.get()
         );
 
-        std::unique_ptr<size_t[]> not_pruned_counts(new size_t[this->n_samples]);
+        auto not_pruned_counts = AllocateBuffer<size_t>(this->GetAllocator(), this->n_samples);
 
         // Save full norms before the loop (independent of iteration work)
         {
             SKM_PROFILE_SCOPE("allocator");
-            immutable_data_norms.reset(new float[this->n_samples]);
+            immutable_data_norms = AllocateBuffer<float>(this->GetAllocator(), this->n_samples);
             memcpy(
                 immutable_data_norms.get(), this->data_norms.get(), sizeof(float) * this->n_samples
             );
@@ -326,8 +337,8 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
         }
 
         // Build partitioned index for efficient mesocluster compaction
-        std::vector<size_t> mesocluster_indices_flat;
-        mesocluster_indices_flat.resize(this->n_samples);
+        auto mesocluster_indices_flat =
+            AllocateBuffer<size_t>(this->GetAllocator(), this->n_samples);
         std::vector<size_t> mesocluster_offsets;
         mesocluster_offsets.resize(n_mesoclusters + 1);
         {
@@ -366,12 +377,16 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
         size_t max_mesocluster_size = *std::max_element(
             this->cluster_sizes.get(), this->cluster_sizes.get() + n_mesoclusters
         );
-        std::vector<float> mesocluster_buffer(max_mesocluster_size * this->d);
-        std::vector<vector_value_t> encoded_mesocluster_buffer;
+        auto mesocluster_buffer =
+            AllocateBuffer<float>(this->GetAllocator(), max_mesocluster_size * this->d);
+        AllocatedBuffer<vector_value_t> encoded_mesocluster_buffer;
         if constexpr (q != Quantization::f32) {
-            encoded_mesocluster_buffer.resize(max_mesocluster_size * this->code_size);
+            encoded_mesocluster_buffer = AllocateBuffer<vector_value_t>(
+                this->GetAllocator(), max_mesocluster_size * this->code_size
+            );
         }
-        std::vector<uint32_t> assignments_indirection_buffer(max_mesocluster_size);
+        auto assignments_indirection_buffer =
+            AllocateBuffer<uint32_t>(this->GetAllocator(), max_mesocluster_size);
         size_t fineclusters_offset = 0;
         for (size_t k = 0; k < n_mesoclusters; ++k) {
             size_t n_fineclusters = fine_clusters_nums[k];
@@ -388,11 +403,11 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
             CompactMesoclusterToBuffer(
                 mesocluster_size,
                 data_to_cluster,
-                mesocluster_buffer.data(),
-                assignments_indirection_buffer.data(),
-                mesocluster_indices_flat.data() + mesocluster_offsets[k]
+                mesocluster_buffer.get(),
+                assignments_indirection_buffer.get(),
+                mesocluster_indices_flat.get() + mesocluster_offsets[k]
             );
-            auto mesocluster_data_to_cluster = mesocluster_buffer.data();
+            auto mesocluster_data_to_cluster = mesocluster_buffer.get();
 
             // Compact encoded data for this mesocluster
             const vector_value_t* mesocluster_encoded_data_p;
@@ -402,10 +417,10 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
                 CompactEncodedMesoclusterToBuffer(
                     mesocluster_size,
                     encoded_data_p,
-                    encoded_mesocluster_buffer.data(),
-                    mesocluster_indices_flat.data() + mesocluster_offsets[k]
+                    encoded_mesocluster_buffer.get(),
+                    mesocluster_indices_flat.get() + mesocluster_offsets[k]
                 );
-                mesocluster_encoded_data_p = encoded_mesocluster_buffer.data();
+                mesocluster_encoded_data_p = encoded_mesocluster_buffer.get();
             }
 
             auto mesocluster_centroids_pdx_wrapper = this->GenerateCentroids(
@@ -501,7 +516,7 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
             }
 
             GetTrueAssignmentsFromIndirectionBuffer(
-                assignments_indirection_buffer.data(),
+                assignments_indirection_buffer.get(),
                 final_assignments.get(),
                 this->assignments.get(),
                 mesocluster_size,
@@ -1027,9 +1042,9 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
 
     std::vector<uint32_t> mesoclusters_assignments;
     std::vector<uint32_t> mesoclusters_sizes;
-    std::unique_ptr<uint32_t[]> final_assignments;
-    std::unique_ptr<float[]> immutable_data_norms;
-    std::unique_ptr<centroid_value_t[]> final_centroids;
+    AllocatedBuffer<uint32_t> final_assignments;
+    AllocatedBuffer<float> immutable_data_norms;
+    AllocatedBuffer<centroid_value_t> final_centroids;
     HierarchicalSuperKMeansConfig hierarchical_config;
     HierarchicalSuperKMeansIterationStats hierarchical_iteration_stats;
 };

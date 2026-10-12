@@ -63,6 +63,7 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
     void InvalidateCaches() override {
         cached_x_ptr_ = nullptr;
         cached_n_x_ = 0;
+        cached_partial_n_ = 0;
         cached_partial_d_ = 0;
     }
 
@@ -77,7 +78,7 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
         nibble_bytes_ = d / 2;
         code_size_ = nibble_bytes_ + 8;
         if (!dots_buf_) {
-            dots_buf_.reset(new uint32_t[X_BATCH_SIZE * Y_BATCH_SIZE]);
+            dots_buf_ = AllocateBuffer<uint32_t>(GetAllocator(), X_BATCH_SIZE * Y_BATCH_SIZE);
         }
         packed_buf_.resize(nk_dots_packed_size_u4(Y_BATCH_SIZE, d));
         fitted_ = true;
@@ -118,23 +119,21 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
                 SKM_PROFILE_SCOPE("search/unpack");
                 if (a_changed) {
                     const size_t a_u8_size = m * k;
-                    if (decoded_a_buf.size() < a_u8_size)
-                        decoded_a_buf.resize(a_u8_size);
-                    UnpackU4x2ToU8(executor, a, decoded_a_buf.data(), m, k, a_stride);
+                    EnsureBufferSize(decoded_a_buf, GetAllocator(), a_u8_size);
+                    UnpackU4x2ToU8(executor, a, decoded_a_buf.get(), m, k, a_stride);
                 }
                 if (b_changed) {
                     const size_t b_u8_size = n * k;
-                    if (decoded_b_buf.size() < b_u8_size)
-                        decoded_b_buf.resize(b_u8_size);
-                    UnpackU4x2ToU8(executor, b, decoded_b_buf.data(), n, k, b_stride);
+                    EnsureBufferSize(decoded_b_buf, GetAllocator(), b_u8_size);
+                    UnpackU4x2ToU8(executor, b, decoded_b_buf.get(), n, k, b_stride);
                 }
             }
 
             const bool use_numkong = !IS_ARM && (has_amx || k > THIN_MATRIX_THRESHOLD);
             U8Gemm(
                 executor,
-                decoded_a_buf.data(),
-                decoded_b_buf.data(),
+                decoded_a_buf.get(),
+                decoded_b_buf.get(),
                 out,
                 m,
                 n,
@@ -293,12 +292,14 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
         const float front_d_f = static_cast<float>(front_bytes * 2);
         const float mid_d_f = static_cast<float>(mid_bytes * 2);
 
-        cached_sum_cx_sq_front_.resize(n);
-        cached_sum_cx_sq_mid_.resize(n);
-        cached_norm_x_front_.resize(n);
-        cached_A_x_front_.resize(n);
-        cached_norm_x_mid_.resize(n);
-        cached_A_x_mid_.resize(n);
+        auto& allocator = GetAllocator();
+        EnsureBufferSize(cached_sum_cx_sq_front_, allocator, n);
+        EnsureBufferSize(cached_sum_cx_sq_mid_, allocator, n);
+        EnsureBufferSize(cached_norm_x_front_, allocator, n);
+        EnsureBufferSize(cached_A_x_front_, allocator, n);
+        EnsureBufferSize(cached_norm_x_mid_, allocator, n);
+        EnsureBufferSize(cached_A_x_mid_, allocator, n);
+        cached_partial_n_ = n;
         cached_partial_d_ = partial_d;
 
         GetExecutor().ParallelFor(n, [&](size_t begin, size_t end, size_t) {
@@ -376,7 +377,7 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
 
         EnsureCodeFactorsCache(x_codes, n_x);
 
-        if (cached_partial_d_ != partial_d || cached_norm_x_front_.size() != n_x) {
+        if (cached_partial_d_ != partial_d || cached_partial_n_ != n_x) {
             ComputeDataPartialNorms(x, n_x, partial_d);
         }
 
@@ -468,6 +469,7 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
                             thread_local float partial_dists[Y_BATCH_SIZE];
                             thread_local uint32_t survivor_positions[Y_BATCH_SIZE];
 
+                            // TODO(@lkuffo, low): this loop does not auto-vectorize
                             SKM_VECTORIZE_LOOP
                             for (size_t c = 0; c < batch_n_y; ++c) {
                                 const size_t j_idx = j + c;
@@ -659,36 +661,37 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
     // Per-data caches (keyed by pointer + count for invalidation)
     mutable const uint8_t* cached_x_ptr_ = nullptr;
     mutable size_t cached_n_x_ = 0;
-    mutable std::vector<float> cached_scales_, cached_biases_;
-    mutable std::vector<uint32_t> cached_sum_cx_sq_;
+    mutable AllocatedBuffer<float> cached_scales_, cached_biases_;
+    mutable AllocatedBuffer<uint32_t> cached_sum_cx_sq_;
 
     // GEMM buffers
-    mutable std::unique_ptr<uint32_t[]> dots_buf_;
+    mutable AllocatedBuffer<uint32_t> dots_buf_;
     mutable std::vector<char> packed_buf_;
-    mutable std::vector<uint8_t> decoded_a_buf;
-    mutable std::vector<uint8_t> decoded_b_buf;
+    mutable AllocatedBuffer<uint8_t> decoded_a_buf;
+    mutable AllocatedBuffer<uint8_t> decoded_b_buf;
 
     // Pruning checkpoint caches
-    mutable std::vector<uint32_t> cached_sum_cx_sq_front_;
-    mutable std::vector<uint32_t> cached_sum_cx_sq_mid_;
+    mutable AllocatedBuffer<uint32_t> cached_sum_cx_sq_front_;
+    mutable AllocatedBuffer<uint32_t> cached_sum_cx_sq_mid_;
+    mutable size_t cached_partial_n_ = 0;
     mutable uint32_t cached_partial_d_ = 0;
 
     // Precomputed float caches: norm_x = si²·Σcx² + 2·bi·si·Σcx + D·bi²
     //                           A_x    = si·Σcx + D·bi
-    mutable std::vector<float> cached_norm_x_full_, cached_A_x_full_;
-    mutable std::vector<float> cached_norm_x_front_, cached_A_x_front_;
-    mutable std::vector<float> cached_norm_x_mid_, cached_A_x_mid_;
+    mutable AllocatedBuffer<float> cached_norm_x_full_, cached_A_x_full_;
+    mutable AllocatedBuffer<float> cached_norm_x_front_, cached_A_x_front_;
+    mutable AllocatedBuffer<float> cached_norm_x_mid_, cached_A_x_mid_;
 
     struct CentroidFactors {
-        std::vector<float> scales, biases;
-        std::vector<uint32_t> sum_cy, sum_cy_sq;
-        std::vector<uint32_t> sum_cy_front, sum_cy_sq_front;
-        std::vector<uint32_t> sum_cy_mid, sum_cy_sq_mid;
+        AllocatedBuffer<float> scales, biases;
+        AllocatedBuffer<uint32_t> sum_cy, sum_cy_sq;
+        AllocatedBuffer<uint32_t> sum_cy_front, sum_cy_sq_front;
+        AllocatedBuffer<uint32_t> sum_cy_mid, sum_cy_sq_mid;
         // Precomputed: norm_y = sj²·Σcy² + 2·bj·sj·Σcy + D·bj²
         //              sj_sum_cy = sj·Σcy
-        std::vector<float> norm_y_full, sj_sum_cy_full;
-        std::vector<float> norm_y_front, sj_sum_cy_front_f;
-        std::vector<float> norm_y_mid, sj_sum_cy_mid_f;
+        AllocatedBuffer<float> norm_y_full, sj_sum_cy_full;
+        AllocatedBuffer<float> norm_y_front, sj_sum_cy_front_f;
+        AllocatedBuffer<float> norm_y_mid, sj_sum_cy_mid_f;
     };
 
     void EnsureCodeFactorsCache(const uint8_t* x_codes, size_t n_x) const {
@@ -696,11 +699,12 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
             return;
         SKM_PROFILE_SCOPE("LVQ4::EnsureCodeFactorsCache");
 
-        cached_scales_.resize(n_x);
-        cached_biases_.resize(n_x);
-        cached_sum_cx_sq_.resize(n_x);
-        cached_norm_x_full_.resize(n_x);
-        cached_A_x_full_.resize(n_x);
+        auto& allocator = GetAllocator();
+        EnsureBufferSize(cached_scales_, allocator, n_x);
+        EnsureBufferSize(cached_biases_, allocator, n_x);
+        EnsureBufferSize(cached_sum_cx_sq_, allocator, n_x);
+        EnsureBufferSize(cached_norm_x_full_, allocator, n_x);
+        EnsureBufferSize(cached_A_x_full_, allocator, n_x);
 
         const float d_f = static_cast<float>(d_);
 
@@ -740,20 +744,21 @@ class LVQ4Quantizer : public IQuantizer<Quantization::lvq4> {
         const size_t front_bytes = front_d / 2;
         const size_t mid_bytes = mid_d / 2;
 
-        cf.scales.resize(n_y);
-        cf.biases.resize(n_y);
-        cf.sum_cy.resize(n_y);
-        cf.sum_cy_sq.resize(n_y);
-        cf.sum_cy_front.resize(n_y);
-        cf.sum_cy_sq_front.resize(n_y);
-        cf.sum_cy_mid.resize(n_y);
-        cf.sum_cy_sq_mid.resize(n_y);
-        cf.norm_y_full.resize(n_y);
-        cf.sj_sum_cy_full.resize(n_y);
-        cf.norm_y_front.resize(n_y);
-        cf.sj_sum_cy_front_f.resize(n_y);
-        cf.norm_y_mid.resize(n_y);
-        cf.sj_sum_cy_mid_f.resize(n_y);
+        auto& allocator = GetAllocator();
+        EnsureBufferSize(cf.scales, allocator, n_y);
+        EnsureBufferSize(cf.biases, allocator, n_y);
+        EnsureBufferSize(cf.sum_cy, allocator, n_y);
+        EnsureBufferSize(cf.sum_cy_sq, allocator, n_y);
+        EnsureBufferSize(cf.sum_cy_front, allocator, n_y);
+        EnsureBufferSize(cf.sum_cy_sq_front, allocator, n_y);
+        EnsureBufferSize(cf.sum_cy_mid, allocator, n_y);
+        EnsureBufferSize(cf.sum_cy_sq_mid, allocator, n_y);
+        EnsureBufferSize(cf.norm_y_full, allocator, n_y);
+        EnsureBufferSize(cf.sj_sum_cy_full, allocator, n_y);
+        EnsureBufferSize(cf.norm_y_front, allocator, n_y);
+        EnsureBufferSize(cf.sj_sum_cy_front_f, allocator, n_y);
+        EnsureBufferSize(cf.norm_y_mid, allocator, n_y);
+        EnsureBufferSize(cf.sj_sum_cy_mid_f, allocator, n_y);
 
         const float d_f = static_cast<float>(d_);
         const float front_d_f = static_cast<float>(front_d);

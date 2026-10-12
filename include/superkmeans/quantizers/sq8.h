@@ -87,7 +87,7 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
             GetExecutor(), embeddings, total_elements, static_cast<float>(MAX_VALUE)
         );
         if (!tmp_dots_buf) {
-            tmp_dots_buf.reset(new uint32_t[X_BATCH_SIZE * Y_BATCH_SIZE]);
+            tmp_dots_buf = AllocateBuffer<uint32_t>(GetAllocator(), X_BATCH_SIZE * Y_BATCH_SIZE);
         }
         centroids_nk_packed_buf.resize(nk_dots_packed_size_u8(Y_BATCH_SIZE, d));
         fitted = true;
@@ -248,6 +248,7 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
     void CacheDataPartialNorms(const quantized_t* data, size_t n, size_t d, uint32_t partial_d)
         override {
         CachePartialNorms(data, n, d, partial_d, cached_data_partial_norms);
+        cached_data_partial_n_ = n;
         cached_data_partial_d_ = partial_d;
     }
 
@@ -289,8 +290,9 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
         (void) y_float;
         ParallelExecutor& executor = GetExecutor();
 
-        if (cached_data_partial_norms.size() != n_x || cached_data_partial_d_ != partial_d) {
+        if (cached_data_partial_n_ != n_x || cached_data_partial_d_ != partial_d) {
             CachePartialNorms(x, n_x, d, partial_d, cached_data_partial_norms);
+            cached_data_partial_n_ = n_x;
             cached_data_partial_d_ = partial_d;
         }
 
@@ -378,9 +380,8 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
 
     void ResetCentroidAccumulators(size_t n_clusters, size_t d) override {
         const size_t total = n_clusters * d;
-        if (centroid_accumulators.size() < total)
-            centroid_accumulators.resize(total);
-        std::fill_n(centroid_accumulators.data(), total, 0u);
+        EnsureBufferSize(centroid_accumulators, GetAllocator(), total);
+        std::fill_n(centroid_accumulators.get(), total, 0u);
     }
 
     void UpdateCentroids(
@@ -406,7 +407,7 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
                     if (ci >= c0 && ci < c1) {
                         cluster_sizes[ci] += 1;
                         const auto* vec = encoded_data + i * d;
-                        auto* acc = centroid_accumulators.data() + ci * d;
+                        auto* acc = centroid_accumulators.get() + ci * d;
                         SKM_VECTORIZE_LOOP
                         for (size_t j = 0; j < d; ++j) {
                             acc[j] += vec[j];
@@ -433,7 +434,7 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
             for (size_t i = begin; i < end; ++i) {
                 if (cluster_sizes[i] == 0)
                     continue;
-                const uint32_t* acc = centroid_accumulators.data() + i * d;
+                const uint32_t* acc = centroid_accumulators.get() + i * d;
                 float* row = centroids + i * d;
                 const uint32_t half = cluster_sizes[i] / 2;
                 const float inv_size = 1.0f / static_cast<float>(cluster_sizes[i]);
@@ -457,9 +458,9 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
         size_t n,
         size_t d,
         uint32_t partial_d,
-        std::vector<uint32_t>& out
+        AllocatedBuffer<uint32_t>& out
     ) const {
-        out.resize(n);
+        EnsureBufferSize(out, GetAllocator(), n);
         GetExecutor().ParallelFor(n, [&](size_t begin, size_t end, size_t) {
             for (size_t idx = begin; idx < end; ++idx) {
                 uint32_t sum = 0;
@@ -477,11 +478,12 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
     ScalarQuantizationParams params{};
     bool fitted = false;
     bool has_amx = false;
-    mutable std::vector<uint32_t> cached_data_partial_norms;
+    mutable AllocatedBuffer<uint32_t> cached_data_partial_norms;
+    mutable size_t cached_data_partial_n_ = 0;
     mutable uint32_t cached_data_partial_d_ = 0;
-    std::vector<uint32_t> cached_centroid_partial_norms;
-    mutable std::vector<uint32_t> centroid_accumulators;
-    mutable std::unique_ptr<uint32_t[]> tmp_dots_buf;
+    AllocatedBuffer<uint32_t> cached_centroid_partial_norms;
+    mutable AllocatedBuffer<uint32_t> centroid_accumulators;
+    mutable AllocatedBuffer<uint32_t> tmp_dots_buf;
     mutable std::vector<char> centroids_nk_packed_buf;
 };
 

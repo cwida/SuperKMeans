@@ -78,7 +78,7 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
         // Compute dataset mean as the centering centroid for RaBitQ
         ParallelExecutor& executor = GetExecutor();
         const size_t n_workers = executor.NumWorkers();
-        std::vector<float> worker_sums(n_workers * d, 0.0f);
+        auto worker_sums = AllocateZeroedBuffer<float>(GetAllocator(), n_workers * d);
         executor.ParallelFor(n, [&](size_t begin, size_t end, size_t worker) {
             std::vector<float> local(d, 0.0);
             for (size_t i = begin; i < end; ++i) {
@@ -86,7 +86,7 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
                     local[j] += data[i * d + j];
                 }
             }
-            std::copy(local.begin(), local.end(), worker_sums.begin() + worker * d);
+            std::copy(local.begin(), local.end(), worker_sums.get() + worker * d);
         });
         std::vector<float> sums(d, 0.0);
         for (size_t w = 0; w < n_workers; ++w) {
@@ -165,16 +165,20 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
         // Cache per-data-point factors (depend only on x, reused across iterations)
         EnsureCodeFactorsCache(x_codes, n_x);
         EnsureTransposedBlocksCache(x_codes, n_x);
-        const uint32_t* sum_q = cached_sum_q_.data();
-        const float* or_c_l2sqr = cached_or_c_l2sqr_.data();
-        const float* dp_mult = cached_dp_mult_.data();
+        const uint32_t* sum_q = cached_sum_q_.get();
+        const float* or_c_l2sqr = cached_or_c_l2sqr_.get();
+        const float* dp_mult = cached_dp_mult_.get();
 
         // Quantize centroids and build LUTs (changes every iteration)
         const size_t n_sub = 2 * binary_bytes_; // 2 sub-quantizers per byte position
-        std::vector<float> c1(n_y), c2(n_y), c34(n_y), qr_to_c_l2sqr(n_y);
-        std::vector<uint8_t> all_luts(n_y * n_sub * 16);
+        auto& allocator = GetAllocator();
+        auto c1 = AllocateZeroedBuffer<float>(allocator, n_y);
+        auto c2 = AllocateZeroedBuffer<float>(allocator, n_y);
+        auto c34 = AllocateZeroedBuffer<float>(allocator, n_y);
+        auto qr_to_c_l2sqr = AllocateZeroedBuffer<float>(allocator, n_y);
+        auto all_luts = AllocateZeroedBuffer<uint8_t>(allocator, n_y * n_sub * 16);
         QuantizeCentroidsAndBuildLUTs(
-            y_float, n_y, d, all_luts.data(), c1.data(), c2.data(), c34.data(), qr_to_c_l2sqr.data()
+            y_float, n_y, d, all_luts.get(), c1.get(), c2.get(), c34.get(), qr_to_c_l2sqr.get()
         );
 
         const size_t lut_stride = n_sub * 16;
@@ -217,7 +221,7 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
                     }
 
                     for (size_t j = 0; j < n_y; ++j) {
-                        const uint8_t* lut_j = all_luts.data() + j * lut_stride;
+                        const uint8_t* lut_j = all_luts.get() + j * lut_stride;
 
                         // Multi-block ScanBlock: share LUT across all blocks
                         uint16_t dot_qo[kSuperBlock][kBS];
@@ -351,8 +355,9 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
         const uint8_t* codes = reinterpret_cast<const uint8_t*>(data);
         const size_t front_bytes = partial_d / 8;
         const size_t mid_bytes = d_ / 32; // d/4, byte-aligned
-        cached_sum_q_front_.resize(n);
-        cached_sum_q_mid_.resize(n);
+        EnsureBufferSize(cached_sum_q_front_, GetAllocator(), n);
+        EnsureBufferSize(cached_sum_q_mid_, GetAllocator(), n);
+        cached_partial_n_ = n;
         cached_partial_d_ = partial_d;
         pruning_partial_norms_dirty_ = true;
 
@@ -416,18 +421,18 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
         // Ensure data-side caches
         EnsureCodeFactorsCache(x_codes, n_x);
         EnsureTransposedBlocksCache(x_codes, n_x);
-        if (cached_sum_q_front_.size() != n_x || cached_partial_d_ != partial_d) {
+        if (cached_partial_n_ != n_x || cached_partial_d_ != partial_d) {
             ComputeDataPartialNorms(x, n_x, partial_d);
         }
         EnsurePartialNormsCache(x_float, n_x, d, partial_d);
 
-        const uint32_t* sum_q = cached_sum_q_.data();
-        const float* or_c_l2sqr = cached_or_c_l2sqr_.data();
-        const float* dp_mult = cached_dp_mult_.data();
-        const uint32_t* sum_q_front = cached_sum_q_front_.data();
-        const float* or_c_l2sqr_front = cached_or_c_l2sqr_front_.data();
-        const uint32_t* sum_q_mid = cached_sum_q_mid_.data();
-        const float* or_c_l2sqr_mid = cached_or_c_l2sqr_mid_.data();
+        const uint32_t* sum_q = cached_sum_q_.get();
+        const float* or_c_l2sqr = cached_or_c_l2sqr_.get();
+        const float* dp_mult = cached_dp_mult_.get();
+        const uint32_t* sum_q_front = cached_sum_q_front_.get();
+        const float* or_c_l2sqr_front = cached_or_c_l2sqr_front_.get();
+        const uint32_t* sum_q_mid = cached_sum_q_mid_.get();
+        const float* or_c_l2sqr_mid = cached_or_c_l2sqr_mid_.get();
 
         // Quantize centroids and build LUTs with partial bounds
         const size_t front_bytes = partial_d / 8;
@@ -440,33 +445,39 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
         const size_t phase3_bytes = binary_bytes_ - phase3_start;
         const size_t n_sub = 2 * binary_bytes_;
 
-        std::vector<float> c1(n_y), c2(n_y), c34(n_y), qr_to_c_l2sqr(n_y);
-        std::vector<float> qr_to_c_l2sqr_front(n_y), c34_front(n_y);
-        std::vector<float> qr_to_c_l2sqr_mid(n_y), c34_mid(n_y);
-        std::vector<uint8_t> all_luts(n_y * n_sub * 16);
+        auto& allocator = GetAllocator();
+        auto c1 = AllocateZeroedBuffer<float>(allocator, n_y);
+        auto c2 = AllocateZeroedBuffer<float>(allocator, n_y);
+        auto c34 = AllocateZeroedBuffer<float>(allocator, n_y);
+        auto qr_to_c_l2sqr = AllocateZeroedBuffer<float>(allocator, n_y);
+        auto qr_to_c_l2sqr_front = AllocateZeroedBuffer<float>(allocator, n_y);
+        auto c34_front = AllocateZeroedBuffer<float>(allocator, n_y);
+        auto qr_to_c_l2sqr_mid = AllocateZeroedBuffer<float>(allocator, n_y);
+        auto c34_mid = AllocateZeroedBuffer<float>(allocator, n_y);
+        auto all_luts = AllocateZeroedBuffer<uint8_t>(allocator, n_y * n_sub * 16);
         const size_t rest_bytes = phase3_bytes;
         // Chunk-interleaved layout: for each 16B data chunk, all qb bitplanes
         // are stored contiguously (qb*16 bytes). Regions padded to 16B multiple.
         const size_t gap_chunks = (gap_bytes + 15) / 16;
         const size_t rest_chunks = (rest_bytes + 15) / 16;
         const size_t centroid_stride = (gap_chunks + rest_chunks) * qb_ * 16;
-        std::vector<uint8_t> centroid_planes(n_y * centroid_stride, 0);
+        auto centroid_planes = AllocateZeroedBuffer<uint8_t>(allocator, n_y * centroid_stride);
         QuantizeCentroidsAndBuildLUTsWithBounds(
             y_float,
             n_y,
             d,
             front_d,
             mid_d,
-            all_luts.data(),
-            c1.data(),
-            c2.data(),
-            c34.data(),
-            qr_to_c_l2sqr.data(),
-            qr_to_c_l2sqr_front.data(),
-            c34_front.data(),
-            qr_to_c_l2sqr_mid.data(),
-            c34_mid.data(),
-            centroid_planes.data()
+            all_luts.get(),
+            c1.get(),
+            c2.get(),
+            c34.get(),
+            qr_to_c_l2sqr.get(),
+            qr_to_c_l2sqr_front.get(),
+            c34_front.get(),
+            qr_to_c_l2sqr_mid.get(),
+            c34_mid.get(),
+            centroid_planes.get()
         );
 
         // ADSampling ratios
@@ -497,7 +508,7 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
                     }
 
                     // All partial dots for all blocks in super-block
-                    std::unique_ptr<uint16_t[]> all_partial_dots(new uint16_t[n_blks * n_y * kBS]);
+                    auto all_partial_dots = AllocateBuffer<uint16_t>(allocator, n_blks * n_y * kBS);
 
                     // Pass 1a: Multi-block FastScan all centroids
                     {
@@ -509,7 +520,7 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
                                 }
                                 FastScanComputer::ScanBlockMulti<4>(
                                     packed_ptrs,
-                                    all_luts.data() + j * lut_stride,
+                                    all_luts.get() + j * lut_stride,
                                     front_bytes,
                                     out_ptrs
                                 );
@@ -521,7 +532,7 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
                                     const size_t blk_count = std::min(kBS, n_x - blk * kBS);
                                     FastScanComputer::ScanBlock(
                                         packed_ptrs[bi],
-                                        all_luts.data() + j * lut_stride,
+                                        all_luts.get() + j * lut_stride,
                                         front_bytes,
                                         all_partial_dots.get() + (bi * n_y + j) * kBS,
                                         blk_count
@@ -546,7 +557,7 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
                             best_idx[k] = prev_j;
                             best_dist[k] = ComputeFullDistanceViaLUT(
                                 x_codes + i * code_size_,
-                                all_luts.data() + prev_j * lut_stride,
+                                all_luts.get() + prev_j * lut_stride,
                                 c1[prev_j],
                                 c2[prev_j],
                                 c34[prev_j],
@@ -621,7 +632,7 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
                                     const size_t i = blk_start + k;
                                     accumulated_dots[k] += b8_computer::HorizontalMultiPlane(
                                         x_codes + i * code_size_ + front_bytes,
-                                        centroid_planes.data() + j * centroid_stride,
+                                        centroid_planes.get() + j * centroid_stride,
                                         gap_bytes,
                                         qb_
                                     );
@@ -650,7 +661,7 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
                                 const size_t i = blk_start + k;
                                 accumulated_dots[k] += b8_computer::HorizontalMultiPlane(
                                     x_codes + i * code_size_ + phase3_start,
-                                    centroid_planes.data() + j * centroid_stride +
+                                    centroid_planes.get() + j * centroid_stride +
                                         gap_chunks * qb_ * 16,
                                     rest_bytes,
                                     qb_
@@ -799,11 +810,12 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
         // after we update cached_x_ptr_ below.
         cached_n_blocks_ = 0;
 
-        cached_sum_q_.resize(n_x);
-        cached_or_c_l2sqr_.resize(n_x);
-        cached_dp_mult_.resize(n_x);
+        auto& allocator = GetAllocator();
+        EnsureBufferSize(cached_sum_q_, allocator, n_x);
+        EnsureBufferSize(cached_or_c_l2sqr_, allocator, n_x);
+        EnsureBufferSize(cached_dp_mult_, allocator, n_x);
         PrecomputeCodeFactors(
-            x_codes, n_x, cached_sum_q_.data(), cached_or_c_l2sqr_.data(), cached_dp_mult_.data()
+            x_codes, n_x, cached_sum_q_.get(), cached_or_c_l2sqr_.get(), cached_dp_mult_.get()
         );
         cached_x_ptr_ = x_codes;
         cached_n_x_ = n_x;
@@ -819,12 +831,12 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
     // Cached per-data-point factors (reused across iterations)
     mutable const uint8_t* cached_x_ptr_ = nullptr;
     mutable size_t cached_n_x_ = 0;
-    mutable std::vector<uint32_t> cached_sum_q_;
-    mutable std::vector<float> cached_or_c_l2sqr_;
-    mutable std::vector<float> cached_dp_mult_;
+    mutable AllocatedBuffer<uint32_t> cached_sum_q_;
+    mutable AllocatedBuffer<float> cached_or_c_l2sqr_;
+    mutable AllocatedBuffer<float> cached_dp_mult_;
 
     // Cached transposed blocks (reused across iterations)
-    mutable std::unique_ptr<uint8_t[]> cached_transposed_;
+    mutable AllocatedBuffer<uint8_t> cached_transposed_;
     mutable size_t cached_n_blocks_ = 0;
 
     /// Transpose all data blocks once and cache for reuse across iterations.
@@ -836,7 +848,8 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
 
         const size_t block_bytes = FastScanComputer::kBlockSize * binary_bytes_;
         cached_n_blocks_ = (n_x + FastScanComputer::kBlockSize - 1) / FastScanComputer::kBlockSize;
-        cached_transposed_.reset(new uint8_t[cached_n_blocks_ * block_bytes]);
+        cached_transposed_ =
+            AllocateBuffer<uint8_t>(GetAllocator(), cached_n_blocks_ * block_bytes);
 
         GetExecutor().ParallelFor(cached_n_blocks_, [&](size_t blk_begin, size_t blk_end, size_t) {
             for (size_t blk = blk_begin; blk < blk_end; ++blk) {
@@ -858,8 +871,8 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
 
         const size_t front_d = (static_cast<size_t>(partial_d) / 8) * 8;
         const size_t mid_d = (d / 32) * 8; // d/4, byte-aligned
-        cached_or_c_l2sqr_front_.resize(n_x);
-        cached_or_c_l2sqr_mid_.resize(n_x);
+        EnsureBufferSize(cached_or_c_l2sqr_front_, GetAllocator(), n_x);
+        EnsureBufferSize(cached_or_c_l2sqr_mid_, GetAllocator(), n_x);
 
         GetExecutor().ParallelFor(n_x, [&](size_t begin, size_t end, size_t) {
             for (size_t i = begin; i < end; ++i) {
@@ -1097,15 +1110,16 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
     }
 
     // Pruning caches — checkpoint 1 (front, at partial_d)
-    mutable std::vector<uint32_t> cached_sum_q_front_;   // [n_x] popcount of front bytes
-    mutable std::vector<float> cached_or_c_l2sqr_front_; // [n_x] partial norm over front dims
+    mutable AllocatedBuffer<uint32_t> cached_sum_q_front_;   // [n_x] popcount of front bytes
+    mutable AllocatedBuffer<float> cached_or_c_l2sqr_front_; // [n_x] partial norm over front dims
+    mutable size_t cached_partial_n_ = 0;
     mutable uint32_t cached_partial_d_ = 0;
     mutable uint32_t cached_pruning_partial_d_ = 0;
     mutable bool pruning_partial_norms_dirty_ = true;
 
     // Pruning caches — checkpoint 2 (mid, at d/4)
-    mutable std::vector<uint32_t> cached_sum_q_mid_;   // [n_x] popcount of mid bytes
-    mutable std::vector<float> cached_or_c_l2sqr_mid_; // [n_x] partial norm over mid dims
+    mutable AllocatedBuffer<uint32_t> cached_sum_q_mid_;   // [n_x] popcount of mid bytes
+    mutable AllocatedBuffer<float> cached_or_c_l2sqr_mid_; // [n_x] partial norm over mid dims
 };
 
 } // namespace skmeans

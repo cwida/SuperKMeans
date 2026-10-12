@@ -75,9 +75,9 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
 
     void CacheDataPartialNorms(const quantized_t* data, size_t n, size_t d, uint32_t partial_d)
         override {
-        cached_data_partial_norms.resize(n);
+        EnsureBufferSize(cached_data_partial_norms, GetAllocator(), n);
         Eigen::Map<const MatrixR> e_data(data, n, d);
-        Eigen::Map<VectorR> e_norms(cached_data_partial_norms.data(), n);
+        Eigen::Map<VectorR> e_norms(cached_data_partial_norms.get(), n);
         e_norms.noalias() = e_data.leftCols(partial_d).rowwise().squaredNorm();
     }
 
@@ -87,9 +87,9 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
         size_t d,
         uint32_t partial_d
     ) override {
-        cached_centroid_partial_norms.resize(n);
+        EnsureBufferSize(cached_centroid_partial_norms, GetAllocator(), n);
         Eigen::Map<const MatrixR> e_data(centroids, n, d);
-        Eigen::Map<VectorR> e_norms(cached_centroid_partial_norms.data(), n);
+        Eigen::Map<VectorR> e_norms(cached_centroid_partial_norms.get(), n);
         e_norms.noalias() = e_data.leftCols(partial_d).rowwise().squaredNorm();
     }
 
@@ -109,11 +109,8 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
         float* tmp_buf
     ) const override {
         assert(fitted);
-        assert(!cached_data_partial_norms.empty() && "CacheDataPartialNorms must be called first");
-        assert(
-            !cached_centroid_partial_norms.empty() &&
-            "CacheCentroidPartialNorms must be called first"
-        );
+        assert(cached_data_partial_norms && "CacheDataPartialNorms must be called first");
+        assert(cached_centroid_partial_norms && "CacheCentroidPartialNorms must be called first");
 
         batch_computer::FindNearestNeighborWithPruning(
             GetExecutor(),
@@ -122,8 +119,8 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
             n_x,
             n_y,
             d,
-            cached_data_partial_norms.data(),
-            cached_centroid_partial_norms.data(),
+            cached_data_partial_norms.get(),
+            cached_centroid_partial_norms.get(),
             out_knn,
             out_distances,
             tmp_buf,
@@ -173,8 +170,8 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
   private:
     bool fitted = false;
     size_t dim = 0;
-    std::vector<float> cached_data_partial_norms;
-    std::vector<float> cached_centroid_partial_norms;
+    AllocatedBuffer<float> cached_data_partial_norms;
+    AllocatedBuffer<float> cached_centroid_partial_norms;
 };
 
 } // namespace skmeans
