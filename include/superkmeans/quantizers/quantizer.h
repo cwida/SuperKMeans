@@ -1,5 +1,6 @@
 #pragma once
 
+#include "superkmeans/allocator.h"
 #include "superkmeans/common.h"
 #include "superkmeans/executor.h"
 #include <cstddef>
@@ -21,7 +22,7 @@ class PDXLayout;
  * @tparam q Quantizer type that determines the quantized data type
  */
 template <Quantization q>
-class IQuantizer : public ExecutorHolder {
+class IQuantizer : public ExecutorHolder, public AllocatorHolder {
   public:
     using quantized_t = skmeans_value_t<q>;
 

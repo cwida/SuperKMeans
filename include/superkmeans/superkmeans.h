@@ -8,6 +8,7 @@
 #include <numeric>
 #include <random>
 
+#include "superkmeans/allocator.h"
 #include "superkmeans/common.h"
 #include "superkmeans/distance_computers/base_computers.h"
 #include "superkmeans/distance_computers/batch_computers.h"
@@ -66,6 +67,8 @@ struct SuperKMeansConfig {
 
     // Runs the parallel loops (not owned). nullptr: SuperKMeans creates a default one of n_threads.
     ParallelExecutor* executor = nullptr;
+    // Allocates the large buffers (not owned; must outlive them). nullptr: the VanillaAllocator.
+    MemoryAllocator* allocator = nullptr;
 };
 
 /**
@@ -186,7 +189,7 @@ struct ClusterBalanceStats {
 };
 
 template <Quantization q = Quantization::f32>
-class SuperKMeans : protected ExecutorHolder {
+class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
     static_assert(q != Quantization::sq4, "sq4 is not implemented as a quantizer");
 
   public:
@@ -236,11 +239,14 @@ class SuperKMeans : protected ExecutorHolder {
             owned_executor = MakeDefaultExecutor(config.n_threads);
         }
         SetExecutor(config.executor != nullptr ? config.executor : owned_executor.get());
+        SetAllocator(config.allocator);
         f32_quantizer.SetExecutor(&GetExecutor());
+        f32_quantizer.SetAllocator(&GetAllocator());
         pruner = std::make_unique<pruner_t>(
             dimensionality, PRUNER_INITIAL_THRESHOLD, config.seed, config.data_already_rotated
         );
         pruner->SetExecutor(&GetExecutor());
+        pruner->SetAllocator(&GetAllocator());
 
         // If data is already rotated, we must not unrotate output centroids
         if (this->config.data_already_rotated) {
@@ -303,19 +309,20 @@ class SuperKMeans : protected ExecutorHolder {
         }
         {
             SKM_PROFILE_SCOPE("allocator");
-            centroids.reset(new centroid_value_t[n_clusters * d]);
-            horizontal_centroids.reset(new centroid_value_t[n_clusters * d]);
-            prev_centroids.reset(new centroid_value_t[n_clusters * d]);
-            cluster_sizes.reset(new uint32_t[n_clusters]);
-            assignments.reset(new uint32_t[n]);
-            distances.reset(new distance_t[n]);
-            data_norms.reset(new float[n_samples]);
-            centroid_norms.reset(new float[n_clusters]);
+            centroids = AllocateBuffer<centroid_value_t>(GetAllocator(), n_clusters * d);
+            horizontal_centroids = AllocateBuffer<centroid_value_t>(GetAllocator(), n_clusters * d);
+            prev_centroids = AllocateBuffer<centroid_value_t>(GetAllocator(), n_clusters * d);
+            cluster_sizes = AllocateBuffer<uint32_t>(GetAllocator(), n_clusters);
+            assignments = AllocateBuffer<uint32_t>(GetAllocator(), n);
+            distances = AllocateBuffer<distance_t>(GetAllocator(), n);
+            data_norms = AllocateBuffer<float>(GetAllocator(), n_samples);
+            centroid_norms = AllocateBuffer<float>(GetAllocator(), n_clusters);
         }
-        std::unique_ptr<size_t[]> not_pruned_counts(new size_t[n_samples]);
+        auto not_pruned_counts = AllocateBuffer<size_t>(GetAllocator(), n_samples);
         EnsureTmpDistancesBuffer();
         vertical_d = PDXLayout<q>::GetDimensionSplit(PDXDim(d)).vertical_d;
-        partial_horizontal_centroids.reset(new centroid_value_t[n_clusters * vertical_d]);
+        partial_horizontal_centroids =
+            AllocateBuffer<centroid_value_t>(GetAllocator(), n_clusters * vertical_d);
 
         auto centroids_pdx_wrapper =
             GenerateCentroids(data_p, n_samples, n_clusters, !config.data_already_rotated);
@@ -323,9 +330,9 @@ class SuperKMeans : protected ExecutorHolder {
             std::cout << "Sampling data..." << std::endl;
         }
 
-        std::unique_ptr<float[]> data_samples_buffer;
+        AllocatedBuffer<float> data_samples_buffer;
         if (n_samples < n || !config.data_already_rotated) {
-            data_samples_buffer.reset(new float[n_samples * d]);
+            data_samples_buffer = AllocateBuffer<float>(GetAllocator(), n_samples * d);
         }
         auto data_to_cluster = SampleAndRotateVectors(
             data_p, data_samples_buffer.get(), n, n_samples, !config.data_already_rotated
@@ -359,13 +366,14 @@ class SuperKMeans : protected ExecutorHolder {
         if constexpr (q == Quantization::f32) {
             encoded_data_p = data_to_cluster;
         } else {
-            quantized_data.reset(new vector_value_t[n_samples * code_size]);
+            quantized_data = AllocateBuffer<vector_value_t>(GetAllocator(), n_samples * code_size);
             quantizer->Encode(data_to_cluster, quantized_data.get(), n_samples, d);
             encoded_data_p = quantized_data.get();
         }
 
         // Encode initial centroids (for f32 this is a memcpy, for u8 it quantizes)
-        quantized_centroids.reset(new vector_value_t[n_clusters * code_size]);
+        quantized_centroids =
+            AllocateBuffer<vector_value_t>(GetAllocator(), n_clusters * code_size);
         quantizer->Encode(prev_centroids.get(), quantized_centroids.get(), n_clusters, d);
 
         // Compute full norms via quantizer
@@ -375,10 +383,10 @@ class SuperKMeans : protected ExecutorHolder {
         // Setup quantized PDX layout for pruning (f32 PDX is set up in GenerateCentroids)
         if constexpr (q != Quantization::f32) {
             if (quantizer->SupportsPruning() && quantizer->NeedsPDXLayout()) {
-                pdxified_quantized_centroids.reset(new vector_value_t[n_clusters * PDXDim(d)]);
-                partial_hor_quantized_centroids.reset(
-                    new vector_value_t[n_clusters * PDXDim(vertical_d)]
-                );
+                pdxified_quantized_centroids =
+                    AllocateBuffer<vector_value_t>(GetAllocator(), n_clusters * PDXDim(d));
+                partial_hor_quantized_centroids =
+                    AllocateBuffer<vector_value_t>(GetAllocator(), n_clusters * PDXDim(vertical_d));
                 PDXLayout<q>::template PDXify<false>(
                     quantized_centroids.get(),
                     pdxified_quantized_centroids.get(),
@@ -396,7 +404,7 @@ class SuperKMeans : protected ExecutorHolder {
             }
         }
 
-        std::unique_ptr<float[]> rotated_queries;
+        AllocatedBuffer<float> rotated_queries;
         // Recall tracking uses batch_computer which is only available for f32
         if constexpr (q == Quantization::f32) {
             if (n_queries) {
@@ -410,13 +418,18 @@ class SuperKMeans : protected ExecutorHolder {
                 }
                 {
                     SKM_PROFILE_SCOPE("allocator");
-                    gt_assignments.reset(new uint32_t[n_queries * config.objective_k]);
-                    gt_distances.reset(new distance_t[n_queries * config.objective_k]);
-                    promising_centroids.reset(new uint32_t[n_queries * centroids_to_explore]);
-                    recall_distances.reset(new distance_t[n_queries * centroids_to_explore]);
-                    query_norms.reset(new distance_t[n_queries]);
+                    gt_assignments =
+                        AllocateBuffer<uint32_t>(GetAllocator(), n_queries * config.objective_k);
+                    gt_distances =
+                        AllocateBuffer<distance_t>(GetAllocator(), n_queries * config.objective_k);
+                    promising_centroids =
+                        AllocateBuffer<uint32_t>(GetAllocator(), n_queries * centroids_to_explore);
+                    recall_distances = AllocateBuffer<distance_t>(
+                        GetAllocator(), n_queries * centroids_to_explore
+                    );
+                    query_norms = AllocateBuffer<distance_t>(GetAllocator(), n_queries);
                 }
-                rotated_queries.reset(new float[n_queries * d]);
+                rotated_queries = AllocateBuffer<float>(GetAllocator(), n_queries * d);
                 if (config.sample_queries) {
                     std::cout << "Sampling queries from data..." << std::endl;
                     SampleAndRotateVectors(
@@ -562,17 +575,17 @@ class SuperKMeans : protected ExecutorHolder {
         EnsureTmpDistancesBuffer();
 
         std::vector<uint32_t> result_assignments(n_vectors);
-        std::vector<float> result_distances(n_vectors);
+        auto result_distances = AllocateBuffer<float>(GetAllocator(), n_vectors);
 
-        std::vector<float> vector_norms(n_vectors);
-        std::vector<float> centroid_norms_local(n_centroids);
+        auto vector_norms = AllocateBuffer<float>(GetAllocator(), n_vectors);
+        auto centroid_norms_local = AllocateBuffer<float>(GetAllocator(), n_centroids);
 
         Eigen::Map<const MatrixR> vectors_mat(vectors, n_vectors, d);
-        Eigen::Map<VectorR> v_norms(vector_norms.data(), n_vectors);
+        Eigen::Map<VectorR> v_norms(vector_norms.get(), n_vectors);
         v_norms.noalias() = vectors_mat.rowwise().squaredNorm();
 
         Eigen::Map<const MatrixR> centroids_mat(centroids, n_centroids, d);
-        Eigen::Map<VectorR> c_norms(centroid_norms_local.data(), n_centroids);
+        Eigen::Map<VectorR> c_norms(centroid_norms_local.get(), n_centroids);
         c_norms.noalias() = centroids_mat.rowwise().squaredNorm();
 
         f32_batch_computer::FindNearestNeighbor(
@@ -582,10 +595,10 @@ class SuperKMeans : protected ExecutorHolder {
             n_vectors,
             n_centroids,
             d,
-            vector_norms.data(),
-            centroid_norms_local.data(),
+            vector_norms.get(),
+            centroid_norms_local.get(),
             result_assignments.data(),
-            result_distances.data(),
+            result_distances.get(),
             tmp_distances_buffer.get()
         );
 
@@ -620,12 +633,12 @@ class SuperKMeans : protected ExecutorHolder {
 
         const float* encode_vectors = vectors;
         const float* encode_centroids = centroids;
-        std::unique_ptr<float[]> rotated_vectors_buf;
-        std::unique_ptr<float[]> rotated_centroids_buf;
+        AllocatedBuffer<float> rotated_vectors_buf;
+        AllocatedBuffer<float> rotated_centroids_buf;
         const bool rotate = !config.data_already_rotated && q == Quantization::rabitq;
         if (rotate) {
-            rotated_vectors_buf.reset(new float[n_vectors * d]);
-            rotated_centroids_buf.reset(new float[n_centroids * d]);
+            rotated_vectors_buf = AllocateBuffer<float>(GetAllocator(), n_vectors * d);
+            rotated_centroids_buf = AllocateBuffer<float>(GetAllocator(), n_centroids * d);
             RotateOrCopy(vectors, rotated_vectors_buf.get(), n_vectors, true);
             RotateOrCopy(centroids, rotated_centroids_buf.get(), n_centroids, true);
             encode_vectors = rotated_vectors_buf.get();
@@ -635,15 +648,15 @@ class SuperKMeans : protected ExecutorHolder {
         local_quantizer->Fit(encode_vectors, n_vectors, d);
 
         const size_t cs = local_quantizer->CodeSize(d);
-        std::unique_ptr<vector_value_t[]> q_vectors(new vector_value_t[n_vectors * cs]);
-        std::unique_ptr<vector_value_t[]> q_centroids(new vector_value_t[n_centroids * cs]);
+        auto q_vectors = AllocateBuffer<vector_value_t>(GetAllocator(), n_vectors * cs);
+        auto q_centroids = AllocateBuffer<vector_value_t>(GetAllocator(), n_centroids * cs);
         local_quantizer->Encode(encode_vectors, q_vectors.get(), n_vectors, d);
         local_quantizer->Encode(encode_centroids, q_centroids.get(), n_centroids, d);
 
         std::vector<uint32_t> result_assignments(n_vectors);
-        std::unique_ptr<distance_t[]> result_distances(new distance_t[n_vectors]);
-        std::unique_ptr<float[]> v_norms(new float[n_vectors]);
-        std::unique_ptr<float[]> c_norms(new float[n_centroids]);
+        auto result_distances = AllocateBuffer<distance_t>(GetAllocator(), n_vectors);
+        auto v_norms = AllocateBuffer<float>(GetAllocator(), n_vectors);
+        auto c_norms = AllocateBuffer<float>(GetAllocator(), n_centroids);
         local_quantizer->ComputeNorms(q_vectors.get(), n_vectors, d, v_norms.get());
         local_quantizer->ComputeNorms(q_centroids.get(), n_centroids, d, c_norms.get());
         local_quantizer->FindNearestNeighbor(
@@ -706,10 +719,11 @@ class SuperKMeans : protected ExecutorHolder {
                 std::vector<uint32_t> result_assignments(
                     assignments.get(), assignments.get() + n_vectors
                 );
-                std::vector<distance_t> result_distances(
-                    n_vectors, std::numeric_limits<distance_t>::max()
+                auto result_distances = AllocateBuffer<distance_t>(GetAllocator(), n_vectors);
+                std::fill_n(
+                    result_distances.get(), n_vectors, std::numeric_limits<distance_t>::max()
                 );
-                std::vector<size_t> not_pruned_counts(n_vectors, 0);
+                auto not_pruned_counts = AllocateZeroedBuffer<size_t>(GetAllocator(), n_vectors);
 
                 quantizer->CacheCentroidPartialNorms(
                     quantized_centroids.get(), n_centroids, d, partial_d
@@ -736,10 +750,10 @@ class SuperKMeans : protected ExecutorHolder {
                     n_centroids,
                     d,
                     result_assignments.data(),
-                    result_distances.data(),
+                    result_distances.get(),
                     pdx_wrapper,
                     partial_d,
-                    not_pruned_counts.data(),
+                    not_pruned_counts.get(),
                     tmp_distances_buffer.get()
                 );
 
@@ -750,9 +764,9 @@ class SuperKMeans : protected ExecutorHolder {
                 EnsureTmpDistancesBuffer();
                 quantizer->InvalidateCaches();
                 std::vector<uint32_t> result_assignments(n_vectors);
-                std::unique_ptr<distance_t[]> result_distances(new distance_t[n_vectors]);
-                std::unique_ptr<float[]> v_norms(new float[n_vectors]);
-                std::unique_ptr<float[]> c_norms(new float[n_centroids]);
+                auto result_distances = AllocateBuffer<distance_t>(GetAllocator(), n_vectors);
+                auto v_norms = AllocateBuffer<float>(GetAllocator(), n_vectors);
+                auto c_norms = AllocateBuffer<float>(GetAllocator(), n_centroids);
                 quantizer->ComputeNorms(quantized_data.get(), n_vectors, d, v_norms.get());
                 quantizer->ComputeNorms(quantized_centroids.get(), n_centroids, d, c_norms.get());
                 quantizer->FindNearestNeighbor(
@@ -797,14 +811,13 @@ class SuperKMeans : protected ExecutorHolder {
 
             std::vector<uint32_t> result_assignments(n_vectors);
 
-            std::unique_ptr<size_t[]> not_pruned_counts(new size_t[n_vectors]);
-            std::fill(not_pruned_counts.get(), not_pruned_counts.get() + n_vectors, 0);
-            std::unique_ptr<float[]> data_buffer;
+            auto not_pruned_counts = AllocateZeroedBuffer<size_t>(GetAllocator(), n_vectors);
+            AllocatedBuffer<float> data_buffer;
             const float* data_p;
             if (state.training_data_rotated) {
                 data_p = vectors;
             } else {
-                data_buffer.reset(new float[n_vectors * d]);
+                data_buffer = AllocateBuffer<float>(GetAllocator(), n_vectors * d);
                 RotateOrCopy(vectors, data_buffer.get(), n_vectors, true);
                 data_p = data_buffer.get();
             }
@@ -884,6 +897,7 @@ class SuperKMeans : protected ExecutorHolder {
                 tmp_config.angular = config.angular;
                 tmp_config.data_already_rotated = state.training_data_rotated;
                 tmp_config.executor = &GetExecutor();
+                tmp_config.allocator = &GetAllocator();
                 auto new_n_centroids = static_cast<size_t>(std::sqrt(n_centroids));
                 SuperKMeans tmp_kmeans(new_n_centroids, d, tmp_config);
                 auto meso_centroids = tmp_kmeans.Train(centroids, n_centroids);
@@ -1542,11 +1556,11 @@ class SuperKMeans : protected ExecutorHolder {
             auto tmp_centroids_p = horizontal_centroids.get();
 
             std::mt19937 rng(config.seed);
-            std::vector<size_t> indices(n_points);
+            auto indices = AllocateBuffer<size_t>(GetAllocator(), n_points);
             for (size_t i = 0; i < n_points; ++i) {
                 indices[i] = i;
             }
-            std::shuffle(indices.begin(), indices.end(), rng);
+            std::shuffle(indices.get(), indices.get() + n_points, rng);
             for (size_t i = 0; i < n_clusters; i += 1) {
                 memcpy(
                     (void*) tmp_centroids_p,
@@ -1557,13 +1571,13 @@ class SuperKMeans : protected ExecutorHolder {
             }
         }
         // We populate the centroids buffer with the centroids in the PDX layout
-        std::vector<centroid_value_t> rotated_centroids(n_clusters * d);
-        RotateOrCopy(horizontal_centroids.get(), rotated_centroids.data(), n_clusters, rotate);
+        auto rotated_centroids = AllocateBuffer<centroid_value_t>(GetAllocator(), n_clusters * d);
+        RotateOrCopy(horizontal_centroids.get(), rotated_centroids.get(), n_clusters, rotate);
         if constexpr (q == Quantization::f32) {
             {
                 SKM_PROFILE_SCOPE("consolidate/pdxify");
                 PDXLayout<q>::template PDXify<false>(
-                    rotated_centroids.data(), centroids.get(), n_clusters, d
+                    rotated_centroids.get(), centroids.get(), n_clusters, d
                 );
             }
             //! We wrap centroids and partial_horizontal_centroids in the PDXLayout wrapper
@@ -1614,7 +1628,7 @@ class SuperKMeans : protected ExecutorHolder {
             needed = std::max(needed, X_BATCH_SIZE * Y_BATCH_SIZE);
         }
         if (needed > tmp_distances_buffer_size) {
-            tmp_distances_buffer.reset(new distance_t[needed]);
+            tmp_distances_buffer = AllocateBuffer<distance_t>(GetAllocator(), needed);
             tmp_distances_buffer_size = needed;
         }
     }
@@ -1622,6 +1636,7 @@ class SuperKMeans : protected ExecutorHolder {
     std::unique_ptr<skmeans_quantizer_t<q>> CreateQuantizer() const {
         auto created = std::make_unique<skmeans_quantizer_t<q>>();
         created->SetExecutor(&GetExecutor());
+        created->SetAllocator(&GetAllocator());
         return created;
     }
 
@@ -1896,7 +1911,7 @@ class SuperKMeans : protected ExecutorHolder {
         ParallelExecutor& executor = GetExecutor();
         // Intermediate buffer needed only when both sampling and rotating
         // (we have not yet implemented rotation in-place)
-        std::unique_ptr<float[]> samples_tmp;
+        AllocatedBuffer<float> samples_tmp;
         const float* src_data = data;
 
         if (n_samples < n) {
@@ -1905,13 +1920,13 @@ class SuperKMeans : protected ExecutorHolder {
             SKM_PROFILE_SCOPE("sampling");
             // Random sampling without replacement
             std::mt19937 rng(config.seed);
-            sampled_indices.reset(new size_t[n]);
+            sampled_indices = AllocateBuffer<size_t>(GetAllocator(), n);
             for (size_t i = 0; i < n; ++i) {
                 sampled_indices[i] = i;
             }
             std::shuffle(sampled_indices.get(), sampled_indices.get() + n, rng);
             if (rotate) {
-                samples_tmp.reset(new float[n_samples * d]);
+                samples_tmp = AllocateBuffer<float>(GetAllocator(), n_samples * d);
                 // Need intermediate buffer: sample first, then rotate
                 executor.ParallelFor(n_samples, [&](size_t begin, size_t end, size_t) {
                     for (size_t i = begin; i < end; ++i) {
@@ -1975,38 +1990,38 @@ class SuperKMeans : protected ExecutorHolder {
     //    We can trivially avoid partial_horizontal_centroids by using the full horizontal
     //    centroids in PDXearch. We can also avoid prev_centroids if we dont care about the shift
     //    convergence check.
-    std::unique_ptr<centroid_value_t[]> centroids;            // PDX-layout centroids
-    std::unique_ptr<centroid_value_t[]> horizontal_centroids; // Row-major centroids
-    std::unique_ptr<centroid_value_t[]> prev_centroids;       // Previous iteration centroids
-    std::unique_ptr<centroid_value_t[]> partial_horizontal_centroids; // First vertical_d dimensions
+    AllocatedBuffer<centroid_value_t> centroids;                    // PDX-layout centroids
+    AllocatedBuffer<centroid_value_t> horizontal_centroids;         // Row-major centroids
+    AllocatedBuffer<centroid_value_t> prev_centroids;               // Previous iteration centroids
+    AllocatedBuffer<centroid_value_t> partial_horizontal_centroids; // First vertical_d dimensions
 
     // Buffers for assignment and distance computation
-    std::unique_ptr<distance_t[]> distances;
-    std::unique_ptr<uint32_t[]> cluster_sizes;
-    std::unique_ptr<float[]> data_norms;
-    std::unique_ptr<float[]> centroid_norms;
+    AllocatedBuffer<distance_t> distances;
+    AllocatedBuffer<uint32_t> cluster_sizes;
+    AllocatedBuffer<float> data_norms;
+    AllocatedBuffer<float> centroid_norms;
 
     // Quantization state
     std::unique_ptr<skmeans_quantizer_t<q>> quantizer;
     F32Quantizer f32_quantizer; // float centroid updates (quantized_centroid_update off)
     size_t code_size = 0;       // bytes per encoded vector (= d for SQ8, variable for RaBitQ)
-    std::unique_ptr<vector_value_t[]> quantized_data;
-    std::unique_ptr<vector_value_t[]> quantized_centroids;
-    std::unique_ptr<vector_value_t[]> pdxified_quantized_centroids;
-    std::unique_ptr<vector_value_t[]> partial_hor_quantized_centroids;
+    AllocatedBuffer<vector_value_t> quantized_data;
+    AllocatedBuffer<vector_value_t> quantized_centroids;
+    AllocatedBuffer<vector_value_t> pdxified_quantized_centroids;
+    AllocatedBuffer<vector_value_t> partial_hor_quantized_centroids;
 
     // Buffers for ground truth and recall computation
-    std::unique_ptr<uint32_t[]> gt_assignments;
-    std::unique_ptr<distance_t[]> gt_distances;
-    std::unique_ptr<distance_t[]> query_norms;
-    std::unique_ptr<distance_t[]> tmp_distances_buffer;
+    AllocatedBuffer<uint32_t> gt_assignments;
+    AllocatedBuffer<distance_t> gt_distances;
+    AllocatedBuffer<distance_t> query_norms;
+    AllocatedBuffer<distance_t> tmp_distances_buffer;
     size_t tmp_distances_buffer_size = 0;
-    std::unique_ptr<uint32_t[]> promising_centroids;
-    std::unique_ptr<distance_t[]> recall_distances;
+    AllocatedBuffer<uint32_t> promising_centroids;
+    AllocatedBuffer<distance_t> recall_distances;
 
   public:
-    std::unique_ptr<uint32_t[]> assignments;
-    std::unique_ptr<size_t[]> sampled_indices;
+    AllocatedBuffer<uint32_t> assignments;
+    AllocatedBuffer<size_t> sampled_indices;
     std::vector<SuperKMeansIterationStats> iteration_stats;
 };
 

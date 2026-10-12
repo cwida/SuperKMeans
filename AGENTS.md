@@ -28,6 +28,7 @@ efficient. Papers: **ADSampling** https://dl.acm.org/doi/pdf/10.1145/3589282 (al
 | `include/superkmeans/hierarchical_superkmeans.h` | Hierarchical variant (use for n > 100K) |
 | `include/superkmeans/common.h` | Shared `constexpr` constants + macros/pragmas, `Sgemm` (GEMM backend) |
 | `include/superkmeans/executor.h` | `ParallelExecutor` + `ExecutorHolder`/`ParallelSection`/`ExecutorScope`; backends in `executors/` |
+| `include/superkmeans/allocator.h` | `MemoryAllocator` + `VanillaAllocator`, `AllocatedBuffer` (`AllocateBuffer`/`AllocateZeroedBuffer`/`EnsureBufferSize`), `AllocatorHolder` |
 | `include/superkmeans/profiler.h` | `SKM_PROFILE_SCOPE` timing |
 | `include/superkmeans/distance_computers/` | **All** SIMD distance kernels |
 | `include/superkmeans/quantizers/` | `f32`/`sq8`/`lvq4`/`rabitq` + `quantizer.h`, `sq_common.h` |
@@ -85,8 +86,10 @@ Knobs (see INSTALL.md):
 - **Naming**: `PascalCase` functions/classes/structs; `snake_case` variables/members;
   `UPPER_SNAKE_CASE` constants; namespaces lowercase.
 - Follow `.clang-format` / `.clang-tidy`.
-- **Memory**: RAII, no raw `new`/`delete`. Buffers that don't need zero-init → `new T[]` in a
-  `unique_ptr`, **not** `std::vector`/`resize()`.
+- **Memory**: RAII, no raw `new`/`delete`. Buffers sized by n, n·d, k·d or the worker count come
+  from the bound allocator as an `AllocatedBuffer<T>`: `AllocateBuffer<T>(GetAllocator(), n)`
+  (uninitialized) or `AllocateZeroedBuffer`; grow-only caches use `EnsureBufferSize`. **Not**
+  `std::vector`/`resize()` or `new T[]` for those.
 - Constants/magic numbers → `include/superkmeans/common.h` as `constexpr`.
 - Keep comments simple. TODOs: `TODO(@<github_user>, <priority>): <summary>`.
 - **Reuse before writing**: check `common.h`, `quantizers/sq_common.h`, `pdx/utils.h` first.
@@ -242,6 +245,19 @@ the self-heal. Preserve it if you touch these caches.
   `ComputeScalarQuantizationParams`) takes a `ParallelExecutor&`. Free utilities (`ComputeWCSS`,
   `MakeBlobs`, `ComputeNorms`, brute-force kNN) take a trailing `ParallelExecutor* = nullptr` and
   open an `ExecutorScope` (null: a default pool for that call).
+
+### Allocator binding
+
+`SuperKMeans`, `IQuantizer` and `ADSamplingPruner` also inherit `AllocatorHolder`: a **borrowed**
+`MemoryAllocator` bound wherever the executor is (`config.allocator`, the pruner, `f32_quantizer`,
+`CreateQuantizer()`, the nested k-means' `tmp_config`). Unbound, `GetAllocator()` returns a static
+`VanillaAllocator` (`operator new[]`/`delete[]`).
+- A buffer frees through the allocator it came from (its deleter keeps the allocator and the size),
+  so an injected allocator must outlive every buffer of the objects it is bound to.
+- `EnsureBufferSize` keeps no old contents. A cache whose validity used `vector::size()` keeps its
+  own count (`cached_partial_n_`).
+- On the heap: `std::vector`s returned through the public API, d-sized and per-worker scalars, the
+  NumKong packing buffers (`std::vector<char>&` in `gemms.h`) and Eigen's internal allocations.
 
 ### Portability (MSVC, Wasm)
 

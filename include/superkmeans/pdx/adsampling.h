@@ -1,5 +1,6 @@
 #pragma once
 
+#include "superkmeans/allocator.h"
 #include "superkmeans/distance_computers/base_computers.h"
 #include "superkmeans/executor.h"
 #include "superkmeans/pdx/utils.h"
@@ -52,9 +53,9 @@ inline float ComputeADSamplingRatio(
  * which is more efficient than full matrix multiplication.
  *
  * Rotations run on the bound executor (SetExecutor), serially when unbound. Rotate and Unrotate
- * release its threads when they return.
+ * release its threads when they return. Their scratch comes from the bound allocator.
  */
-class ADSamplingPruner : public ExecutorHolder {
+class ADSamplingPruner : public ExecutorHolder, public AllocatorHolder {
     using MatrixR = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
 
   public:
@@ -215,7 +216,7 @@ class ADSamplingPruner : public ExecutorHolder {
         if constexpr (IN_PLACE) {
             const size_t n_block_rows =
                 std::min<size_t>(ROTATION_BLOCK_SIZE * GetExecutor().NumWorkers(), n);
-            std::unique_ptr<float[]> tmp_block(new float[n_block_rows * num_dimensions]);
+            auto tmp_block = AllocateBuffer<float>(GetAllocator(), n_block_rows * num_dimensions);
             for (size_t i = 0; i < n; i += n_block_rows) {
                 const size_t n_rows = std::min(n_block_rows, static_cast<size_t>(n) - i);
                 float* dst = out_buffer + i * num_dimensions;
@@ -379,7 +380,7 @@ class ADSamplingPruner : public ExecutorHolder {
             (IsPowerOf2(num_dimensions) ? FFTW_ESTIMATE : FFTW_MEASURE) | FFTW_UNALIGNED;
         const size_t block_rows = std::min(ROTATION_BLOCK_SIZE, n);
         const size_t tail_rows = n % block_rows;
-        std::unique_ptr<float[]> scratch(new float[block_rows * num_dimensions]);
+        auto scratch = AllocateBuffer<float>(GetAllocator(), block_rows * num_dimensions);
         auto make_plan = [&](size_t rows) {
             const int howmany = static_cast<int>(rows);
             return fftwf_plan_many_r2r(
