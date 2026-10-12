@@ -50,10 +50,10 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
             dimensionality,
             HIERARCHICAL_PRUNER_INITIAL_THRESHOLD,
             this->config.seed,
-            this->config.data_already_rotated
+            this->config.data_already_rotated,
+            &this->GetAllocator()
         );
         this->pruner->SetExecutor(&this->GetExecutor());
-        this->pruner->SetAllocator(&this->GetAllocator());
         SKMEANS_ENSURE_POSITIVE(config.iters_mesoclustering);
         SKMEANS_ENSURE_POSITIVE(config.iters_fineclustering);
 

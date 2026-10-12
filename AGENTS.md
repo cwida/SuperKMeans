@@ -249,15 +249,17 @@ the self-heal. Preserve it if you touch these caches.
 ### Allocator binding
 
 `SuperKMeans`, `IQuantizer` and `ADSamplingPruner` also inherit `AllocatorHolder`: a **borrowed**
-`MemoryAllocator` bound wherever the executor is (`config.allocator`, the pruner, `f32_quantizer`,
-`CreateQuantizer()`, the nested k-means' `tmp_config`). Unbound, `GetAllocator()` returns a static
-`VanillaAllocator` (`operator new[]`/`delete[]`).
+`MemoryAllocator` bound wherever the executor is (`config.allocator`, `f32_quantizer`,
+`CreateQuantizer()`, the nested k-means' `tmp_config`). The pruner takes it as a constructor
+argument instead, since it builds the rotation (d×d floats, 64 MiB at d=4096) there. Unbound,
+`GetAllocator()` returns a static `VanillaAllocator` (`operator new[]`/`delete[]`).
 - A buffer frees through the allocator it came from (its deleter keeps the allocator and the size),
   so an injected allocator must outlive every buffer of the objects it is bound to.
 - `EnsureBufferSize` keeps no old contents. A cache whose validity used `vector::size()` keeps its
   own count (`cached_partial_n_`).
 - On the heap: `std::vector`s returned through the public API, d-sized and per-worker scalars, the
-  NumKong packing buffers (`std::vector<char>&` in `gemms.h`) and Eigen's internal allocations.
+  NumKong packing buffers (`std::vector<char>&` in `gemms.h`) and Eigen's internal allocations
+  (e.g. the `HouseholderQR` that builds the rotation).
 
 ### Portability (MSVC, Wasm)
 

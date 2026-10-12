@@ -70,14 +70,17 @@ class ADSamplingPruner : public ExecutorHolder, public AllocatorHolder {
      * @param seed Random seed for reproducible rotation matrix generation
      * @param data_already_rotated The caller rotates the data itself: no rotation is built, and
      * Rotate/Unrotate warn and copy the vectors unchanged
+     * @param allocator Allocates the rotation and the scratch (not owned); nullptr: the heap
      */
     ADSamplingPruner(
         uint32_t num_dimensions_,
         float epsilon0,
         uint32_t seed = 42,
-        bool data_already_rotated = false
+        bool data_already_rotated = false,
+        MemoryAllocator* allocator = nullptr
     )
         : num_dimensions(num_dimensions_), epsilon0(epsilon0) {
+        SetAllocator(allocator);
         InitializeRatios();
         if (data_already_rotated) {
             return;
@@ -91,30 +94,33 @@ class ADSamplingPruner : public ExecutorHolder, public AllocatorHolder {
 #else
         if (num_dimensions >= D_THRESHOLD_FOR_DCT_ROTATION) {
 #endif
-            matrix.resize(1, num_dimensions);
+            matrix = AllocateBuffer<float>(GetAllocator(), num_dimensions);
             std::uniform_int_distribution<int> dist(0, 1);
             for (size_t i = 0; i < num_dimensions; ++i) {
-                matrix(i) = dist(gen) ? 1.0f : -1.0f;
+                matrix[i] = dist(gen) ? 1.0f : -1.0f;
             }
             flip_masks.resize(num_dimensions);
             for (size_t i = 0; i < num_dimensions; ++i) {
-                // Use matrix(i) which has the random +1/-1 values, not flip_masks[i] which is
+                // Use matrix[i] which has the random +1/-1 values, not flip_masks[i] which is
                 // uninitialized
-                flip_masks[i] = (matrix(i) < 0.0f ? 0x80000000u : 0u);
+                flip_masks[i] = (matrix[i] < 0.0f ? 0x80000000u : 0u);
             }
             matrix_created = true;
         }
 #endif
         if (!matrix_created) {
-            matrix.resize(num_dimensions, num_dimensions);
+            matrix = AllocateBuffer<float>(
+                GetAllocator(), static_cast<size_t>(num_dimensions) * num_dimensions
+            );
+            Eigen::Map<MatrixR> rotation(matrix.get(), num_dimensions, num_dimensions);
             std::normal_distribution<float> dist(0.0f, 1.0f);
             for (uint32_t i = 0; i < num_dimensions; ++i) {
                 for (uint32_t j = 0; j < num_dimensions; ++j) {
-                    matrix(i, j) = dist(gen);
+                    rotation(i, j) = dist(gen);
                 }
             }
-            const Eigen::HouseholderQR<MatrixR> qr(matrix);
-            matrix = qr.householderQ() * MatrixR::Identity(num_dimensions, num_dimensions);
+            const Eigen::HouseholderQR<MatrixR> qr(rotation);
+            rotation = qr.householderQ() * MatrixR::Identity(num_dimensions, num_dimensions);
         }
     }
 
@@ -265,7 +271,7 @@ class ADSamplingPruner : public ExecutorHolder, public AllocatorHolder {
                     n_rows,
                     k,
                     alpha,
-                    matrix.data(),
+                    matrix.get(),
                     lda,
                     vectors + row * num_dimensions,
                     ldb,
@@ -346,7 +352,7 @@ class ADSamplingPruner : public ExecutorHolder, public AllocatorHolder {
                     n_rows,
                     k,
                     alpha,
-                    matrix.data(),
+                    matrix.get(),
                     lda,
                     rotated_vectors + row * num_dimensions,
                     ldb,
@@ -360,7 +366,7 @@ class ADSamplingPruner : public ExecutorHolder, public AllocatorHolder {
 
   private:
     float epsilon0 = 1.5f;            // Pruning aggressiveness parameter
-    MatrixR matrix;                   // Rotation matrix (or sign vector for DCT)
+    AllocatedBuffer<float> matrix;    // Rotation matrix, row-major (or sign vector for DCT)
     std::vector<uint32_t> flip_masks; // Sign flip masks for DCT-based rotation
 
 #ifdef HAS_FFTW
@@ -436,7 +442,7 @@ class ADSamplingPruner : public ExecutorHolder, public AllocatorHolder {
      * @return Whether there is no rotation (the Rotate/Unrotate call is then done)
      */
     bool WarnIfNoRotation(const float* vectors, float* out_buffer, const uint32_t n) const {
-        if (matrix.size() != 0) {
+        if (matrix) {
             return false;
         }
         std::cout << "WARNING: the ADSampling pruner was built for already rotated data and has no "

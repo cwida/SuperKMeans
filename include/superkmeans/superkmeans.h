@@ -243,10 +243,13 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
         f32_quantizer.SetExecutor(&GetExecutor());
         f32_quantizer.SetAllocator(&GetAllocator());
         pruner = std::make_unique<pruner_t>(
-            dimensionality, PRUNER_INITIAL_THRESHOLD, config.seed, config.data_already_rotated
+            dimensionality,
+            PRUNER_INITIAL_THRESHOLD,
+            config.seed,
+            config.data_already_rotated,
+            &GetAllocator()
         );
         pruner->SetExecutor(&GetExecutor());
-        pruner->SetAllocator(&GetAllocator());
 
         // If data is already rotated, we must not unrotate output centroids
         if (this->config.data_already_rotated) {
