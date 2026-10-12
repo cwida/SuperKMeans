@@ -13,6 +13,7 @@ on:
       - '**.md'
       - 'LICENSE'
       - '.gitignore'
+  workflow_dispatch:
 
 jobs:
   format-check:
@@ -39,13 +40,11 @@ jobs:
       CXX: clang++-18
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-18 clang-tidy-18 libomp-18-dev libopenblas-dev cmake
+          sudo apt-get install -y clang-18 clang-tidy-18 cmake
           sudo ln -sf /usr/bin/clang-tidy-18 /usr/local/bin/clang-tidy
 
       - name: Configure
@@ -60,22 +59,37 @@ jobs:
           ./scripts/tidy_check.sh
 
   cpp-build-and-test:
-    runs-on: ubuntu-24.04
+    name: cpp-build-and-test (${{ matrix.name }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        name: [default, openmp-executor, serial-executor, blas-gemm]
+        include:
+          - name: openmp-executor
+            cmake-args: -DSKMEANS_EXECUTOR=openmp
+            packages: libomp-18-dev
+          - name: serial-executor
+            cmake-args: -DSKMEANS_EXECUTOR=serial
+          - name: blas-gemm
+            cmake-args: -DSKMEANS_GEMM=blas
+            packages: libopenblas-dev
     env:
       CC: clang-18
       CXX: clang++-18
+      # Every worker calls sgemm_ on its own mini-batch: keep the BLAS single-threaded
+      OPENBLAS_NUM_THREADS: 1
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-18 libomp-18-dev libopenblas-dev cmake
+          sudo apt-get install -y clang-18 cmake ${{ matrix.packages }}
 
       - name: Configure
-        run: cmake -B build -DSKMEANS_COMPILE_TESTS=ON -DSKMEANS_COMPILE_EXAMPLES=ON -DCMAKE_BUILD_TYPE=Release
+        run: cmake -B build -DSKMEANS_COMPILE_TESTS=ON -DSKMEANS_COMPILE_EXAMPLES=ON -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake-args }}
 
       - name: Build tests
         run: cmake --build build -j$(nproc) --target tests
@@ -86,6 +100,67 @@ jobs:
       - name: Run tests
         run: ctest --test-dir build --output-on-failure
 
+  windows-msvc:
+    name: windows-msvc (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            arch: x64
+          - os: windows-11-arm
+            arch: ARM64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -A ${{ matrix.arch }} -DSKMEANS_COMPILE_TESTS=ON -DSKMEANS_COMPILE_EXAMPLES=ON
+
+      - name: Build tests
+        run: cmake --build build --config Release --parallel --target tests
+
+      - name: Build examples
+        run: cmake --build build --config Release --parallel --target examples
+
+      - name: Run tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  macos-accelerate:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -DSKMEANS_COMPILE_TESTS=ON -DSKMEANS_COMPILE_EXAMPLES=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build tests
+        run: cmake --build build -j$(sysctl -n hw.ncpu) --target tests
+
+      - name: Build examples
+        run: cmake --build build -j$(sysctl -n hw.ncpu) --target examples
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure
+
+  wasm:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: emscripten-core/setup-emsdk@v16
+        with:
+          version: 3.1.71
+
+      - name: Configure
+        run: emcmake cmake -B build -DSKMEANS_COMPILE_TESTS=ON -DSKMEANS_COMPILE_EXAMPLES=OFF -DSKMEANS_SKIP_FFTW=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build tests
+        run: cmake --build build -j$(nproc) --target tests
+
+      - name: Run tests (Node)
+        run: ctest --test-dir build --output-on-failure
+
   python:
     runs-on: ubuntu-24.04
     env:
@@ -93,13 +168,11 @@ jobs:
       CXX: clang++-18
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-18 libomp-18-dev libopenblas-dev cmake
+          sudo apt-get install -y clang-18 cmake
 
       - uses: actions/setup-python@v5
         with:
@@ -115,19 +188,22 @@ jobs:
         run: python examples/simple_clustering.py 10000 128 50
 
   sanitizers-asan-ubsan:
-    runs-on: ubuntu-24.04
+    name: sanitizers-asan-ubsan (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
     env:
       CC: clang-18
       CXX: clang++-18
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-18 libomp-18-dev libopenblas-dev cmake
+          sudo apt-get install -y clang-18 cmake
 
       - name: Configure with ASan + UBSan
         run: |
@@ -145,20 +221,23 @@ jobs:
         run: ctest --test-dir build_asan --output-on-failure
 
   sanitizers-tsan:
-    runs-on: ubuntu-24.04
+    name: sanitizers-tsan (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
     env:
       CC: clang-18
       CXX: clang++-18
       TSAN_OPTIONS: ignore_noninstrumented_modules=1
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-18 libomp-18-dev libopenblas-dev cmake
+          sudo apt-get install -y clang-18 cmake
 
       - name: Configure with TSan
         run: |
@@ -182,13 +261,11 @@ jobs:
       CXX: clang++-18
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-18 libomp-18-dev cmake
+          sudo apt-get install -y clang-18 cmake
 
       - name: Configure consumer project
         run: cmake -B build_fc tests/fetchcontent_test -DSUPERKMEANS_SOURCE_DIR=${{ github.workspace }} -DCMAKE_BUILD_TYPE=Release
@@ -207,6 +284,9 @@ jobs:
       - format-check
       - tidy-check
       - cpp-build-and-test
+      - windows-msvc
+      - macos-accelerate
+      - wasm
       - python
       - sanitizers-asan-ubsan
       - sanitizers-tsan

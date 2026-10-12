@@ -282,7 +282,7 @@ class SIMDComputer<skmeans::DistanceFunction::l2, skmeans::Quantization::rabitq>
         uint32_t count = static_cast<uint32_t>(_mm_cvtsi128_si64(_mm_add_epi64(sum128, hi64)));
         // Scalar tail
         for (; i < num_bytes; ++i) {
-            count += static_cast<uint32_t>(__builtin_popcount(vector1[i] & vector2[i]));
+            count += static_cast<uint32_t>(SKM_POPCOUNT(vector1[i] & vector2[i]));
         }
         return count;
     };
@@ -341,7 +341,7 @@ class SIMDComputer<skmeans::DistanceFunction::l2, skmeans::Quantization::rabitq>
             size_t byte_in_chunk = i % 16;
             for (int bp = 0; bp < qb; ++bp) {
                 result +=
-                    static_cast<uint32_t>(__builtin_popcount(
+                    static_cast<uint32_t>(SKM_POPCOUNT(
                         data[i] &
                         planes_interleaved
                             [chunk_idx * qb * 16 + static_cast<size_t>(bp) * 16 + byte_in_chunk]

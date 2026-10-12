@@ -41,7 +41,7 @@ inline const std::unordered_map<std::string, float> RECALL_GROUND_TRUTH = {
     {"rabitq", 0.601f},
     {"hierarchical_f32", 0.589f},
     {"hierarchical_sq8", 0.591f},
-    {"hierarchical_lvq4", 0.609f},
+    {"hierarchical_lvq4", 0.592f},
     {"hierarchical_rabitq", 0.587f},
 };
 

@@ -1,14 +1,16 @@
 #pragma once
 
 #include "superkmeans/common.h"
+#include "superkmeans/executor.h"
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <omp.h>
 #include <vector>
 
+#if !defined(__EMSCRIPTEN__)
 #include "ruy/ruy.h"
+#endif
 #include <numkong/numkong.h>
 
 namespace skmeans {
@@ -17,11 +19,12 @@ namespace skmeans {
  * @brief u8×u8→u32 dot-product GEMM leaf, dispatching between NumKong and ruy.
  *
  * Shared by SQ8 (native u8 codes) and LVQ4 (u4 codes decoded to u8). The caller
- * decides the backend via `use_numkong`; the NumKong path packs `b` into
- * `packed_buf` (skipped when `pack_b` is false, i.e. b is unchanged across
- * calls) and parallelizes the row dots. OMP parallelization is handled here.
+ * decides the backend via `use_numkong` (Wasm builds always use NumKong: they have no ruy);
+ * the NumKong path packs `b` into `packed_buf` (skipped when `pack_b` is false, i.e. b is
+ * unchanged across calls). Rows are split across the executor's workers.
  */
 inline void U8Gemm(
+    ParallelExecutor& executor,
     const uint8_t* a,
     const uint8_t* b,
     uint32_t* out,
@@ -34,7 +37,7 @@ inline void U8Gemm(
     std::vector<char>& packed_buf,
     bool pack_b
 ) {
-    if (use_numkong) {
+    if (use_numkong || IS_WASM) {
         if (pack_b) {
             const size_t pack_size = nk_dots_packed_size_u8(n, k);
             if (pack_size > packed_buf.size())
@@ -43,38 +46,25 @@ inline void U8Gemm(
         }
 
         const size_t c_stride = n * sizeof(uint32_t);
-
-#pragma omp parallel num_threads(g_n_threads)
-        {
+        executor.ParallelFor(m, [&](size_t row_begin, size_t row_end, size_t) {
             nk_configure_thread(nk_capabilities());
-            int tid = omp_get_thread_num();
-            int nt = omp_get_num_threads();
-            size_t rows_per_t = (m + nt - 1) / nt;
-            size_t start = tid * rows_per_t;
-            size_t count = std::min(rows_per_t, m - start);
-            if (start < m && count > 0) {
-                nk_dots_packed_u8(
-                    a + start * a_stride,
-                    packed_buf.data(),
-                    out + start * n,
-                    count,
-                    n,
-                    k,
-                    a_stride,
-                    c_stride
-                );
-            }
-        }
+            nk_dots_packed_u8(
+                a + row_begin * a_stride,
+                packed_buf.data(),
+                out + row_begin * n,
+                row_end - row_begin,
+                n,
+                k,
+                a_stride,
+                c_stride
+            );
+        });
         return;
     }
 
-#pragma omp parallel for num_threads(g_n_threads) schedule(static)
-    for (int t = 0; t < static_cast<int>(g_n_threads); ++t) {
-        const size_t row_start = t * m / g_n_threads;
-        const size_t row_end = (t + 1) * m / g_n_threads;
+#if !defined(__EMSCRIPTEN__)
+    executor.ParallelFor(m, [&](size_t row_start, size_t row_end, size_t) {
         const size_t local_rows = row_end - row_start;
-        if (local_rows == 0)
-            continue;
 
         thread_local ruy::Context ctx;
         ctx.set_max_num_threads(1);
@@ -102,7 +92,8 @@ inline void U8Gemm(
 
         ruy::MulParams<std::int32_t, std::int32_t> mul_params;
         ruy::Mul(lhs, rhs, mul_params, &ctx, &dst);
-    }
+    });
+#endif
 }
 
 /**
@@ -114,6 +105,7 @@ inline void U8Gemm(
  * parallelizes the row dots. Strides are in nk_u4x2_t units.
  */
 inline void U4Gemm(
+    ParallelExecutor& executor,
     const uint8_t* a,
     const uint8_t* b,
     uint32_t* out,
@@ -136,28 +128,19 @@ inline void U4Gemm(
     }
 
     const size_t c_stride = n * sizeof(uint32_t);
-
-#pragma omp parallel num_threads(g_n_threads)
-    {
+    executor.ParallelFor(m, [&](size_t row_begin, size_t row_end, size_t) {
         nk_configure_thread(nk_capabilities());
-        int tid = omp_get_thread_num();
-        int nt = omp_get_num_threads();
-        size_t rows_per_t = (m + nt - 1) / nt;
-        size_t start = tid * rows_per_t;
-        size_t count = std::min(rows_per_t, m - start);
-        if (start < m && count > 0) {
-            nk_dots_packed_u4(
-                a_u4 + start * a_stride,
-                packed_buf.data(),
-                out + start * n,
-                count,
-                n,
-                k,
-                a_stride,
-                c_stride
-            );
-        }
-    }
+        nk_dots_packed_u4(
+            a_u4 + row_begin * a_stride,
+            packed_buf.data(),
+            out + row_begin * n,
+            row_end - row_begin,
+            n,
+            k,
+            a_stride,
+            c_stride
+        );
+    });
 }
 
 } // namespace skmeans

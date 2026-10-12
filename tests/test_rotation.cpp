@@ -1,6 +1,5 @@
 #include <cmath>
 #include <gtest/gtest.h>
-#include <omp.h>
 #include <random>
 #include <vector>
 
@@ -46,10 +45,7 @@ std::string GetRotationMethod(size_t d) {
     return uses_dct ? "DCT" : "Orthonormal Matrix";
 }
 
-class RotationTest : public ::testing::Test {
-  protected:
-    void SetUp() override { omp_set_num_threads(omp_get_max_threads()); }
-};
+class RotationTest : public ::testing::Test {};
 
 /**
  * @brief Test that Rotate followed by Unrotate returns original vectors (low dim)
@@ -488,7 +484,7 @@ TEST_F(RotationTest, RotateInPlaceMatchesOutOfPlace_MatrixPath) {
 }
 
 TEST_F(RotationTest, RotateInPlaceMatchesOutOfPlace_MatrixPathMultipleBlocks) {
-    ExpectInPlaceRotationMatchesOutOfPlace(skmeans::INPLACE_ROTATION_BLOCK_ROWS * 2 + 137, 128);
+    ExpectInPlaceRotationMatchesOutOfPlace(skmeans::ROTATION_BLOCK_SIZE * 2 + 137, 128);
 }
 
 TEST_F(RotationTest, RotateInPlaceMatchesOutOfPlace_DCTPath) {

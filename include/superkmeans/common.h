@@ -1,10 +1,25 @@
 #pragma once
 
+#include <Eigen/Dense>
 #include <cinttypes>
-#include <cpuinfo.h>
 #include <cstdint>
 #include <cstdio>
 
+#if !defined(__EMSCRIPTEN__)
+#include <cpuinfo.h>
+#endif
+
+// GEMM backend, chosen at build time (SKMEANS_GEMM in CMake): Accelerate on Apple, Eigen elsewhere,
+// or an external BLAS. Every call is single-threaded.
+#if !defined(SKMEANS_GEMM_EIGEN) && !defined(SKMEANS_GEMM_ACCELERATE) && !defined(SKMEANS_GEMM_BLAS)
+#if defined(__APPLE__)
+#define SKMEANS_GEMM_ACCELERATE 1
+#else
+#define SKMEANS_GEMM_EIGEN 1
+#endif
+#endif
+
+#if !defined(SKMEANS_GEMM_EIGEN)
 extern "C" {
 int sgemm_(
     const char* transa,
@@ -22,8 +37,9 @@ int sgemm_(
     int* ldc
 );
 }
+#endif
 
-#if defined(__APPLE__)
+#if defined(SKMEANS_GEMM_ACCELERATE)
 // Accelerate ships two BLAS implementations: `sgemm_` binds to the legacy one (frozen at LAPACK
 // 3.2.1, with known wrong-result bugs on some Apple Silicon / macOS combinations) while the
 // maintained one sits behind the $NEWLAPACK symbols (macOS >= 13.3). Declared with an asm label so
@@ -77,7 +93,13 @@ extern "C" void skm_cblas_sgemm_newlapack(
 #endif
 
 #ifndef SKM_NO_INLINE
+#if defined(__GNUC__) || defined(__clang__)
 #define SKM_NO_INLINE __attribute__((noinline))
+#elif defined(_MSC_VER)
+#define SKM_NO_INLINE __declspec(noinline)
+#else
+#define SKM_NO_INLINE
+#endif
 #endif
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -90,12 +112,28 @@ extern "C" void skm_cblas_sgemm_newlapack(
 
 #if defined(__GNUC__) || defined(__clang__)
 #define SKM_PREFETCH(addr, rw, locality) __builtin_prefetch((addr), (rw), (locality))
+#elif defined(_MSC_VER) && defined(_M_ARM64)
+#include <intrin.h>
+#define SKM_PREFETCH(addr, rw, locality) __prefetch(addr)
 #elif defined(_MSC_VER)
 #include <xmmintrin.h>
 #define SKM_PREFETCH(addr, rw, locality)                                                           \
     _mm_prefetch(reinterpret_cast<const char*>(addr), _MM_HINT_T0)
 #else
 #define SKM_PREFETCH(addr, rw, locality) ((void) 0)
+#endif
+
+#if defined(__GNUC__) || defined(__clang__)
+#define SKM_POPCOUNT(x) __builtin_popcount(x)
+#define SKM_POPCOUNT64(x) __builtin_popcountll(x)
+#elif defined(_MSC_VER) && defined(_M_ARM64)
+#include <intrin.h>
+#define SKM_POPCOUNT(x) _CountOneBits(static_cast<unsigned long>(x))
+#define SKM_POPCOUNT64(x) _CountOneBits64(static_cast<unsigned __int64>(x))
+#elif defined(_MSC_VER)
+#include <intrin.h>
+#define SKM_POPCOUNT(x) __popcnt(static_cast<unsigned int>(x))
+#define SKM_POPCOUNT64(x) __popcnt64(static_cast<unsigned __int64>(x))
 #endif
 
 // Cross-compiler vectorization hint for loops.
@@ -111,7 +149,8 @@ extern "C" void skm_cblas_sgemm_newlapack(
 
 namespace skmeans {
 
-// SGEMM. Every GEMM in the code base goes through here.
+// SGEMM, column-major. Every GEMM in the code base goes through here; each call runs
+// single-threaded (callers parallelize over row blocks with a ParallelExecutor).
 inline void Sgemm(
     char transa,
     char transb,
@@ -127,7 +166,33 @@ inline void Sgemm(
     float* c,
     int ldc
 ) {
-#if defined(__APPLE__)
+#if defined(SKMEANS_GEMM_EIGEN)
+    using ColMajorMatrix = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::ColMajor>;
+    const bool ta = (transa == 'T' || transa == 't');
+    const bool tb = (transb == 'T' || transb == 't');
+    Eigen::Map<const ColMajorMatrix, 0, Eigen::OuterStride<>> a_mat(
+        a, ta ? k : m, ta ? m : k, Eigen::OuterStride<>(lda)
+    );
+    Eigen::Map<const ColMajorMatrix, 0, Eigen::OuterStride<>> b_mat(
+        b, tb ? n : k, tb ? k : n, Eigen::OuterStride<>(ldb)
+    );
+    Eigen::Map<ColMajorMatrix, 0, Eigen::OuterStride<>> c_mat(c, m, n, Eigen::OuterStride<>(ldc));
+    if (beta == 0.0f) {
+        c_mat.setZero();
+    } else if (beta != 1.0f) {
+        c_mat *= beta;
+    }
+    if (ta && !tb) {
+        c_mat.noalias() += alpha * a_mat.transpose() * b_mat;
+    } else if (!ta && !tb) {
+        c_mat.noalias() += alpha * a_mat * b_mat;
+    } else if (ta && tb) {
+        c_mat.noalias() += alpha * a_mat.transpose() * b_mat.transpose();
+    } else {
+        c_mat.noalias() += alpha * a_mat * b_mat.transpose();
+    }
+#else
+#if defined(SKMEANS_GEMM_ACCELERATE)
     if (&skm_cblas_sgemm_newlapack != nullptr) {
         constexpr int COL_MAJOR = 102, NO_TRANS = 111, TRANS = 112;
         skm_cblas_sgemm_newlapack(
@@ -150,12 +215,12 @@ inline void Sgemm(
     }
 #endif
     sgemm_(&transa, &transb, &m, &n, &k, &alpha, a, &lda, b, &ldb, &beta, c, &ldc);
+#endif
 }
 
 static inline constexpr float PROPORTION_HORIZONTAL_DIM = 0.75;
 static inline constexpr size_t D_THRESHOLD_FOR_DCT_ROTATION = 512;
 static inline constexpr size_t H_DIM_SIZE = 64;
-static inline constexpr size_t INPLACE_ROTATION_BLOCK_ROWS = 4096;
 
 // Below 32, GEMM stops accelerating
 static inline constexpr uint32_t MIN_PARTIAL_D = 32;
@@ -168,11 +233,18 @@ static inline constexpr size_t N_CLUSTERS_THRESHOLD_FOR_PRUNING = 256;
 // AMX (used with Apple Accelerate) benefits from larger batch sizes
 static inline constexpr size_t X_BATCH_SIZE = 40960;
 static inline constexpr size_t Y_BATCH_SIZE = 2048;
-static inline constexpr size_t MINI_BATCH_SIZE = 256;
 #else
 static inline constexpr size_t X_BATCH_SIZE = 4096;
 static inline constexpr size_t Y_BATCH_SIZE = 1024;
 #endif
+
+// Rows of X per single-threaded GEMM call in the assignment pass (each worker runs its own).
+// Measured as the best value on AMD Zen 5, Intel Granite Rapids, Apple M4 Pro and AWS Graviton4.
+static inline constexpr size_t MINI_BATCH_SIZE = 256;
+
+// Rows per single-threaded rotation GEMM or DCT call (each worker runs its own).
+// Measured on AMD Zen 5, Intel Granite Rapids, Apple M4 Pro and AWS Graviton4.
+static inline constexpr size_t ROTATION_BLOCK_SIZE = 2048;
 
 static inline constexpr size_t VECTOR_CHUNK_SIZE = Y_BATCH_SIZE;
 
@@ -192,11 +264,6 @@ static inline constexpr float CENTROID_PERTURBATION_EPS = 1.0f / 1024.0f;
 static inline constexpr float PRUNER_INITIAL_THRESHOLD = 1.5f;
 static inline constexpr float HIERARCHICAL_PRUNER_INITIAL_THRESHOLD = 1.1f;
 
-// Global thread count for OpenMP parallel regions
-// This is set by SuperKMeans constructor. Not ideal but needed for
-// external functions (adsampling, batch_computers) that can't access class members.
-inline uint32_t g_n_threads = 1;
-
 template <class T, T val = 8>
 static constexpr uint32_t AlignValue(T n) {
     return ((n + (val - 1)) / val) * val;
@@ -211,9 +278,20 @@ inline constexpr bool IS_ARM = true;
 inline constexpr bool IS_ARM = false;
 #endif
 
+// Wasm builds have neither ruy nor cpuinfo: NumKong runs every 8-bit GEMM there
+#if defined(__EMSCRIPTEN__)
+inline constexpr bool IS_WASM = true;
+#else
+inline constexpr bool IS_WASM = false;
+#endif
+
 inline bool DetectAMX() {
+#if defined(__EMSCRIPTEN__)
+    return false;
+#else
     cpuinfo_initialize();
     return cpuinfo_has_x86_amx_int8();
+#endif
 }
 
 enum class DistanceFunction : uint8_t { l2, dp };

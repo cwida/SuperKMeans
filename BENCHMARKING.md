@@ -9,10 +9,10 @@ cmake . -DSKMEANS_COMPILE_BENCHMARKS=ON
 ## Prerequisites (CPU)
 
 ### Clang, CMake, OpenMP and a BLAS implementation 
-Check [INSTALL.md](./INSTALL.md). 
+Check [INSTALL.md](./INSTALL.md). SuperKMeans itself needs neither OpenMP nor a BLAS; the FAISS baselines do.
 
 > [!IMPORTANT]
-> A proper BLAS implementation is **EXTREMELY** important for performance. The pre-installed BLAS in your Linux distribution and OpenBLAS installed via `apt` are **SLOW**.
+> A proper BLAS implementation is **EXTREMELY** important for FAISS performance. The pre-installed BLAS in your Linux distribution and OpenBLAS installed via `apt` are **SLOW**.
 
 ### FAISS 
 Our CMake will install FAISS for you. However, you need to set the proper optimization flag. For example, on a machine that supports AVX512, you should do:

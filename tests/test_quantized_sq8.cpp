@@ -220,8 +220,7 @@ TEST(SQ8FinalizeCentroidsTest, RecoversClusterMeans) {
         cluster_sizes.data(),
         n_vectors,
         n_clusters,
-        d,
-        1
+        d
     );
     quantizer.FinalizeCentroids(centroid_buf.data(), cluster_sizes.data(), n_clusters, d);
 

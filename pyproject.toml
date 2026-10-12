@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "superkmeans"
-version = "0.2.0"
+version = "0.3.0"
 description = "A Super fast K-Means library for High-Dimensional vectors on CPUs (x86, ARM) and GPUs"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -53,6 +53,8 @@ cmake.source-dir = "."
 wheel.packages = ["python/superkmeans"]
 cmake.build-type = "Release"
 install.components = ["python"]
+# Test and benchmark data are not needed to build the package
+sdist.exclude = ["tests/test_data.bin", "benchmarks/ground_truth/", "benchmarks/results/"]
 
 cmake.args = [
     "-DSKMEANS_COMPILE_TESTS=OFF",
@@ -74,13 +76,11 @@ test-command = "pytest {project}/python/tests -v"
 manylinux-x86_64-image = "manylinux_2_28"
 manylinux-aarch64-image = "manylinux_2_28"
 archs = ["auto64"]
-before-all = "bash {project}/scripts/ci/build_linux_deps.sh"
 environment = { SKMEANS_PORTABLE="ON", SKMEANS_SKIP_FFTW="ON" }
 
 [tool.cibuildwheel.macos]
 archs = ["auto"]
-before-all = "bash {project}/scripts/ci/build_macos_deps.sh"
-environment = { CC="clang", CXX="clang++", SKMEANS_PORTABLE="ON", SKMEANS_SKIP_FFTW="ON", OpenMP_ROOT="/usr/local" }
+environment = { CC="clang", CXX="clang++", SKMEANS_PORTABLE="ON", SKMEANS_SKIP_FFTW="ON" }
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]

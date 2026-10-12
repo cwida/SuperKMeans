@@ -69,6 +69,7 @@ tests/cmake_test_discovery_*.json
 .claude/
 
 *.cmake
+!/cmake/*.cmake
 *.ipynb_checkpoints
 *.db
 *.lock
@@ -100,6 +101,7 @@ venv
 *.png
 *.hdf5
 *.csv
+*.parquet
 benchmarks/results/topk_distances_*.json
 !benchmarks/results/plots/github_*.png
 !benchmarks/results/plots/comparison_*.png

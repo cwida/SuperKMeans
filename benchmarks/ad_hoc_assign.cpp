@@ -4,7 +4,6 @@
 
 #include <fstream>
 #include <iostream>
-#include <omp.h>
 #include <vector>
 
 #include "bench_utils.h"
@@ -27,8 +26,7 @@ int main(int argc, char* argv[]) {
     int n_iters = 5;
     float sampling_fraction = 1.0;
     std::string filename = bench_utils::GetDataPath(dataset);
-    const size_t THREADS = omp_get_max_threads();
-    omp_set_num_threads(THREADS);
+    const size_t THREADS = skmeans::ResolveNumThreads(0);
 
     std::cout << "=== Assign Benchmark ===" << std::endl;
     std::cout << "Dataset: " << dataset << " (n=" << n << ", d=" << d << ")\n";
