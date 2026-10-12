@@ -85,6 +85,7 @@ target_compile_definitions(test_quantized.out PRIVATE CMAKE_SOURCE_DIR="${CMAKE_
 add_executable(test_executor.out test_executor.cpp)
 target_link_libraries(test_executor.out PRIVATE ${TEST_COMMON_LIBS})
 
+set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE PRE_TEST)
 include(GoogleTest)
 gtest_discover_tests(test_rotation.out)
 gtest_discover_tests(test_assign.out)
