@@ -85,6 +85,9 @@ target_compile_definitions(test_quantized.out PRIVATE CMAKE_SOURCE_DIR="${CMAKE_
 add_executable(test_executor.out test_executor.cpp)
 target_link_libraries(test_executor.out PRIVATE ${TEST_COMMON_LIBS})
 
+add_executable(test_two_means.out test_two_means.cpp)
+target_link_libraries(test_two_means.out PRIVATE ${TEST_COMMON_LIBS})
+
 set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE PRE_TEST)
 include(GoogleTest)
 gtest_discover_tests(test_rotation.out)
@@ -99,6 +102,7 @@ gtest_discover_tests(test_quantized_lvq4.out)
 gtest_discover_tests(test_quantized_rabitq.out)
 gtest_discover_tests(test_quantized.out)
 gtest_discover_tests(test_executor.out)
+gtest_discover_tests(test_two_means.out)
 
 add_custom_target(tests
     DEPENDS
@@ -114,4 +118,5 @@ add_custom_target(tests
         test_quantized_rabitq.out
         test_quantized.out
         test_executor.out
+        test_two_means.out
 )
