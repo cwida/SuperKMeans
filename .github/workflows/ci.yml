@@ -71,6 +71,10 @@ jobs:
             cc: gcc-13
             cxx: g++-13
             packages: g++-13
+          # NumKong's arch=armv8.2-a kernels cannot inline helpers built for a newer -march=native
+          - name: gcc
+            os: ubuntu-24.04-arm
+            cmake-args: -DSKMEANS_PORTABLE=ON
           - name: openmp-executor
             cmake-args: -DSKMEANS_EXECUTOR=openmp
             packages: libomp-18-dev
