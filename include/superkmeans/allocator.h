@@ -13,9 +13,9 @@ namespace skmeans {
  * counts toward a memory limit).
  *
  * Allocate throws on failure and never returns nullptr, not even for 0 bytes (like operator new[]).
- * Free receives the size passed to Allocate. ParallelFor workers allocate concurrently, so implementations must be thread-safe.
- * An injected allocator is borrowed: it must outlive the objects it is bound to, since every
- * buffer is freed through the allocator it came from.
+ * Free receives the size passed to Allocate. ParallelFor workers allocate concurrently, so
+ * implementations must be thread-safe. An injected allocator is borrowed: it must outlive the
+ * objects it is bound to, since every buffer is freed through the allocator it came from.
  *
  * Not every allocation goes through it, only the large buffers (centroids, assignments, sample
  * and scratch buffers, quantizer caches, the rotation matrix). The std::vectors returned by the
