@@ -12,10 +12,10 @@ namespace skmeans {
  * @brief Where SuperKMeans' large buffers come from; the caller may inject its own (e.g. one that
  * counts toward a memory limit).
  *
- * Allocate throws on failure and never returns nullptr. Free receives the size passed to
- * Allocate. ParallelFor workers allocate concurrently, so implementations must be thread-safe.
- * An injected allocator is borrowed: it must outlive the objects it is bound to, since every
- * buffer is freed through the allocator it came from.
+ * Allocate throws on failure and never returns nullptr, not even for 0 bytes (like operator new[]).
+ * Free receives the size passed to Allocate. ParallelFor workers allocate concurrently, so
+ * implementations must be thread-safe. An injected allocator is borrowed: it must outlive the
+ * objects it is bound to, since every buffer is freed through the allocator it came from.
  *
  * Not every allocation goes through it, only the large buffers (centroids, assignments, sample
  * and scratch buffers, quantizer caches, the rotation matrix). The std::vectors returned by the
@@ -57,9 +57,6 @@ using AllocatedBuffer = std::unique_ptr<T[], BufferDeleter<T>>;
 template <typename T>
 AllocatedBuffer<T> AllocateBuffer(MemoryAllocator& allocator, size_t size) {
     static_assert(std::is_trivial<T>::value, "an AllocatedBuffer runs no constructors");
-    if (size == 0) {
-        return AllocatedBuffer<T>();
-    }
     return AllocatedBuffer<T>(
         static_cast<T*>(allocator.Allocate(size * sizeof(T))), BufferDeleter<T>(&allocator, size)
     );
