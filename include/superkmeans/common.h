@@ -264,6 +264,27 @@ static inline constexpr float CENTROID_PERTURBATION_EPS = 1.0f / 1024.0f;
 static inline constexpr float PRUNER_INITIAL_THRESHOLD = 1.5f;
 static inline constexpr float HIERARCHICAL_PRUNER_INITIAL_THRESHOLD = 1.1f;
 
+// e-means recipe (Reference: https://arxiv.org/abs/2611.09501, faiss/contrib/e_means)
+static inline constexpr uint32_t EMEANS_DEFAULT_EPOCHS = 2;
+static inline constexpr double EMEANS_BATCH_LAW_C = 0.035134;
+static inline constexpr double EMEANS_BATCH_LAW_K_EXP = 0.134749;
+static inline constexpr double EMEANS_BATCH_LAW_N_EXP = 0.876473;
+static inline constexpr double EMEANS_BATCH_LAW_T_EXP = 0.813344;
+static inline constexpr double EMEANS_STEP_LAW_C = 0.8244;
+static inline constexpr double EMEANS_STEP_LAW_K_EXP = -0.4617;
+static inline constexpr double EMEANS_STEP_LAW_B_EXP = 0.9003;
+static inline constexpr double EMEANS_STEP_LAW_N_EXP = -0.4498;
+static inline constexpr double EMEANS_STEP_LAW_T_EXP = -0.1057;
+static inline constexpr double EMEANS_MIN_STEP = 1e-4;
+static inline constexpr double EMEANS_STEP_FLOOR = 0.1;
+static inline constexpr double EMEANS_PI = 3.14159265358979323846;
+static inline constexpr size_t EMEANS_REVIVE_EVERY = 5;
+static inline constexpr float EMEANS_REVIVE_THRESHOLD = 0.1f;
+static inline constexpr float EMEANS_INITIAL_USAGE = 1.0f / 65536.0f;
+static inline constexpr float EMEANS_SPLIT_EPS = 1e-4f;
+static inline constexpr size_t EMEANS_EPOCH_SEED_MULTIPLIER = 1000003;
+static inline constexpr size_t EMEANS_ASSIGNMENT_CHUNK_SIZE = 262144;
+
 template <class T, T val = 8>
 static constexpr uint32_t AlignValue(T n) {
     return ((n + (val - 1)) / val) * val;
