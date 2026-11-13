@@ -42,7 +42,7 @@ def main():
         return 1
 
     n, d = data.shape
-    k = int(sys.argv[2]) if len(sys.argv) > 2 else math.sqrt(n) * 4
+    k = int(sys.argv[2]) if len(sys.argv) > 2 else int(math.sqrt(n) * 4)
     quantizer = sys.argv[3] if len(sys.argv) > 3 else "f32"
     print(f"Loaded {n:,} vectors with {d} dimensions")
     print(f"Number of clusters: {k}")
