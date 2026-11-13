@@ -26,6 +26,7 @@ efficient. Papers: **ADSampling** https://dl.acm.org/doi/pdf/10.1145/3589282 (al
 | --- | --- |
 | `include/superkmeans/superkmeans.h` | Core — `Train()`, assign family, pruning loop |
 | `include/superkmeans/hierarchical_superkmeans.h` | Hierarchical variant (use for n > 100K) |
+| `include/superkmeans/superemeans.h` | e-means (mini-batch EMA k-means, https://arxiv.org/abs/2611.09501) on the SuperKMeans machinery; `SuperEMeans<q>` |
 | `include/superkmeans/common.h` | Shared `constexpr` constants + macros/pragmas, `Sgemm` (GEMM backend) |
 | `include/superkmeans/executor.h` | `ParallelExecutor` + `ExecutorHolder`/`ParallelSection`/`ExecutorScope`; backends in `executors/` |
 | `include/superkmeans/allocator.h` | `MemoryAllocator` + `VanillaAllocator`, `AllocatedBuffer` (`AllocateBuffer`/`AllocateZeroedBuffer`/`EnsureBufferSize`), `AllocatorHolder` |
@@ -49,6 +50,9 @@ Docs: `README.md`, `INSTALL.md`, `BENCHMARKING.md`, `CONTRIBUTING.md`, `python/R
    `HierarchicalSuperKMeans` inherits `SuperKMeans` (ctor + shared members propagate via
    delegation) but **overrides `Train` and the clustering pipeline** — so edits to the
    training/pipeline path do NOT automatically carry over. Apply/verify there too.
+   `SuperEMeans` (`superemeans.h`) also overrides `Train`, but builds it from the base's
+   `SetupTraining`/`AssignPoints`/`AccumulatePoints`/`FinalizeMeans`/`PublishCentroids`: changes
+   to those, or to the trained state `AssignTrainingPoints` reads, must be verified there too.
 2. **Format** — `./scripts/format.sh`, then `./scripts/format_check.sh` clean.
 3. **Build** — `cmake . -DSKMEANS_COMPILE_TESTS=ON && make -j$(nproc) tests`, no errors.
 4. **C++ tests** — `ctest --output-on-failure` all pass (a few parametrized cases skip by design).
@@ -155,6 +159,9 @@ Performance-critical — weigh every copy/allocation.
   all quantizers** — add it as a `TYPED_TEST` (flat) plus its hierarchical counterpart, not a
   single-quantizer case.
 - Recall-checking tests need `#undef HAS_FFTW` at the top (see Gotchas).
+- `tests/test_superemeans.cpp` is typed over f32/sq8/lvq4/rabitq (no hierarchical SuperEMeans
+  exists) and asserts quality relative to SuperKMeans on `test_data.bin`, not against
+  `RECALL_GROUND_TRUTH`.
 
 ## Gotchas
 
@@ -211,7 +218,9 @@ no d × d matrix to hand out. With `data_already_rotated` the pruner is built wi
   256 (N_CLUSTERS_THRESHOLD_FOR_PRUNING) && iters > 1`; (2) **GEMM-only reuse** if `sampling==1.0`
   but the gate fails; (3) **fallback to `QuantizedAssign`** if `sampling < 1.0`. It and
   `QuantizedAssign` need **not** agree per-point (different domains for sq8/lvq4) — validate
-  **recall**, not per-point agreement.
+  **recall**, not per-point agreement. On path (1) RaBitQ also reads float vectors (`x_float`,
+  for its partial-norm bounds), so they are rotated into a temporary unless training kept them
+  rotated.
 
 **Stale caches (classic footgun).** The quantized path caches centroid norms, data norms, and
 **partial-norms** for pruning (keyed on `partial_d`). Reading a cache an earlier step didn't
@@ -227,6 +236,14 @@ refinement; **`iters_refinement` defaults to 0**. `partial_d` is shrunk to the r
 a small `partial_d` with a partial-norms cache keyed to the fineclustering `partial_d`. A later
 `AssignTrainingPoints` (pruning reuse) reads that mismatch — the SIGSEGV above, survived only by
 the self-heal. Preserve it if you touch these caches.
+
+**SuperEMeans state and per-chunk caches.** `horizontal_centroids` always holds the centroids
+being assigned against (the EMA positions for L2; for `angular`, their normalized copy, with the
+unnormalized positions in `positions`), `prev_centroids` the batch means, `assignments` the
+last-pass labels (pruning seeds). Batches are assigned in chunks gathered into one reused buffer,
+and quantizer caches key on pointer/size, not content: every chunk calls `InvalidateCaches()` and,
+when pruning, `CacheDataPartialNorms` (without them f32 crashes, lvq4/rabitq silently lose
+recall). `FinalizeTraining` leaves the state `AssignTrainingPoints` expects.
 
 ### Executor binding
 
