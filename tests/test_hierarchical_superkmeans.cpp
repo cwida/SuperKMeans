@@ -630,6 +630,34 @@ TEST_F(HierarchicalSuperKMeansTest, Quantized_AssignTrainingPointsBlasOnlyReuse)
     run(skmeans::QuantizationTag<skmeans::Quantization::rabitq>{});
 }
 
+TEST_F(HierarchicalSuperKMeansTest, RabitQ_AssignTrainingPointsAgreesWithQuantizedAssign) {
+    const size_t n = 10000;
+    const size_t d = 1024;
+    const size_t n_clusters = 300;
+    std::vector<float> data =
+        skm_test::LoadTestDataSubdim(CMAKE_SOURCE_DIR "/tests/test_data.bin", n, 1024, d);
+
+    skmeans::HierarchicalSuperKMeansConfig config;
+    config.iters_mesoclustering = 5;
+    config.iters_fineclustering = 5;
+    config.iters_refinement = 0;
+    config.seed = 42;
+    config.sampling_fraction = 1.0f;
+
+    auto kmeans =
+        skmeans::HierarchicalSuperKMeans<skmeans::Quantization::rabitq>(n_clusters, d, config);
+    auto centroids = kmeans.Train(data.data(), n);
+    auto quantized = kmeans.QuantizedAssign(data.data(), centroids.data(), n, n_clusters);
+    auto reuse = kmeans.AssignTrainingPoints(data.data(), centroids.data(), n, n_clusters);
+
+    size_t agree = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (reuse[i] == quantized[i])
+            agree++;
+    }
+    EXPECT_GE(static_cast<double>(agree) / n, 0.95);
+}
+
 namespace {
 void ExpectHierarchicalTrainAndAssignValid(
     const std::vector<float>& data,
