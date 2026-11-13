@@ -62,7 +62,7 @@ Docs: `README.md`, `INSTALL.md`, `BENCHMARKING.md`, `CONTRIBUTING.md`, `python/R
 6. **Python** — `venv/bin/pip install .` (builds the bindings), then `venv/bin/pytest python/tests/`.
 7. **Examples** — `make examples`, then run all of them to completion: the C++ ones
    (`./examples/{simple,hierarchical,quantized}_clustering.out <n> <d> <k>`, e.g. `100000 128 1000`)
-   and the Python ones (`venv/bin/python3 examples/{simple,quantized}_clustering.py`;
+   and the Python ones (`venv/bin/python3 examples/{simple,quantized,emeans}_clustering.py`;
    `hdf5_clustering.py` too if an `.hdf5` dataset is at hand — they live outside the repo).
 8. **AGENTS.md accurate** — if the change invalidated anything here (paths, commands, contracts,
    thresholds, gotchas, SIMD org, style), update this file in the same change.
@@ -135,10 +135,11 @@ Performance-critical — weigh every copy/allocation.
   `QuantizerClass<q>` specialization pointing at the class (`CreateQuantizer()`/`GetQuantizer()`
   resolve through that trait — nothing to register in `superkmeans.h`); add a
   `using SuperKMeans<Name> = SuperKMeans<Quantization::…>` alias in `superkmeans.h` and its
-  `HierarchicalSuperKMeans<Name>` twin in `hierarchical_superkmeans.h`; in the bindings
-  instantiate `BindSuperKMeans<q>` + the hierarchical bind (`bindings.cpp`, plus a
-  `QuantizerParams` overload if it exposes params) and add the string to `_QUANTIZER_MAP` in
-  `__init__.py`; add tests (see Testing).
+  `HierarchicalSuperKMeans<Name>` and `SuperEMeans<Name>` twins in `hierarchical_superkmeans.h` /
+  `superemeans.h`; in the bindings instantiate `BindSuperKMeans<q>` + the hierarchical and
+  `BindSuperEMeans<q>` binds (`bindings.cpp`, plus a `QuantizerParams` overload if it exposes
+  params) and add the string to `_QUANTIZER_MAP` in `__init__.py` (tuple: flat, hierarchical,
+  e-means); add tests (see Testing).
 - **Add a benchmark** — register the target with `skmeans_add_benchmark(<name>.out <source>)` in
   `benchmarks/CMakeLists.txt` (`skmeans_add_faiss_benchmark` for FAISS-linked ones).
 
@@ -302,3 +303,9 @@ the caller's array stayed untouched. `writeable()` is checked explicitly (pybind
 `validate_numpy_array(..., overwrite=True)` refuses rather than substituting an
 `ascontiguousarray` copy. `unrotate_centroids` is exposed for the normal path, and forced to False
 on the in-place one.
+
+`SuperEMeans` (e-means) is a separate Python class subclassing `SuperKMeans`: it overrides only
+`_create_engine` (builds a `SuperEMeansConfig`; `epochs` maps to `iters`) and `train` (no
+`queries`: fixed epochs, no early termination), and inherits the assign family and properties.
+In C++, `BindSuperEMeans<q>` is a pybind subclass of the `SuperKMeans<q>` binding, so it must be
+registered after it. Example: `examples/emeans_clustering.py`.
