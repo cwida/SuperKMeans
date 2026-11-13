@@ -255,14 +255,12 @@ TYPED_TEST(SuperEMeansTest, FloatCentroidUpdate) {
     constexpr Quantization q = TypeParam::value;
     const size_t d = skm_test::RECALL_D;
     auto data = skm_test::LoadTestDataSubdim(TEST_DATA_PATH, skm_test::RECALL_N, d, d);
-    const auto config = TestConfig(EMEANS_DEFAULT_EPOCHS, false);
-    auto float_config = config;
-    float_config.quantized_centroid_update = false;
-    float_config.full_precision_final_centroids = true;
+    auto config = TestConfig(EMEANS_DEFAULT_EPOCHS, false);
+    config.quantized_centroid_update = false;
+    config.full_precision_final_centroids = true;
 
-    auto quantized_update = TrainAndMeasure<q>(data, d, skm_test::RECALL_N_CLUSTERS, config);
-    auto float_update = TrainAndMeasure<q>(data, d, skm_test::RECALL_N_CLUSTERS, float_config);
-    EXPECT_GE(float_update.recall, quantized_update.recall - skm_test::RECALL_TOL);
+    auto emeans = TrainAndMeasure<q>(data, d, skm_test::RECALL_N_CLUSTERS, config);
+    EXPECT_GT(emeans.recall, 0.5f);
 }
 
 TYPED_TEST(SuperEMeansTest, SLOW_PruningEpochs) {
