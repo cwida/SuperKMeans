@@ -12,7 +12,7 @@
 #include "superkmeans/superemeans.h"
 
 template <skmeans::Quantization Q>
-int RunBenchmark(const std::string& dataset, const bool blas_only, const uint32_t n_epochs) {
+int RunBenchmark(const std::string& dataset, const bool pruning, const uint32_t n_epochs) {
     const std::string algorithm = std::string("superemeans_") + skmeans::QuantizationName(Q);
 
     auto it = bench_utils::DATASET_PARAMS.find(dataset);
@@ -30,7 +30,7 @@ int RunBenchmark(const std::string& dataset, const bool blas_only, const uint32_
     std::cout << "=== Running algorithm: " << algorithm << " ===" << std::endl;
     std::cout << "Dataset: " << dataset << " (n=" << n << ", d=" << d << ")\n";
     std::cout << "n_clusters=" << n_clusters << " n_epochs=" << n_epochs
-              << (blas_only ? " (BLAS-only)" : " (pruning)") << "\n";
+              << (pruning ? " (pruning)" : " (no pruning)") << "\n";
 
     std::vector<float> data;
     std::vector<float> queries;
@@ -56,7 +56,7 @@ int RunBenchmark(const std::string& dataset, const bool blas_only, const uint32_
     config.verbose = true;
     config.n_threads = skmeans::ResolveNumThreads(0);
     config.unrotate_centroids = true;
-    config.use_blas_only = blas_only;
+    config.pruning = pruning;
     auto is_angular = std::find(
         bench_utils::ANGULAR_DATASETS.begin(), bench_utils::ANGULAR_DATASETS.end(), dataset
     );
@@ -114,21 +114,21 @@ int RunBenchmark(const std::string& dataset, const bool blas_only, const uint32_
 int main(int argc, char* argv[]) {
     std::string dataset = (argc > 1) ? std::string(argv[1]) : std::string("mxbai");
     std::string quantizer = (argc > 2) ? std::string(argv[2]) : std::string("f32");
-    bool blas_only = argc > 3 && std::string(argv[3]) == "blas";
+    const bool pruning = bench_utils::ParsePruning(argc, argv, 3);
     uint32_t n_epochs =
         (argc > 4) ? static_cast<uint32_t>(std::stoul(argv[4])) : skmeans::EMEANS_DEFAULT_EPOCHS;
 
     if (quantizer == "f32") {
-        return RunBenchmark<skmeans::Quantization::f32>(dataset, blas_only, n_epochs);
+        return RunBenchmark<skmeans::Quantization::f32>(dataset, pruning, n_epochs);
     }
     if (quantizer == "sq8") {
-        return RunBenchmark<skmeans::Quantization::sq8>(dataset, blas_only, n_epochs);
+        return RunBenchmark<skmeans::Quantization::sq8>(dataset, pruning, n_epochs);
     }
     if (quantizer == "lvq4") {
-        return RunBenchmark<skmeans::Quantization::lvq4>(dataset, blas_only, n_epochs);
+        return RunBenchmark<skmeans::Quantization::lvq4>(dataset, pruning, n_epochs);
     }
     if (quantizer == "rabitq") {
-        return RunBenchmark<skmeans::Quantization::rabitq>(dataset, blas_only, n_epochs);
+        return RunBenchmark<skmeans::Quantization::rabitq>(dataset, pruning, n_epochs);
     }
     std::cerr << "Unknown quantizer '" << quantizer << "' (use f32|sq8|lvq4|rabitq)\n";
     return 1;

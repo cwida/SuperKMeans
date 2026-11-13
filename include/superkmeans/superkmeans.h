@@ -36,10 +36,10 @@ struct SuperKMeansConfig {
     // We provide 2 ways to define the number of points to sample:
     float sampling_fraction = 0.3f; // Fraction of data to sample (0.0 to 1.0)
     uint32_t max_points_per_cluster =
-        256;                    // Maximum number of points per cluster to sample (FAISS style)
-    uint32_t n_threads = 0;     // Threads of the default executor (0 = max); unused with executor
-    uint32_t seed = 42;         // Random seed for reproducibility
-    bool use_blas_only = false; // Use BLAS-only computation for all iterations
+        256;                // Maximum number of points per cluster to sample (FAISS style)
+    uint32_t n_threads = 0; // Threads of the default executor (0 = max); unused with executor
+    uint32_t seed = 42;     // Random seed for reproducibility
+    bool pruning = true;    // Prune centroids when d >= 128 and k > 256; false runs exact GEMM
 
     // Convergence parameters
     float tol = 1e-4f;                  // Tolerance for shift-based early termination
@@ -96,8 +96,8 @@ struct SuperKMeansIterationStats {
     float not_pruned_pct = -1.0f;
     // Number of dimensions used for partial distance computation (d')
     uint32_t partial_d = 0;
-    // Whether this iteration used BLAS-only computation (no PDX pruning)
-    bool is_gemm_only = false;
+    // Whether this iteration pruned centroids (false: exact GEMM)
+    bool pruning = false;
 
     std::string ToJson() const {
         std::ostringstream oss;
@@ -105,7 +105,7 @@ struct SuperKMeansIterationStats {
             << objective << ",\"shift\":" << std::setprecision(4) << shift << ",\"split\":" << split
             << ",\"recall\":" << std::setprecision(4) << recall
             << ",\"not_pruned_pct\":" << not_pruned_pct << ",\"partial_d\":" << partial_d
-            << ",\"is_gemm_only\":" << (is_gemm_only ? "true" : "false") << "}";
+            << ",\"pruning\":" << (pruning ? "true" : "false") << "}";
         return oss.str();
     }
 
@@ -337,7 +337,7 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
             }
         }
 
-        bool always_gemm_only = !PruningEnabled();
+        bool always_gemm_only = !PruningEnabled(n_clusters);
         bool partial_norms_computed = false;
         float best_recall = 0.0f;
         size_t iters_without_improvement = 0;
@@ -603,9 +603,8 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
         ParallelSection parallel_section(GetExecutor());
 
         if constexpr (q != Quantization::f32) {
-            if (config.sampling_fraction == 1.0f && quantizer->SupportsPruning() &&
-                !config.use_blas_only && d >= DIMENSION_THRESHOLD_FOR_PRUNING &&
-                n_clusters > N_CLUSTERS_THRESHOLD_FOR_PRUNING && config.iters > 1) {
+            if (config.sampling_fraction == 1.0f && PruningEnabled(n_clusters) &&
+                config.iters > 1) {
                 std::vector<uint32_t> result_assignments(
                     assignments.get(), assignments.get() + n_vectors
                 );
@@ -695,8 +694,7 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
         }
 
         if constexpr (q == Quantization::f32) {
-            if (config.use_blas_only || d < DIMENSION_THRESHOLD_FOR_PRUNING ||
-                n_clusters <= N_CLUSTERS_THRESHOLD_FOR_PRUNING) {
+            if (!PruningEnabled(n_clusters)) {
                 if (!config.suppress_warnings) {
                     std::cout
                         << "WARNING: AssignTrainingPoints cannot use pruning, falling back to "
@@ -790,7 +788,6 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
                 SuperKMeansConfig tmp_config;
                 tmp_config.iters = 10;
                 tmp_config.sampling_fraction = 1.0f;
-                tmp_config.use_blas_only = false;
                 tmp_config.verbose = config.verbose;
                 tmp_config.suppress_warnings = config.suppress_warnings;
                 tmp_config.seed = config.seed;
@@ -1050,9 +1047,9 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
         }
     }
 
-    bool PruningEnabled() const {
-        return d >= DIMENSION_THRESHOLD_FOR_PRUNING && !config.use_blas_only &&
-               n_clusters > N_CLUSTERS_THRESHOLD_FOR_PRUNING && quantizer->SupportsPruning();
+    bool PruningEnabled(const size_t n_centroids) const {
+        return config.pruning && d >= DIMENSION_THRESHOLD_FOR_PRUNING &&
+               n_centroids > N_CLUSTERS_THRESHOLD_FOR_PRUNING && quantizer->SupportsPruning();
     }
 
     TrainingData SetupTraining(const float* SKM_RESTRICT data, const size_t n) {
@@ -1421,7 +1418,7 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
         stats.shift = shift;
         stats.split = n_split;
         stats.recall = recall;
-        stats.is_gemm_only = GEMM_ONLY;
+        stats.pruning = !GEMM_ONLY;
         if constexpr (!GEMM_ONLY) {
             stats.not_pruned_pct = avg_not_pruned_pct;
             stats.partial_d = old_partial_d;
@@ -1434,7 +1431,7 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
                       << (iter_idx > 0 ? 1 - (cost / prev_cost) : 0.0f) << " | Shift: " << shift
                       << " | Split: " << n_split << " | Recall: " << recall;
             if constexpr (GEMM_ONLY) {
-                std::cout << " [BLAS-only]";
+                std::cout << " [no pruning]";
             } else {
                 std::cout << " | Not Pruned %: " << avg_not_pruned_pct * 100.0f
                           << " | d': " << old_partial_d << " -> " << partial_d;

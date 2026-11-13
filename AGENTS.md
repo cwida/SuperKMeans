@@ -208,6 +208,14 @@ time and exposed read-only, alongside `GetQuantizer()`, `GetQuantizedData()` and
 no d × d matrix to hand out. With `data_already_rotated` the pruner is built without a rotation
 (no d × d QR, the costly part at high d): its `Rotate`/`Unrotate` then warn and copy the vectors.
 
+**Pruning gate.** `config.pruning` (default `true`) only permits pruning. Every pruning decision
+(flat `Train`, the hierarchical meso/fine/refinement phases, e-means, `AssignTrainingPoints`) goes
+through `PruningEnabled(n_centroids)`: `config.pruning && d ≥ 128 (DIMENSION_THRESHOLD_FOR_PRUNING)
+&& n_centroids > 256 (N_CLUSTERS_THRESHOLD_FOR_PRUNING) && SupportsPruning()`; the first iteration
+never prunes. `SuperKMeansIterationStats::pruning` reports what each iteration ran. New paths call
+it instead of re-deriving the condition. Benchmarks take it as a `true|false` argument
+(`bench_utils::ParsePruning`, default `true`) and label runs `pruning` / `no-pruning`.
+
 **Assign family (3 methods):**
 - **`Assign`** — exact f32 brute force. Standalone, no trained state. Ground-truth reference.
 - **`QuantizedAssign`** — standalone quantized analog: fits a *fresh* quantizer on the input, no
@@ -215,8 +223,7 @@ no d × d matrix to hand out. With `data_already_rotated` the pruner is built wi
   GEMM path, so sq8/lvq4 re-fit on un-rotated input). For arbitrary/new vectors.
 - **`AssignTrainingPoints`** — reuses trained state; **`vectors` must equal the `Train()` data**
   (`n_vectors == n_train`). Three paths: (1) **pruning reuse** if `sampling_fraction==1.0 &&
-  SupportsPruning && !use_blas_only && d ≥ 128 (DIMENSION_THRESHOLD_FOR_PRUNING) && n_clusters >
-  256 (N_CLUSTERS_THRESHOLD_FOR_PRUNING) && iters > 1`; (2) **GEMM-only reuse** if `sampling==1.0`
+  PruningEnabled(n_clusters) && iters > 1`; (2) **GEMM-only reuse** if `sampling==1.0`
   but the gate fails; (3) **fallback to `QuantizedAssign`** if `sampling < 1.0`. It and
   `QuantizedAssign` need **not** agree per-point (different domains for sq8/lvq4) — validate
   **recall**, not per-point agreement. On path (1) RaBitQ also reads float vectors (`x_float`,

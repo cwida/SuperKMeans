@@ -34,7 +34,7 @@ static std::unordered_map<std::string, std::string> BuildConfigDict(
     c["sampling_fraction"] = std::to_string(cfg.sampling_fraction);
     c["n_threads"] = std::to_string(cfg.n_threads);
     c["seed"] = std::to_string(cfg.seed);
-    c["use_blas_only"] = cfg.use_blas_only ? "true" : "false";
+    c["pruning"] = cfg.pruning ? "true" : "false";
     c["tol"] = std::to_string(cfg.tol);
     c["early_termination"] = cfg.early_termination ? "true" : "false";
     c["quantized_centroid_update"] = cfg.quantized_centroid_update ? "true" : "false";
@@ -55,7 +55,7 @@ static void RunHierarchical(
     const float* data,
     const float* queries,
     size_t n_clusters,
-    bool use_blas_only,
+    bool pruning,
     bool is_angular,
     bool has_gt,
     const std::unordered_map<int, std::vector<int>>& gt_map
@@ -74,7 +74,7 @@ static void RunHierarchical(
     const std::string algorithm = "hierarchical_superkmeans";
 
     std::cout << "\n=== Scalability: " << quantizer_name << " / k=" << n_clusters << " / "
-              << (use_blas_only ? "blas-only" : "pruning") << " ===" << std::endl;
+              << (pruning ? "pruning" : "no-pruning") << " ===" << std::endl;
     std::cout << "Dataset: " << dataset << " (n=" << n << ", d=" << d << ") threads=" << THREADS
               << std::endl;
 
@@ -86,7 +86,7 @@ static void RunHierarchical(
     config.early_termination = false;
     config.sampling_fraction = 1.0f;
     config.tol = 1e-3f;
-    config.use_blas_only = use_blas_only;
+    config.pruning = pruning;
     if (has_quantizer) {
         config.quantized_centroid_update = true;
     }
@@ -182,7 +182,7 @@ static void RunHierarchical(
     }
 
     const std::string run_label =
-        "hsk / " + quantizer_name + (use_blas_only ? " / blas-only" : " / pruning");
+        "hsk / " + quantizer_name + (pruning ? " / pruning" : " / no-pruning");
 
     bench_utils::WriteResultsToCsvV2(
         experiment_name,
@@ -259,7 +259,7 @@ int main(int argc, char* argv[]) {
     if (has_gt)
         gt_map = bench_utils::ParseGroundTruthJson(gt_filename);
 
-    for (bool use_blas_only : {true, false}) {
+    for (bool pruning : {false, true}) {
         for (const std::string& quantizer : SCALABILITY_QUANTIZERS) {
             for (size_t k : SCALABILITY_K_VALUES) {
                 if (k > n) {
@@ -274,7 +274,7 @@ int main(int argc, char* argv[]) {
                         data.data(),
                         queries.data(),
                         k,
-                        use_blas_only,
+                        pruning,
                         is_angular,
                         has_gt,
                         gt_map

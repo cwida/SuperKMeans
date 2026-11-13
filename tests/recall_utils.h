@@ -151,7 +151,7 @@ inline float ClusteringRecall(
     config.sampling_fraction = 1.0f;
     config.max_points_per_cluster = 99999;
     config.n_threads = 1;
-    config.use_blas_only = !pruning;
+    config.pruning = pruning;
 
     auto kmeans = skmeans::SuperKMeans<q>(n_clusters, d, config);
     std::vector<skmeans::skmeans_centroid_value_t> centroids;
@@ -235,7 +235,7 @@ inline AssignMethodRecall ClusteringRecallAssignMethods(
     config.sampling_fraction = 1.0f;
     config.max_points_per_cluster = 99999;
     config.n_threads = 1;
-    config.use_blas_only = false;
+    config.pruning = true;
 
     auto kmeans = skmeans::SuperKMeans<q>(n_clusters, d, config);
     auto centroids = kmeans.Train(data.data(), RECALL_N);

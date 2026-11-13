@@ -18,7 +18,7 @@ void ExpectAssignTrainingPointsAgreesWithQuantizedAssign(
     size_t n,
     size_t d,
     size_t n_clusters,
-    bool use_blas_only,
+    bool pruning,
     uint32_t iters = 10
 ) {
     std::vector<float> data = skmeans::MakeBlobs(n, d, n_clusters, false, 1.0f, 10.0f, 42);
@@ -26,7 +26,7 @@ void ExpectAssignTrainingPointsAgreesWithQuantizedAssign(
     config.iters = iters;
     config.sampling_fraction = 1.0f;
     config.seed = 42;
-    config.use_blas_only = use_blas_only;
+    config.pruning = pruning;
 
     auto kmeans = skmeans::SuperKMeans<qt>(n_clusters, d, config);
     auto centroids = kmeans.Train(data.data(), n);
@@ -310,25 +310,25 @@ TEST_F(AssignTest, AllClustersNonEmpty) {
 
 TEST_F(AssignTest, QuantizedAssignTrainingPoints_SmallK_AgreesWithQuantizedAssign) {
     ExpectAssignTrainingPointsAgreesWithQuantizedAssign<skmeans::Quantization::rabitq>(
-        5000, 128, 50, false
+        5000, 128, 50, true
     );
 }
 
 TEST_F(AssignTest, QuantizedAssignTrainingPoints_SmallDim_AgreesWithQuantizedAssign) {
     ExpectAssignTrainingPointsAgreesWithQuantizedAssign<skmeans::Quantization::rabitq>(
-        5000, 64, 300, false
+        5000, 64, 300, true
     );
 }
 
-TEST_F(AssignTest, QuantizedAssignTrainingPoints_BlasOnly_AgreesWithQuantizedAssign) {
+TEST_F(AssignTest, QuantizedAssignTrainingPoints_NoPruning_AgreesWithQuantizedAssign) {
     ExpectAssignTrainingPointsAgreesWithQuantizedAssign<skmeans::Quantization::rabitq>(
-        5000, 128, 300, true
+        5000, 128, 300, false
     );
 }
 
 TEST_F(AssignTest, QuantizedAssignTrainingPoints_SingleIteration_AgreesWithQuantizedAssign) {
     ExpectAssignTrainingPointsAgreesWithQuantizedAssign<skmeans::Quantization::rabitq>(
-        5000, 128, 300, false, 1
+        5000, 128, 300, true, 1
     );
 }
 

@@ -801,9 +801,9 @@ PYBIND11_MODULE(_superkmeans, m) {
             "Random seed for reproducibility (default: 42)"
         )
         .def_readwrite(
-            "use_blas_only",
-            &skmeans::SuperKMeansConfig::use_blas_only,
-            "Use GEMM-only computation without pruning (default: False)"
+            "pruning",
+            &skmeans::SuperKMeansConfig::pruning,
+            "Prune centroids when d >= 128 and k > 256; False runs exact GEMM (default: True)"
         )
         .def_readwrite(
             "tol",
@@ -931,9 +931,9 @@ PYBIND11_MODULE(_superkmeans, m) {
             "Number of dimensions used for partial distance (d')"
         )
         .def_readonly(
-            "is_gemm_only",
-            &skmeans::SuperKMeansIterationStats::is_gemm_only,
-            "Whether this iteration used GEMM-only computation"
+            "pruning",
+            &skmeans::SuperKMeansIterationStats::pruning,
+            "Whether this iteration pruned centroids (False: exact GEMM)"
         )
         .def("__repr__", [](const skmeans::SuperKMeansIterationStats& stats) {
             return "<IterationStats: iter=" + std::to_string(stats.iteration) +

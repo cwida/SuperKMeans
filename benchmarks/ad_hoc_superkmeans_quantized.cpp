@@ -13,7 +13,7 @@
 #include "superkmeans/superkmeans.h"
 
 template <skmeans::Quantization Q>
-int RunBenchmark(const std::string& dataset, const bool blas_only) {
+int RunBenchmark(const std::string& dataset, const bool pruning) {
     const std::string algorithm = std::string("superkmeans_") + skmeans::QuantizationName(Q);
 
     auto it = bench_utils::DATASET_PARAMS.find(dataset);
@@ -73,10 +73,10 @@ int RunBenchmark(const std::string& dataset, const bool blas_only) {
     config.early_termination = false;
     config.sampling_fraction = sampling_fraction;
     config.tol = 1e-3f;
-    config.use_blas_only = blas_only;
+    config.pruning = pruning;
     config.quantized_centroid_update = true;
-    if (blas_only) {
-        std::cout << "BLAS-only mode (no pruning)" << std::endl;
+    if (!pruning) {
+        std::cout << "No pruning" << std::endl;
     }
 
     auto is_angular = std::find(
@@ -175,16 +175,16 @@ int RunBenchmark(const std::string& dataset, const bool blas_only) {
 int main(int argc, char* argv[]) {
     std::string dataset = (argc > 1) ? std::string(argv[1]) : std::string("yahoo");
     std::string quantizer = (argc > 2) ? std::string(argv[2]) : std::string("sq8");
-    bool blas_only = !(argc > 3 && std::string(argv[3]) == "pruning");
+    const bool pruning = bench_utils::ParsePruning(argc, argv, 3);
 
     if (quantizer == "sq8") {
-        return RunBenchmark<skmeans::Quantization::sq8>(dataset, blas_only);
+        return RunBenchmark<skmeans::Quantization::sq8>(dataset, pruning);
     }
     if (quantizer == "lvq4") {
-        return RunBenchmark<skmeans::Quantization::lvq4>(dataset, blas_only);
+        return RunBenchmark<skmeans::Quantization::lvq4>(dataset, pruning);
     }
     if (quantizer == "rabitq") {
-        return RunBenchmark<skmeans::Quantization::rabitq>(dataset, blas_only);
+        return RunBenchmark<skmeans::Quantization::rabitq>(dataset, pruning);
     }
     std::cerr << "Unknown quantizer '" << quantizer << "' (use sq8|lvq4|rabitq)\n";
     return 1;

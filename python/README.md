@@ -84,7 +84,7 @@ assignments = emeans.assign_training_points(data, centroids)
 - `max_points_per_cluster` (int, default=256): Maximum points per cluster to sample
 - `n_threads` (int, default=0): Number of threads (0 = use all)
 - `seed` (int, default=42): Random seed for reproducibility
-- `use_blas_only` (bool, default=False): Disable pruning, use BLAS only
+- `pruning` (bool, default=True): Prune centroids when d >= 128 and k > 256; False runs exact GEMM
 - `full_precision_final_centroids` (bool, default=False): Recompute final centroids in full precision (quantized only)
 - `tol` (float, default=1e-4): Tolerance for shift-based early stopping
 - `recall_tol` (float, default=0.005): Tolerance for recall-based early stopping
@@ -224,7 +224,7 @@ epoch's labels. Flat only (no hierarchical mode).
 - `epochs` (int, default=2): Number of passes over the data
 - `batch_size` (int, default=None): Mini-batch size. None uses the e-means batch-size law
 - `initial_step` (float, default=None): Initial EMA step in (0, 1]. None uses the e-means step-size law
-- `n_threads`, `seed`, `use_blas_only`, `full_precision_final_centroids`, `verbose`, `angular`,
+- `n_threads`, `seed`, `pruning`, `full_precision_final_centroids`, `verbose`, `angular`,
   `unrotate_centroids`: as in `SuperKMeans`
 
 #### Methods
@@ -263,7 +263,7 @@ Statistics for a single iteration.
 - `recall` (float): Recall@k value (0.0 to 1.0)
 - `not_pruned_pct` (float): Percentage of vectors not pruned
 - `partial_d` (int): Dimensions used for partial distance (d')
-- `is_gemm_only` (bool): Whether iteration used BLAS-only
+- `pruning` (bool): Whether the iteration pruned centroids (False: exact GEMM)
 
 ### HierarchicalSuperKMeansIterationStats Class
 

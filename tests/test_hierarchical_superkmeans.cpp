@@ -591,7 +591,7 @@ TYPED_TEST(HierarchicalQuantizedWrapperTest, DefaultConfigForcesSchemeAndTrains)
         ASSERT_LT(assignments[i], n_clusters) << "at " << i;
 }
 
-TEST_F(HierarchicalSuperKMeansTest, Quantized_AssignTrainingPointsBlasOnlyReuse) {
+TEST_F(HierarchicalSuperKMeansTest, Quantized_AssignTrainingPointsNoPruningReuse) {
     const size_t n = 15000;
     const size_t d = 128;
     const size_t n_clusters = 300;
@@ -606,7 +606,7 @@ TEST_F(HierarchicalSuperKMeansTest, Quantized_AssignTrainingPointsBlasOnlyReuse)
         config.iters_refinement = 0;
         config.seed = 42;
         config.sampling_fraction = 1.0f;
-        config.use_blas_only = true;
+        config.pruning = false;
 
         auto kmeans = skmeans::HierarchicalSuperKMeans<qt>(n_clusters, d, config);
         auto centroids = kmeans.Train(data.data(), n);
