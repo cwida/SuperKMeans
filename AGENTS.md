@@ -161,8 +161,8 @@ Performance-critical — weigh every copy/allocation.
   single-quantizer case.
 - Recall-checking tests need `#undef HAS_FFTW` at the top (see Gotchas).
 - `tests/test_superemeans.cpp` is typed over f32/sq8/lvq4/rabitq (no hierarchical SuperEMeans
-  exists) and asserts quality relative to SuperKMeans on `test_data.bin`, not against
-  `RECALL_GROUND_TRUTH`.
+  exists). Its recall checks compare e-means configurations against each other on
+  `test_data.bin`, never against SuperKMeans (a different algorithm) or `RECALL_GROUND_TRUTH`.
 
 ## Gotchas
 
