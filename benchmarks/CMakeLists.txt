@@ -73,6 +73,7 @@ skmeans_add_benchmark(ad_hoc_hierarchical_superkmeans.out ad_hoc_hierarchical_su
 skmeans_add_benchmark(ad_hoc_hierarchical_superkmeans_quantized.out ad_hoc_hierarchical_superkmeans_quantized.cpp)
 skmeans_add_benchmark(ad_hoc_assign.out ad_hoc_assign.cpp)
 skmeans_add_benchmark(ad_hoc_superkmeans_quantized.out ad_hoc_superkmeans_quantized.cpp)
+skmeans_add_benchmark(ad_hoc_superemeans.out ad_hoc_superemeans.cpp)
 skmeans_add_faiss_benchmark(accelerators.out accelerators/accelerators.cpp)
 skmeans_add_benchmark(scalability.out scalability.cpp)
 skmeans_add_benchmark(sweet_pruning_spot_superkmeans.out sweet_pruning_spot_superkmeans.cpp)
@@ -106,6 +107,7 @@ add_custom_target(benchmarks
         ad_hoc_assign.out
         ad_hoc_superkmeans_quantized.out
         ad_hoc_hierarchical_superkmeans_quantized.out
+        ad_hoc_superemeans.out
         accelerators.out
         scalability.out
         sweet_pruning_spot_superkmeans.out

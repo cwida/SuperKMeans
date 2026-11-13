@@ -283,129 +283,16 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
         const float* SKM_RESTRICT queries = nullptr,
         const size_t n_queries = 0
     ) {
-        SKMEANS_ENSURE_POSITIVE(n);
-        if (state.trained) {
-            throw std::runtime_error("The clustering has already been trained");
-        }
+        CheckTrainable(n);
         iteration_stats.clear();
-        if (n < n_clusters) {
-            throw std::runtime_error(
-                "The number of points should be at least as large as the number of clusters"
-            );
-        }
         if (n_queries > 0 && queries == nullptr && !config.sample_queries) {
             throw std::invalid_argument(
                 "Queries must be provided if n_queries > 0 and sample_queries is false"
             );
         }
         ParallelSection parallel_section(GetExecutor());
-        const float* SKM_RESTRICT data_p = data;
-        n_samples = GetNVectorsToSample(n, n_clusters);
-        n_train = n;
-        state.training_data_rotated = config.data_already_rotated;
-        state.rotator = pruner.get();
-        if (n_samples < n_clusters) {
-            throw std::runtime_error(
-                "Not enough samples to train. Try increasing the sampling_fraction or "
-                "max_points_per_cluster"
-            );
-        }
-        {
-            SKM_PROFILE_SCOPE("allocator");
-            centroids = AllocateBuffer<centroid_value_t>(GetAllocator(), n_clusters * d);
-            horizontal_centroids = AllocateBuffer<centroid_value_t>(GetAllocator(), n_clusters * d);
-            prev_centroids = AllocateBuffer<centroid_value_t>(GetAllocator(), n_clusters * d);
-            cluster_sizes = AllocateBuffer<uint32_t>(GetAllocator(), n_clusters);
-            assignments = AllocateBuffer<uint32_t>(GetAllocator(), n);
-            distances = AllocateBuffer<distance_t>(GetAllocator(), n);
-            data_norms = AllocateBuffer<float>(GetAllocator(), n_samples);
-            centroid_norms = AllocateBuffer<float>(GetAllocator(), n_clusters);
-        }
+        auto training_data = SetupTraining(data, n);
         auto not_pruned_counts = AllocateBuffer<size_t>(GetAllocator(), n_samples);
-        EnsureTmpDistancesBuffer();
-        vertical_d = PDXLayout<q>::GetDimensionSplit(PDXDim(d)).vertical_d;
-        partial_horizontal_centroids =
-            AllocateBuffer<centroid_value_t>(GetAllocator(), n_clusters * vertical_d);
-
-        auto centroids_pdx_wrapper =
-            GenerateCentroids(data_p, n_samples, n_clusters, !config.data_already_rotated);
-        if (config.verbose) {
-            std::cout << "Sampling data..." << std::endl;
-        }
-
-        AllocatedBuffer<float> data_samples_buffer;
-        if (n_samples < n || !config.data_already_rotated) {
-            data_samples_buffer = AllocateBuffer<float>(GetAllocator(), n_samples * d);
-        }
-        auto data_to_cluster = SampleAndRotateVectors(
-            data_p, data_samples_buffer.get(), n, n_samples, !config.data_already_rotated
-        );
-
-        RotateOrCopy(
-            horizontal_centroids.get(),
-            prev_centroids.get(),
-            n_clusters,
-            !config.data_already_rotated
-        );
-
-        quantizer = CreateQuantizer();
-        quantizer->Fit(data_to_cluster, n_samples, d);
-        code_size = quantizer->CodeSize(d);
-        state.code_size = code_size;
-        state.n_encoded = n_samples;
-
-        // Compute partial_d: non-PDX quantizers must override vertical_d to full d
-        if (quantizer->SupportsPruning() && !quantizer->NeedsPDXLayout()) {
-            vertical_d = d;
-        }
-        partial_d = quantizer->InitialPartialD(vertical_d);
-        if (config.verbose) {
-            std::cout << "Front dimensions (d') = " << partial_d << std::endl;
-            std::cout << "Trailing dimensions (d'') = " << d - vertical_d << std::endl;
-        }
-
-        // Data encoding
-        const vector_value_t* encoded_data_p;
-        if constexpr (q == Quantization::f32) {
-            encoded_data_p = data_to_cluster;
-        } else {
-            quantized_data = AllocateBuffer<vector_value_t>(GetAllocator(), n_samples * code_size);
-            quantizer->Encode(data_to_cluster, quantized_data.get(), n_samples, d);
-            encoded_data_p = quantized_data.get();
-        }
-
-        // Encode initial centroids (for f32 this is a memcpy, for u8 it quantizes)
-        quantized_centroids =
-            AllocateBuffer<vector_value_t>(GetAllocator(), n_clusters * code_size);
-        quantizer->Encode(prev_centroids.get(), quantized_centroids.get(), n_clusters, d);
-
-        // Compute full norms via quantizer
-        quantizer->ComputeNorms(encoded_data_p, n_samples, d, data_norms.get());
-        quantizer->ComputeNorms(quantized_centroids.get(), n_clusters, d, centroid_norms.get());
-
-        // Setup quantized PDX layout for pruning (f32 PDX is set up in GenerateCentroids)
-        if constexpr (q != Quantization::f32) {
-            if (quantizer->SupportsPruning() && quantizer->NeedsPDXLayout()) {
-                pdxified_quantized_centroids =
-                    AllocateBuffer<vector_value_t>(GetAllocator(), n_clusters * PDXDim(d));
-                partial_hor_quantized_centroids =
-                    AllocateBuffer<vector_value_t>(GetAllocator(), n_clusters * PDXDim(vertical_d));
-                PDXLayout<q>::template PDXify<false>(
-                    quantized_centroids.get(),
-                    pdxified_quantized_centroids.get(),
-                    n_clusters,
-                    PDXDim(d)
-                );
-                QuantizedCentroidsToAuxiliaryHorizontal(n_clusters);
-                centroids_pdx_wrapper = layout_t(
-                    pdxified_quantized_centroids.get(),
-                    *pruner,
-                    n_clusters,
-                    PDXDim(d),
-                    partial_hor_quantized_centroids.get()
-                );
-            }
-        }
 
         AllocatedBuffer<float> rotated_queries;
         // Recall tracking uses batch_computer which is only available for f32
@@ -436,7 +323,7 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
                 if (config.sample_queries) {
                     std::cout << "Sampling queries from data..." << std::endl;
                     SampleAndRotateVectors(
-                        data_to_cluster, rotated_queries.get(), n_samples, n_queries, false
+                        training_data.points, rotated_queries.get(), n_samples, n_queries, false
                     );
                 } else {
                     RotateOrCopy(
@@ -444,13 +331,13 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
                     );
                 }
                 GetL2NormsRowMajor(rotated_queries.get(), n_queries, query_norms.get());
-                GetGTAssignmentsAndDistances(data_to_cluster, rotated_queries.get(), n_queries);
+                GetGTAssignmentsAndDistances(
+                    training_data.points, rotated_queries.get(), n_queries
+                );
             }
         }
 
-        bool always_gemm_only = d < DIMENSION_THRESHOLD_FOR_PRUNING || config.use_blas_only ||
-                                n_clusters <= N_CLUSTERS_THRESHOLD_FOR_PRUNING ||
-                                !quantizer->SupportsPruning();
+        bool always_gemm_only = !PruningEnabled();
         bool partial_norms_computed = false;
         float best_recall = 0.0f;
         size_t iters_without_improvement = 0;
@@ -458,14 +345,14 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
         for (size_t iter_idx = 0; iter_idx < config.iters; ++iter_idx) {
             bool use_gemm_only = (iter_idx == 0) || always_gemm_only;
             if (!use_gemm_only && !partial_norms_computed) {
-                quantizer->CacheDataPartialNorms(encoded_data_p, n_samples, d, partial_d);
+                quantizer->CacheDataPartialNorms(training_data.codes, n_samples, d, partial_d);
                 partial_norms_computed = true;
             }
             if (use_gemm_only) {
                 RunIteration<true>(
-                    data_to_cluster,
-                    encoded_data_p,
-                    centroids_pdx_wrapper,
+                    training_data.points,
+                    training_data.codes,
+                    training_data.centroids_pdx,
                     not_pruned_counts.get(),
                     rotated_queries.get(),
                     n_queries,
@@ -477,9 +364,9 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
                 );
             } else {
                 RunIteration<false>(
-                    data_to_cluster,
-                    encoded_data_p,
-                    centroids_pdx_wrapper,
+                    training_data.points,
+                    training_data.codes,
+                    training_data.centroids_pdx,
                     not_pruned_counts.get(),
                     rotated_queries.get(),
                     n_queries,
@@ -504,7 +391,7 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
             if (config.quantized_centroid_update && config.full_precision_final_centroids) {
                 ResetCentroids(n_clusters);
                 f32_quantizer.UpdateCentroids(
-                    data_to_cluster,
+                    training_data.points,
                     assignments.get(),
                     horizontal_centroids.get(),
                     cluster_sizes.get(),
@@ -743,11 +630,21 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
                     );
                 }
 
+                const float* x_float = vectors;
+                AllocatedBuffer<float> rotated_vectors;
+                if constexpr (q == Quantization::rabitq) {
+                    if (!state.training_data_rotated) {
+                        rotated_vectors = AllocateBuffer<float>(GetAllocator(), n_vectors * d);
+                        RotateOrCopy(vectors, rotated_vectors.get(), n_vectors, true);
+                        x_float = rotated_vectors.get();
+                    }
+                }
+
                 EnsureTmpDistancesBuffer();
                 quantizer->FindNearestNeighborWithPruning(
                     quantized_data.get(),
                     quantized_centroids.get(),
-                    vectors,
+                    x_float,
                     horizontal_centroids.get(),
                     n_vectors,
                     n_centroids,
@@ -1134,6 +1031,255 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
     }
 
   protected:
+    struct TrainingData {
+        AllocatedBuffer<float> owned_points;
+        const float* points = nullptr;
+        const vector_value_t* codes = nullptr;
+        layout_t centroids_pdx;
+    };
+
+    void CheckTrainable(const size_t n) const {
+        SKMEANS_ENSURE_POSITIVE(n);
+        if (state.trained) {
+            throw std::runtime_error("The clustering has already been trained");
+        }
+        if (n < n_clusters) {
+            throw std::runtime_error(
+                "The number of points should be at least as large as the number of clusters"
+            );
+        }
+    }
+
+    bool PruningEnabled() const {
+        return d >= DIMENSION_THRESHOLD_FOR_PRUNING && !config.use_blas_only &&
+               n_clusters > N_CLUSTERS_THRESHOLD_FOR_PRUNING && quantizer->SupportsPruning();
+    }
+
+    TrainingData SetupTraining(const float* SKM_RESTRICT data, const size_t n) {
+        TrainingData training_data;
+        n_samples = GetNVectorsToSample(n, n_clusters);
+        n_train = n;
+        state.training_data_rotated = config.data_already_rotated;
+        state.rotator = pruner.get();
+        if (n_samples < n_clusters) {
+            throw std::runtime_error(
+                "Not enough samples to train. Try increasing the sampling_fraction or "
+                "max_points_per_cluster"
+            );
+        }
+        {
+            SKM_PROFILE_SCOPE("allocator");
+            centroids = AllocateBuffer<centroid_value_t>(GetAllocator(), n_clusters * d);
+            horizontal_centroids = AllocateBuffer<centroid_value_t>(GetAllocator(), n_clusters * d);
+            prev_centroids = AllocateBuffer<centroid_value_t>(GetAllocator(), n_clusters * d);
+            cluster_sizes = AllocateBuffer<uint32_t>(GetAllocator(), n_clusters);
+            assignments = AllocateBuffer<uint32_t>(GetAllocator(), n);
+            distances = AllocateBuffer<distance_t>(GetAllocator(), n);
+            data_norms = AllocateBuffer<float>(GetAllocator(), n_samples);
+            centroid_norms = AllocateBuffer<float>(GetAllocator(), n_clusters);
+        }
+        EnsureTmpDistancesBuffer();
+        vertical_d = PDXLayout<q>::GetDimensionSplit(PDXDim(d)).vertical_d;
+        partial_horizontal_centroids =
+            AllocateBuffer<centroid_value_t>(GetAllocator(), n_clusters * vertical_d);
+
+        training_data.centroids_pdx =
+            GenerateCentroids(data, n_samples, n_clusters, !config.data_already_rotated);
+        if (config.verbose) {
+            std::cout << "Sampling data..." << std::endl;
+        }
+
+        if (n_samples < n || !config.data_already_rotated) {
+            training_data.owned_points = AllocateBuffer<float>(GetAllocator(), n_samples * d);
+        }
+        training_data.points = SampleAndRotateVectors(
+            data, training_data.owned_points.get(), n, n_samples, !config.data_already_rotated
+        );
+
+        RotateOrCopy(
+            horizontal_centroids.get(),
+            prev_centroids.get(),
+            n_clusters,
+            !config.data_already_rotated
+        );
+
+        quantizer = CreateQuantizer();
+        quantizer->Fit(training_data.points, n_samples, d);
+        code_size = quantizer->CodeSize(d);
+        state.code_size = code_size;
+        state.n_encoded = n_samples;
+
+        // Compute partial_d: non-PDX quantizers must override vertical_d to full d
+        if (quantizer->SupportsPruning() && !quantizer->NeedsPDXLayout()) {
+            vertical_d = d;
+        }
+        partial_d = quantizer->InitialPartialD(vertical_d);
+        if (config.verbose) {
+            std::cout << "Front dimensions (d') = " << partial_d << std::endl;
+            std::cout << "Trailing dimensions (d'') = " << d - vertical_d << std::endl;
+        }
+
+        // Data encoding
+        if constexpr (q == Quantization::f32) {
+            training_data.codes = training_data.points;
+        } else {
+            quantized_data = AllocateBuffer<vector_value_t>(GetAllocator(), n_samples * code_size);
+            quantizer->Encode(training_data.points, quantized_data.get(), n_samples, d);
+            training_data.codes = quantized_data.get();
+        }
+
+        // Encode initial centroids (for f32 this is a memcpy, for u8 it quantizes)
+        quantized_centroids =
+            AllocateBuffer<vector_value_t>(GetAllocator(), n_clusters * code_size);
+        quantizer->Encode(prev_centroids.get(), quantized_centroids.get(), n_clusters, d);
+
+        // Compute full norms via quantizer
+        quantizer->ComputeNorms(training_data.codes, n_samples, d, data_norms.get());
+        quantizer->ComputeNorms(quantized_centroids.get(), n_clusters, d, centroid_norms.get());
+
+        // Setup quantized PDX layout for pruning (f32 PDX is set up in GenerateCentroids)
+        if constexpr (q != Quantization::f32) {
+            if (quantizer->SupportsPruning() && quantizer->NeedsPDXLayout()) {
+                pdxified_quantized_centroids =
+                    AllocateBuffer<vector_value_t>(GetAllocator(), n_clusters * PDXDim(d));
+                partial_hor_quantized_centroids =
+                    AllocateBuffer<vector_value_t>(GetAllocator(), n_clusters * PDXDim(vertical_d));
+                PDXLayout<q>::template PDXify<false>(
+                    quantized_centroids.get(),
+                    pdxified_quantized_centroids.get(),
+                    n_clusters,
+                    PDXDim(d)
+                );
+                QuantizedCentroidsToAuxiliaryHorizontal(n_clusters);
+                training_data.centroids_pdx = layout_t(
+                    pdxified_quantized_centroids.get(),
+                    *pruner,
+                    n_clusters,
+                    PDXDim(d),
+                    partial_hor_quantized_centroids.get()
+                );
+            }
+        }
+        return training_data;
+    }
+
+    void AssignPoints(
+        const bool prune,
+        const vector_value_t* x,
+        const float* x_float,
+        const float* x_norms,
+        const vector_value_t* y,
+        const float* y_float,
+        const size_t n_x,
+        const size_t n_y,
+        layout_t& y_pdx,
+        uint32_t* out_knn,
+        distance_t* out_distances,
+        size_t* not_pruned_counts
+    ) {
+        EnsureTmpDistancesBuffer();
+        if (prune) {
+            quantizer->FindNearestNeighborWithPruning(
+                x,
+                y,
+                x_float,
+                y_float,
+                n_x,
+                n_y,
+                d,
+                out_knn,
+                out_distances,
+                y_pdx,
+                partial_d,
+                not_pruned_counts,
+                tmp_distances_buffer.get()
+            );
+        } else {
+            quantizer->FindNearestNeighbor(
+                x,
+                y,
+                x_float,
+                y_float,
+                n_x,
+                n_y,
+                d,
+                x_norms,
+                centroid_norms.get(),
+                out_knn,
+                out_distances,
+                tmp_distances_buffer.get()
+            );
+        }
+    }
+
+    void AccumulatePoints(
+        const bool quantized,
+        const vector_value_t* codes,
+        const float* points,
+        const uint32_t* labels,
+        const size_t n_points,
+        const size_t n_clusters,
+        centroid_value_t* sums,
+        uint32_t* counts
+    ) {
+        if (quantized) {
+            quantizer->UpdateCentroids(codes, labels, sums, counts, n_points, n_clusters, d);
+        } else {
+            f32_quantizer.UpdateCentroids(points, labels, sums, counts, n_points, n_clusters, d);
+        }
+    }
+
+    void FinalizeMeans(
+        const bool quantized,
+        centroid_value_t* sums,
+        const uint32_t* counts,
+        const size_t n_clusters
+    ) {
+        if (quantized) {
+            quantizer->FinalizeCentroids(sums, counts, n_clusters, d);
+        } else {
+            f32_quantizer.FinalizeCentroids(sums, counts, n_clusters, d);
+        }
+    }
+
+    void PublishCentroids(const size_t n_clusters) {
+        if (quantizer->SupportsPruning()) {
+            SKM_PROFILE_SCOPE("consolidate/pdxify");
+            if constexpr (q == Quantization::f32) {
+                PDXLayout<q>::template PDXify<false>(
+                    horizontal_centroids.get(), centroids.get(), n_clusters, d
+                );
+                CentroidsToAuxiliaryHorizontal(n_clusters);
+            } else {
+                quantizer->Encode(
+                    horizontal_centroids.get(), quantized_centroids.get(), n_clusters, d
+                );
+                if (quantizer->NeedsPDXLayout()) {
+                    PDXLayout<q>::template PDXify<false>(
+                        quantized_centroids.get(),
+                        pdxified_quantized_centroids.get(),
+                        n_clusters,
+                        PDXDim(d)
+                    );
+                    QuantizedCentroidsToAuxiliaryHorizontal(n_clusters);
+                }
+            }
+        }
+    }
+
+    void SplitCentroid(centroid_value_t* child, centroid_value_t* donor, const float eps) const {
+        memcpy(child, donor, sizeof(centroid_value_t) * d);
+        for (size_t j = 0; j < d; j++) {
+            if (j % 2 == 0) {
+                child[j] *= 1 + eps;
+                donor[j] *= 1 - eps;
+            } else {
+                child[j] *= 1 - eps;
+                donor[j] *= 1 + eps;
+            }
+        }
+    }
+
     /**
      * @brief Updates centroids by accumulating assigned vectors.
      *
@@ -1194,19 +1340,19 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
             // Encode centroids for this iteration (for f32 this is a memcpy)
             quantizer->Encode(prev_centroids.get(), quantized_centroids.get(), n_clusters, d);
             quantizer->ComputeNorms(quantized_centroids.get(), n_clusters, d, centroid_norms.get());
-            quantizer->FindNearestNeighbor(
+            AssignPoints(
+                false,
                 encoded_data_p,
-                quantized_centroids.get(),
                 data_to_cluster,
+                data_norms.get(),
+                quantized_centroids.get(),
                 prev_centroids.get(),
                 n_samples,
                 n_clusters,
-                d,
-                data_norms.get(),
-                centroid_norms.get(),
+                centroids_pdx_wrapper,
                 assignments.get(),
                 distances.get(),
-                tmp_distances_buffer.get()
+                not_pruned_counts
             );
             ResetCentroids(n_clusters);
             quantizer->ResetCentroidAccumulators(n_clusters, d);
@@ -1216,47 +1362,34 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
             quantizer->CacheCentroidPartialNorms(
                 quantized_centroids.get(), n_clusters, d, partial_d
             );
-            EnsureTmpDistancesBuffer();
-            quantizer->FindNearestNeighborWithPruning(
+            AssignPoints(
+                true,
                 encoded_data_p,
-                quantized_centroids.get(),
                 data_to_cluster,
+                data_norms.get(),
+                quantized_centroids.get(),
                 prev_centroids.get(),
                 n_samples,
                 n_clusters,
-                d,
+                centroids_pdx_wrapper,
                 assignments.get(),
                 distances.get(),
-                centroids_pdx_wrapper,
-                partial_d,
-                not_pruned_counts,
-                tmp_distances_buffer.get()
+                not_pruned_counts
             );
             ResetCentroids(n_clusters);
             quantizer->ResetCentroidAccumulators(n_clusters, d);
         }
 
-        if (config.quantized_centroid_update) {
-            quantizer->UpdateCentroids(
-                encoded_data_p,
-                assignments.get(),
-                horizontal_centroids.get(),
-                cluster_sizes.get(),
-                n_samples,
-                n_clusters,
-                d
-            );
-        } else {
-            f32_quantizer.UpdateCentroids(
-                data_to_cluster,
-                assignments.get(),
-                horizontal_centroids.get(),
-                cluster_sizes.get(),
-                n_samples,
-                n_clusters,
-                d
-            );
-        }
+        AccumulatePoints(
+            config.quantized_centroid_update,
+            encoded_data_p,
+            data_to_cluster,
+            assignments.get(),
+            n_samples,
+            n_clusters,
+            horizontal_centroids.get(),
+            cluster_sizes.get()
+        );
 
         float avg_not_pruned_pct = -1.0f;
         uint32_t old_partial_d = partial_d;
@@ -1336,22 +1469,11 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
                         break; // Found our cluster to be split
                     }
                 }
-                memcpy(
-                    (void*) (horizontal_centroids_p + ci * d),
-                    (void*) (horizontal_centroids_p + cj * d),
-                    sizeof(centroid_value_t) * d
+                SplitCentroid(
+                    horizontal_centroids_p + ci * d,
+                    horizontal_centroids_p + cj * d,
+                    CENTROID_PERTURBATION_EPS
                 );
-
-                // Small symmetric perturbation
-                for (size_t j = 0; j < d; j++) {
-                    if (j % 2 == 0) {
-                        horizontal_centroids_p[ci * d + j] *= 1 + CENTROID_PERTURBATION_EPS;
-                        horizontal_centroids_p[cj * d + j] *= 1 - CENTROID_PERTURBATION_EPS;
-                    } else {
-                        horizontal_centroids_p[ci * d + j] *= 1 - CENTROID_PERTURBATION_EPS;
-                        horizontal_centroids_p[cj * d + j] *= 1 + CENTROID_PERTURBATION_EPS;
-                    }
-                }
 
                 // Assume even split of the cluster
                 cluster_sizes[ci] = cluster_sizes[cj] / 2;
@@ -1371,15 +1493,12 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
         SKM_PROFILE_SCOPE("consolidate");
         {
             SKM_PROFILE_SCOPE("consolidate/splitting");
-            if (config.quantized_centroid_update) {
-                quantizer->FinalizeCentroids(
-                    horizontal_centroids.get(), cluster_sizes.get(), n_clusters, d
-                );
-            } else {
-                f32_quantizer.FinalizeCentroids(
-                    horizontal_centroids.get(), cluster_sizes.get(), n_clusters, d
-                );
-            }
+            FinalizeMeans(
+                config.quantized_centroid_update,
+                horizontal_centroids.get(),
+                cluster_sizes.get(),
+                n_clusters
+            );
             SplitClusters(n_samples, n_clusters);
         }
         {
@@ -1387,28 +1506,7 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
             if (config.angular)
                 PostprocessCentroids(n_clusters);
         }
-        if (quantizer->SupportsPruning()) {
-            SKM_PROFILE_SCOPE("consolidate/pdxify");
-            if constexpr (q == Quantization::f32) {
-                PDXLayout<q>::template PDXify<false>(
-                    horizontal_centroids.get(), centroids.get(), n_clusters, d
-                );
-                CentroidsToAuxiliaryHorizontal(n_clusters);
-            } else {
-                quantizer->Encode(
-                    horizontal_centroids.get(), quantized_centroids.get(), n_clusters, d
-                );
-                if (quantizer->NeedsPDXLayout()) {
-                    PDXLayout<q>::template PDXify<false>(
-                        quantized_centroids.get(),
-                        pdxified_quantized_centroids.get(),
-                        n_clusters,
-                        PDXDim(d)
-                    );
-                    QuantizedCentroidsToAuxiliaryHorizontal(n_clusters);
-                }
-            }
-        }
+        PublishCentroids(n_clusters);
     }
 
     /**
@@ -1844,21 +1942,25 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
      * @brief Normalizes centroids to unit length for inner product distance.
      *
      */
-    void PostprocessCentroids(const size_t n_clusters) {
-        auto horizontal_centroids_p = horizontal_centroids.get();
-        GetExecutor().ParallelFor(n_clusters, [&](size_t begin, size_t end, size_t) {
+    void NormalizePoints(const float* src, float* dst, const size_t n_points) {
+        GetExecutor().ParallelFor(n_points, [&](size_t begin, size_t end, size_t) {
             for (size_t i = begin; i < end; ++i) {
-                auto horizontal_centroids_p_i = horizontal_centroids_p + i * d;
+                const float* src_i = src + i * d;
+                float* dst_i = dst + i * d;
                 float sum = 0.0f;
                 for (size_t j = 0; j < d; ++j) {
-                    sum += horizontal_centroids_p_i[j] * horizontal_centroids_p_i[j];
+                    sum += src_i[j] * src_i[j];
                 }
                 float norm = 1.0f / std::sqrt(sum);
                 for (size_t j = 0; j < d; ++j) {
-                    horizontal_centroids_p_i[j] *= norm;
+                    dst_i[j] = src_i[j] * norm;
                 }
             }
         });
+    }
+
+    void PostprocessCentroids(const size_t n_clusters) {
+        NormalizePoints(horizontal_centroids.get(), horizontal_centroids.get(), n_clusters);
     }
 
     /**

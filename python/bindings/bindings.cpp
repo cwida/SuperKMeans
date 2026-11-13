@@ -4,6 +4,7 @@
 
 #include "superkmeans/common.h"
 #include "superkmeans/hierarchical_superkmeans.h"
+#include "superkmeans/superemeans.h"
 #include "superkmeans/superkmeans.h"
 
 namespace py = pybind11;
@@ -62,6 +63,16 @@ py::array_t<uint32_t> AssignmentsToArray(
     return result;
 }
 
+py::array_t<float> CentroidsToArray(
+    const std::vector<float>& centroids,
+    size_t n_clusters,
+    size_t d
+) {
+    auto result = py::array_t<float>({n_clusters, d});
+    std::memcpy(result.request().ptr, centroids.data(), centroids.size() * sizeof(float));
+    return result;
+}
+
 // Shared body for train(): run clustering and return the centroids as an (n_clusters, d) NumPy
 // array.
 template <typename KMeans>
@@ -90,11 +101,7 @@ py::array_t<float> TrainToArray(
     }
 
     auto centroids_vec = self.Train(data_ptr, n, queries_ptr, n_queries);
-
-    size_t n_clusters = self.GetNClusters();
-    auto result = py::array_t<float>({n_clusters, d});
-    std::memcpy(result.request().ptr, centroids_vec.data(), centroids_vec.size() * sizeof(float));
-    return result;
+    return CentroidsToArray(centroids_vec, self.GetNClusters(), d);
 }
 
 // Shared body for train_in_place(): rotate `data` in place and return the centroids. The array is
@@ -129,11 +136,7 @@ py::array_t<float> TrainInPlaceToArray(
     }
 
     auto centroids_vec = self.TrainInPlace(data_ptr, n, queries_ptr, n_queries);
-
-    size_t n_clusters = self.GetNClusters();
-    auto result = py::array_t<float>({n_clusters, d});
-    std::memcpy(result.request().ptr, centroids_vec.data(), centroids_vec.size() * sizeof(float));
-    return result;
+    return CentroidsToArray(centroids_vec, self.GetNClusters(), d);
 }
 
 // Shared body for rotate()/unrotate(): applies the trained rotation, or its inverse, to a copy of
@@ -664,6 +667,105 @@ void BindHierarchicalSuperKMeans(py::module& m, const char* name) {
         });
 }
 
+template <Quantization q>
+void BindSuperEMeans(py::module& m, const char* name) {
+    using EMeans = skmeans::SuperEMeans<q>;
+
+    py::class_<EMeans, skmeans::SuperKMeans<q>>(m, name, "SuperEMeans clustering (e-means)")
+        .def(
+            py::init([](size_t n_clusters,
+                        size_t dimensionality,
+                        const skmeans::SuperEMeansConfig& config) {
+                return new EMeans(n_clusters, dimensionality, config);
+            }),
+            py::arg("n_clusters"),
+            py::arg("dimensionality"),
+            py::arg("config"),
+            "Initialize SuperEMeans with configuration.\n\n"
+            "Args:\n"
+            "    n_clusters: Number of clusters to create\n"
+            "    dimensionality: Number of dimensions in the data\n"
+            "    config: Configuration parameters (SuperEMeansConfig)"
+        )
+
+        .def(
+            py::init([](size_t n_clusters, size_t dimensionality) {
+                return new EMeans(n_clusters, dimensionality);
+            }),
+            py::arg("n_clusters"),
+            py::arg("dimensionality"),
+            "Initialize SuperEMeans with default configuration.\n\n"
+            "Args:\n"
+            "    n_clusters: Number of clusters to create\n"
+            "    dimensionality: Number of dimensions in the data"
+        )
+
+        .def(
+            "train",
+            [](EMeans& self, py::array_t<float> data) {
+                ValidatePyArray(data, "data", 2);
+                auto info = data.request();
+                auto centroids = self.Train(
+                    static_cast<const float*>(info.ptr), static_cast<size_t>(info.shape[0])
+                );
+                return CentroidsToArray(
+                    centroids, self.GetNClusters(), static_cast<size_t>(info.shape[1])
+                );
+            },
+            py::arg("data"),
+            "Run e-means clustering to determine centroids.\n\n"
+            "Args:\n"
+            "    data: NumPy array of shape (n, d) with dtype float32\n\n"
+            "Returns:\n"
+            "    NumPy array of shape (n_clusters, d) containing centroids"
+        )
+
+        .def(
+            "train_in_place",
+            [](EMeans& self, py::array_t<float, py::array::c_style> data) {
+                ValidatePyArray(data, "data", 2);
+                if (!data.writeable()) {
+                    throw std::runtime_error("data must be writeable to train in place");
+                }
+                auto info = data.request();
+                auto centroids = self.TrainInPlace(
+                    static_cast<float*>(info.ptr), static_cast<size_t>(info.shape[0])
+                );
+                return CentroidsToArray(
+                    centroids, self.GetNClusters(), static_cast<size_t>(info.shape[1])
+                );
+            },
+            py::arg("data"),
+            "Run e-means clustering, rotating `data` in place instead of allocating a rotated "
+            "copy.\n\n"
+            "`data` is overwritten with its rotated form and is not restored, so it must be a "
+            "writeable, C-contiguous float32 array (no dtype conversion is performed). "
+            "unrotate_centroids is forced to False, so data and centroids stay in the same "
+            "domain.\n\n"
+            "Args:\n"
+            "    data: NumPy array of shape (n, d) with dtype float32. Overwritten.\n\n"
+            "Returns:\n"
+            "    NumPy array of shape (n_clusters, d) containing centroids"
+        )
+
+        .def_property_readonly(
+            "batch_size",
+            &EMeans::GetBatchSize,
+            "Mini-batch size used in training (resolved by the batch-size law when not set)"
+        )
+
+        .def_property_readonly(
+            "initial_step",
+            &EMeans::GetInitialStep,
+            "Initial EMA step size (resolved by the step-size law when not set)"
+        )
+
+        .def("__repr__", [name](const EMeans& self) {
+            return std::string("<") + name + ": n_clusters=" + std::to_string(self.GetNClusters()) +
+                   ", trained=" + (self.IsTrained() ? "True" : "False") + ">";
+        });
+}
+
 PYBIND11_MODULE(_superkmeans, m) {
     m.doc() =
         "A Super fast K-Means library for High-Dimensional vectors on CPUs (x86, ARM) and GPUs";
@@ -892,6 +994,36 @@ PYBIND11_MODULE(_superkmeans, m) {
             "Statistics for refinement iterations"
         );
 
+    py::class_<skmeans::SuperEMeansConfig, skmeans::SuperKMeansConfig>(
+        m,
+        "SuperEMeansConfig",
+        "Configuration parameters for SuperEMeans clustering. `iters` is the number of epochs "
+        "(default: 2)."
+    )
+        .def(py::init<>(), "Default constructor")
+
+        .def_readwrite(
+            "batch_size",
+            &skmeans::SuperEMeansConfig::batch_size,
+            "Mini-batch size, 0 = batch-size law (default: 0)"
+        )
+        .def_readwrite(
+            "initial_step",
+            &skmeans::SuperEMeansConfig::initial_step,
+            "Initial EMA step size in (0, 1], 0 = step-size law (default: 0)"
+        )
+        .def_readwrite(
+            "assignment_chunk_size",
+            &skmeans::SuperEMeansConfig::assignment_chunk_size,
+            "Maximum points assigned per chunk of a mini-batch (default: 262144)"
+        )
+
+        .def("__repr__", [](const skmeans::SuperEMeansConfig& config) {
+            return "<SuperEMeansConfig: epochs=" + std::to_string(config.iters) +
+                   ", batch_size=" + std::to_string(config.batch_size) +
+                   ", initial_step=" + std::to_string(config.initial_step) + ">";
+        });
+
     BindSuperKMeans<Quantization::f32>(m, "SuperKMeans");
     BindSuperKMeans<Quantization::sq8>(m, "SuperKMeansSQ8");
     BindSuperKMeans<Quantization::lvq4>(m, "SuperKMeansLVQ4");
@@ -900,4 +1032,8 @@ PYBIND11_MODULE(_superkmeans, m) {
     BindHierarchicalSuperKMeans<Quantization::sq8>(m, "HierarchicalSuperKMeansSQ8");
     BindHierarchicalSuperKMeans<Quantization::lvq4>(m, "HierarchicalSuperKMeansLVQ4");
     BindHierarchicalSuperKMeans<Quantization::rabitq>(m, "HierarchicalSuperKMeansRabitQ");
+    BindSuperEMeans<Quantization::f32>(m, "SuperEMeans");
+    BindSuperEMeans<Quantization::sq8>(m, "SuperEMeansSQ8");
+    BindSuperEMeans<Quantization::lvq4>(m, "SuperEMeansLVQ4");
+    BindSuperEMeans<Quantization::rabitq>(m, "SuperEMeansRabitQ");
 }

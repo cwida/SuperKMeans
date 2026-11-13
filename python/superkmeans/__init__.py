@@ -21,14 +21,19 @@ from ._superkmeans import (
     HierarchicalSuperKMeansRabitQ as _HierarchicalSuperKMeansRabitQCpp,
     HierarchicalSuperKMeansConfig as _HierarchicalSuperKMeansConfigCpp,
     HierarchicalSuperKMeansIterationStats,
+    SuperEMeans as _SuperEMeansCpp,
+    SuperEMeansSQ8 as _SuperEMeansSQ8Cpp,
+    SuperEMeansLVQ4 as _SuperEMeansLVQ4Cpp,
+    SuperEMeansRabitQ as _SuperEMeansRabitQCpp,
+    SuperEMeansConfig as _SuperEMeansConfigCpp,
 )
 
 _QUANTIZERS = ("f32", "sq8", "lvq4", "rabitq")
 _QUANTIZER_MAP = {
-    "f32": (_SuperKMeansCpp, _HierarchicalSuperKMeansCpp),
-    "sq8": (_SuperKMeansSQ8Cpp, _HierarchicalSuperKMeansSQ8Cpp),
-    "lvq4": (_SuperKMeansLVQ4Cpp, _HierarchicalSuperKMeansLVQ4Cpp),
-    "rabitq": (_SuperKMeansRabitQCpp, _HierarchicalSuperKMeansRabitQCpp),
+    "f32": (_SuperKMeansCpp, _HierarchicalSuperKMeansCpp, _SuperEMeansCpp),
+    "sq8": (_SuperKMeansSQ8Cpp, _HierarchicalSuperKMeansSQ8Cpp, _SuperEMeansSQ8Cpp),
+    "lvq4": (_SuperKMeansLVQ4Cpp, _HierarchicalSuperKMeansLVQ4Cpp, _SuperEMeansLVQ4Cpp),
+    "rabitq": (_SuperKMeansRabitQCpp, _HierarchicalSuperKMeansRabitQCpp, _SuperEMeansRabitQCpp),
 }
 
 
@@ -253,39 +258,7 @@ class SuperKMeans:
             self._hierarchical = self._hierarchical_param
 
         if self._cpp_skmeans_obj is None:
-            if self._hierarchical:
-                config = _HierarchicalSuperKMeansConfigCpp()
-                config.iters_mesoclustering = self._config_params['iters_mesoclustering']
-                config.iters_fineclustering = self._config_params['iters_fineclustering']
-                config.iters_refinement = self._config_params['iters_refinement']
-            else:
-                config = _SuperKMeansConfigCpp()
-                config.iters = self._config_params['iters']
-
-            if self._config_params['sampling_fraction'] is not None:
-                config.sampling_fraction = self._config_params['sampling_fraction']
-            config.max_points_per_cluster = self._config_params['max_points_per_cluster']
-            config.n_threads = self._config_params['n_threads']
-            config.seed = self._config_params['seed']
-            config.use_blas_only = self._config_params['use_blas_only']
-            config.tol = self._config_params['tol']
-            config.recall_tol = self._config_params['recall_tol']
-            config.early_termination = self._config_params['early_termination']
-            config.sample_queries = self._config_params['sample_queries']
-            config.objective_k = self._config_params['objective_k']
-            config.verbose = self._config_params['verbose']
-            config.angular = self._config_params['angular']
-            config.unrotate_centroids = self._config_params['unrotate_centroids']
-
-            if self._quantizer != "f32":
-                config.full_precision_final_centroids = (
-                    self._config_params['full_precision_final_centroids']
-                )
-
-            cpp_cls = _QUANTIZER_MAP[self._quantizer][1 if self._hierarchical else 0]
-            self._cpp_skmeans_obj = cpp_cls(
-                self._n_clusters, self._dimensionality, config
-            )
+            self._cpp_skmeans_obj = self._create_engine()
 
         n_queries = 0
         if queries is not None:
@@ -295,6 +268,40 @@ class SuperKMeans:
         if overwrite_input:
             return self._cpp_skmeans_obj.train_in_place(data, queries, n_queries)
         return self._cpp_skmeans_obj.train(data, queries, n_queries)
+
+    def _configure(self, config):
+        if self._config_params['sampling_fraction'] is not None:
+            config.sampling_fraction = self._config_params['sampling_fraction']
+        config.max_points_per_cluster = self._config_params['max_points_per_cluster']
+        config.n_threads = self._config_params['n_threads']
+        config.seed = self._config_params['seed']
+        config.use_blas_only = self._config_params['use_blas_only']
+        config.tol = self._config_params['tol']
+        config.recall_tol = self._config_params['recall_tol']
+        config.early_termination = self._config_params['early_termination']
+        config.sample_queries = self._config_params['sample_queries']
+        config.objective_k = self._config_params['objective_k']
+        config.verbose = self._config_params['verbose']
+        config.angular = self._config_params['angular']
+        config.unrotate_centroids = self._config_params['unrotate_centroids']
+
+        if self._quantizer != "f32":
+            config.full_precision_final_centroids = (
+                self._config_params['full_precision_final_centroids']
+            )
+        return config
+
+    def _create_engine(self):
+        if self._hierarchical:
+            config = _HierarchicalSuperKMeansConfigCpp()
+            config.iters_mesoclustering = self._config_params['iters_mesoclustering']
+            config.iters_fineclustering = self._config_params['iters_fineclustering']
+            config.iters_refinement = self._config_params['iters_refinement']
+        else:
+            config = _SuperKMeansConfigCpp()
+            config.iters = self._config_params['iters']
+        cpp_cls = _QUANTIZER_MAP[self._quantizer][1 if self._hierarchical else 0]
+        return cpp_cls(self._n_clusters, self._dimensionality, self._configure(config))
 
     def _assign_engine(self):
         """C++ object used to run exact float32 assign().
@@ -573,9 +580,166 @@ class SuperKMeans:
         )
 
 
+class SuperEMeans(SuperKMeans):
+    """
+    e-means: mini-batch k-means with EMA centroid updates (https://arxiv.org/abs/2611.09501),
+    accelerated with SuperKMeans' pruning from the second epoch on.
+
+    Parameters
+    ----------
+    n_clusters : int
+        Number of clusters to create.
+    dimensionality : int
+        Number of dimensions in the data.
+    quantizer : str, optional (default="f32")
+        Quantization scheme: "f32", "sq8", "lvq4", or "rabitq".
+    epochs : int, optional (default=2)
+        Number of passes over the data.
+    batch_size : int, optional (default=None)
+        Mini-batch size. If None, set by the e-means batch-size law from n, n_clusters and epochs.
+    initial_step : float, optional (default=None)
+        Initial EMA step size in (0.0, 1.0]. If None, set by the e-means step-size law.
+    n_threads : int, optional (default=0)
+        Number of CPU threads to use. 0 means use all available.
+    seed : int, optional (default=42)
+        Random seed for reproducibility.
+    use_blas_only : bool, optional (default=False)
+        Use GEMM-only computation without pruning.
+    full_precision_final_centroids : bool, optional (default=False)
+        Compute the final centroids from the raw float data (quantized schemes only).
+    verbose : bool, optional (default=False)
+        Whether to print progress information during training.
+    angular : bool, optional (default=False)
+        Whether to use spherical e-means (normalize centroids).
+    unrotate_centroids : bool, optional (default=True)
+        Whether to map the centroids back to the input domain before returning them.
+        Forced to False by train(overwrite_input=True).
+
+    Attributes
+    ----------
+    batch_size_ : int or None
+        Mini-batch size used in training (None before training).
+    initial_step_ : float or None
+        Initial EMA step size used in training (None before training).
+    iteration_stats : List[SuperKMeansIterationStats]
+        Statistics for each epoch (available after training).
+    """
+
+    def __init__(
+        self,
+        n_clusters: int,
+        dimensionality: int,
+        quantizer: str = "f32",
+        epochs: int = 2,
+        batch_size: Optional[int] = None,
+        initial_step: Optional[float] = None,
+        n_threads: int = 0,
+        seed: int = 42,
+        use_blas_only: bool = False,
+        full_precision_final_centroids: bool = False,
+        verbose: bool = False,
+        angular: bool = False,
+        unrotate_centroids: bool = True,
+    ):
+        super().__init__(
+            n_clusters,
+            dimensionality,
+            hierarchical=False,
+            quantizer=quantizer,
+            iters=epochs,
+            n_threads=n_threads,
+            seed=seed,
+            use_blas_only=use_blas_only,
+            full_precision_final_centroids=full_precision_final_centroids,
+            verbose=verbose,
+            angular=angular,
+            unrotate_centroids=unrotate_centroids,
+        )
+        if epochs <= 0:
+            raise ValueError("epochs must be positive")
+        if batch_size is not None and batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        if initial_step is not None and not 0.0 < initial_step <= 1.0:
+            raise ValueError("initial_step must be in (0.0, 1.0]")
+        self._config_params['batch_size'] = batch_size
+        self._config_params['initial_step'] = initial_step
+        self._hierarchical = False
+
+    def _create_engine(self):
+        config = _SuperEMeansConfigCpp()
+        config.iters = self._config_params['iters']
+        config.batch_size = self._config_params['batch_size'] or 0
+        config.initial_step = self._config_params['initial_step'] or 0.0
+        cpp_cls = _QUANTIZER_MAP[self._quantizer][2]
+        return cpp_cls(self._n_clusters, self._dimensionality, self._configure(config))
+
+    def train(
+        self,
+        data: NDArray[np.float32],
+        overwrite_input: bool = False,
+    ) -> NDArray[np.float32]:
+        """
+        Run e-means clustering to determine centroids.
+
+        Parameters
+        ----------
+        data : ndarray of shape (n_samples, dimensionality), dtype=float32
+            Training data. Must be C-contiguous (row-major).
+        overwrite_input : bool, optional (default=False)
+            Rotate `data` in place instead of allocating a rotated copy, halving peak memory.
+            `data` is overwritten with its rotated form, and the centroids are returned in that
+            same domain.
+
+        Returns
+        -------
+        centroids : ndarray of shape (n_clusters, dimensionality), dtype=float32
+            The computed cluster centroids.
+
+        Raises
+        ------
+        ValueError
+            If data has wrong shape, dtype, or memory layout.
+        RuntimeError
+            If the model has already been trained.
+        """
+        data = self.validate_numpy_array(
+            data, "data", self._dimensionality, overwrite=overwrite_input
+        )
+        if self._cpp_skmeans_obj is None:
+            self._cpp_skmeans_obj = self._create_engine()
+        if overwrite_input:
+            return self._cpp_skmeans_obj.train_in_place(data)
+        return self._cpp_skmeans_obj.train(data)
+
+    @property
+    def batch_size_(self) -> Optional[int]:
+        """Mini-batch size used in training, or None before training (read-only)."""
+        if self._cpp_skmeans_obj is None or not self.is_trained_:
+            return None
+        return self._cpp_skmeans_obj.batch_size
+
+    @property
+    def initial_step_(self) -> Optional[float]:
+        """Initial EMA step size used in training, or None before training (read-only)."""
+        if self._cpp_skmeans_obj is None or not self.is_trained_:
+            return None
+        return self._cpp_skmeans_obj.initial_step
+
+    def __repr__(self) -> str:
+        """String representation of the SuperEMeans object."""
+        quantizer_str = f", quantizer={self._quantizer!r}" if self._quantizer != "f32" else ""
+        return (
+            f"SuperEMeans(n_clusters={self._n_clusters}, "
+            f"dimensionality={self._dimensionality}, "
+            f"epochs={self._config_params['iters']}, "
+            f"trained={self.is_trained_}{quantizer_str})"
+        )
+
+
 __all__ = [
     "__version__",
     "SuperKMeans",
+    "SuperEMeans",
     "SuperKMeansIterationStats",
     "HierarchicalSuperKMeansIterationStats",
 ]
