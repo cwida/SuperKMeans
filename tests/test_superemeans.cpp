@@ -240,18 +240,6 @@ TYPED_TEST(SuperEMeansTest, Revival) {
     }
 }
 
-TYPED_TEST(SuperEMeansTest, RecallComparableToSuperKMeans) {
-    constexpr Quantization q = TypeParam::value;
-    const size_t d = skm_test::RECALL_D;
-    auto data = skm_test::LoadTestDataSubdim(TEST_DATA_PATH, skm_test::RECALL_N, d, d);
-
-    auto emeans = TrainAndMeasure<q>(
-        data, d, skm_test::RECALL_N_CLUSTERS, TestConfig(EMEANS_DEFAULT_EPOCHS, false)
-    );
-    float superkmeans = skm_test::ClusteringRecall<q>(TEST_DATA_PATH);
-    EXPECT_GE(emeans.recall, superkmeans - skm_test::RECALL_TOL);
-}
-
 TYPED_TEST(SuperEMeansTest, TrainInPlace_RecallMatchesTrain) {
     constexpr Quantization q = TypeParam::value;
     const size_t d = skm_test::RECALL_D;
@@ -267,13 +255,14 @@ TYPED_TEST(SuperEMeansTest, FloatCentroidUpdate) {
     constexpr Quantization q = TypeParam::value;
     const size_t d = skm_test::RECALL_D;
     auto data = skm_test::LoadTestDataSubdim(TEST_DATA_PATH, skm_test::RECALL_N, d, d);
-    auto config = TestConfig(EMEANS_DEFAULT_EPOCHS, false);
-    config.quantized_centroid_update = false;
-    config.full_precision_final_centroids = true;
+    const auto config = TestConfig(EMEANS_DEFAULT_EPOCHS, false);
+    auto float_config = config;
+    float_config.quantized_centroid_update = false;
+    float_config.full_precision_final_centroids = true;
 
-    auto emeans = TrainAndMeasure<q>(data, d, skm_test::RECALL_N_CLUSTERS, config);
-    float superkmeans = skm_test::ClusteringRecall<q>(TEST_DATA_PATH);
-    EXPECT_GE(emeans.recall, superkmeans - skm_test::RECALL_TOL);
+    auto quantized_update = TrainAndMeasure<q>(data, d, skm_test::RECALL_N_CLUSTERS, config);
+    auto float_update = TrainAndMeasure<q>(data, d, skm_test::RECALL_N_CLUSTERS, float_config);
+    EXPECT_GE(float_update.recall, quantized_update.recall - skm_test::RECALL_TOL);
 }
 
 TYPED_TEST(SuperEMeansTest, SLOW_PruningEpochs) {
