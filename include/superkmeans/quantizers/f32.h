@@ -32,6 +32,13 @@ class F32Quantizer : public IQuantizer<Quantization::f32> {
         fitted = true;
     }
 
+    std::unique_ptr<F32Quantizer> CloneFitted() const {
+        auto clone = std::make_unique<F32Quantizer>();
+        clone->dim = dim;
+        clone->fitted = fitted;
+        return clone;
+    }
+
     void Encode(const float* in, float* out, size_t n, size_t d) const override {
         assert(fitted);
         if (in != out) {

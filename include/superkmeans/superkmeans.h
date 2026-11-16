@@ -1731,9 +1731,9 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
     void EnsureTmpDistancesBuffer() {
         size_t needed =
             BatchComputer<DistanceFunction::l2, Quantization::f32>::ScratchSize(GetExecutor());
-        if constexpr (q != Quantization::f32) {
-            // The quantizers' assignment tiles are X_BATCH_SIZE x Y_BATCH_SIZE
-            needed = std::max(needed, X_BATCH_SIZE * Y_BATCH_SIZE);
+        if constexpr (q == Quantization::sq8 || q == Quantization::lvq4) {
+            // The sq8/lvq4 assignment tiles are x_batch_size x Y_BATCH_SIZE
+            needed = std::max(needed, x_batch_size * Y_BATCH_SIZE);
         }
         if (needed > tmp_distances_buffer_size) {
             tmp_distances_buffer = AllocateBuffer<distance_t>(GetAllocator(), needed);
@@ -1745,6 +1745,7 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
         auto created = std::make_unique<skmeans_quantizer_t<q>>();
         created->SetExecutor(&GetExecutor());
         created->SetAllocator(&GetAllocator());
+        created->SetXBatchSize(x_batch_size);
         return created;
     }
 
@@ -2083,6 +2084,7 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
     size_t n_samples = 0;
     size_t n_train = 0;
     uint32_t partial_d = 0; // d'
+    size_t x_batch_size = X_BATCH_SIZE;
 
     // Iteration state
     SuperKMeansState state;

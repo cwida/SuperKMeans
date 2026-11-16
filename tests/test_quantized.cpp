@@ -23,6 +23,12 @@ using QuantizedTags = ::testing::Types<
     skmeans::QuantizationTag<Quantization::lvq4>,
     skmeans::QuantizationTag<Quantization::rabitq>>;
 
+using AllQuantizerTags = ::testing::Types<
+    skmeans::QuantizationTag<Quantization::f32>,
+    skmeans::QuantizationTag<Quantization::sq8>,
+    skmeans::QuantizationTag<Quantization::lvq4>,
+    skmeans::QuantizationTag<Quantization::rabitq>>;
+
 struct QuantizerNames {
     template <typename T>
     static std::string GetName(int) {
@@ -500,4 +506,65 @@ TYPED_TEST(QuantizedIntegrationTest, SLOW_AssignTrainingPointsReuseMatchesQuanti
     }
     const double ratio = static_cast<double>(agree) / n;
     EXPECT_GT(ratio, 0.98) << "agreement=" << ratio;
+}
+
+template <typename T>
+class QuantizerCloneTest : public ::testing::Test {};
+
+TYPED_TEST_SUITE(QuantizerCloneTest, AllQuantizerTags, QuantizerNames);
+
+TYPED_TEST(QuantizerCloneTest, CloneEncodesAndAssignsLikeOriginal) {
+    constexpr Quantization q = TypeParam::value;
+    const size_t n = 2000, d = 128, n_centroids = 64, x_batch = 512;
+    auto data = skm_test::LoadTestDataSubdim(
+        CMAKE_SOURCE_DIR "/tests/test_data.bin", n, skm_test::RECALL_D, d
+    );
+
+    skmeans_quantizer_t<q> original;
+    original.Fit(data.data(), n, d);
+    auto clone = original.CloneFitted();
+    original.SetXBatchSize(x_batch);
+    clone->SetXBatchSize(x_batch);
+
+    const size_t code_size = original.CodeSize(d);
+    std::vector<skmeans_value_t<q>> codes(n * code_size), clone_codes(n * code_size);
+    original.Encode(data.data(), codes.data(), n, d);
+    clone->Encode(data.data(), clone_codes.data(), n, d);
+    EXPECT_EQ(codes, clone_codes);
+
+    std::vector<float> data_norms(n), centroid_norms(n_centroids);
+    original.ComputeNorms(codes.data(), n, d, data_norms.data());
+    original.ComputeNorms(codes.data(), n_centroids, d, centroid_norms.data());
+    std::vector<float> tmp(x_batch * Y_BATCH_SIZE), distances(n), clone_distances(n);
+    std::vector<uint32_t> labels(n), clone_labels(n);
+    original.FindNearestNeighbor(
+        codes.data(),
+        codes.data(),
+        data.data(),
+        data.data(),
+        n,
+        n_centroids,
+        d,
+        data_norms.data(),
+        centroid_norms.data(),
+        labels.data(),
+        distances.data(),
+        tmp.data()
+    );
+    clone->FindNearestNeighbor(
+        codes.data(),
+        codes.data(),
+        data.data(),
+        data.data(),
+        n,
+        n_centroids,
+        d,
+        data_norms.data(),
+        centroid_norms.data(),
+        clone_labels.data(),
+        clone_distances.data(),
+        tmp.data()
+    );
+    EXPECT_EQ(labels, clone_labels);
+    EXPECT_EQ(distances, clone_distances);
 }
