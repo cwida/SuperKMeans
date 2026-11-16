@@ -242,6 +242,9 @@ static inline constexpr size_t Y_BATCH_SIZE = 1024;
 // Measured as the best value on AMD Zen 5, Intel Granite Rapids, Apple M4 Pro and AWS Graviton4.
 static inline constexpr size_t MINI_BATCH_SIZE = 256;
 
+static inline constexpr size_t WORKER_X_BATCH_SIZE = 4096;
+static inline constexpr size_t FINECLUSTERING_CHUNK_BYTES = 1 << 20; // 1 MiB
+
 // Rows per single-threaded rotation GEMM or DCT call (each worker runs its own).
 // Measured on AMD Zen 5, Intel Granite Rapids, Apple M4 Pro and AWS Graviton4.
 static inline constexpr size_t ROTATION_BLOCK_SIZE = 2048;

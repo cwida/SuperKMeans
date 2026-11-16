@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include "superkmeans/pdx/utils.h"
 #include "superkmeans/superkmeans.h"
 
@@ -178,7 +180,6 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
             this->n_samples,
             !this->hierarchical_config.data_already_rotated
         );
-        auto initialn_samples = this->n_samples;
         this->RotateOrCopy(
             this->horizontal_centroids.get(),
             this->prev_centroids.get(),
@@ -263,15 +264,6 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
         );
 
         auto not_pruned_counts = AllocateBuffer<size_t>(this->GetAllocator(), this->n_samples);
-
-        // Save full norms before the loop (independent of iteration work)
-        {
-            SKM_PROFILE_SCOPE("allocator");
-            immutable_data_norms = AllocateBuffer<float>(this->GetAllocator(), this->n_samples);
-            memcpy(
-                immutable_data_norms.get(), this->data_norms.get(), sizeof(float) * this->n_samples
-            );
-        }
 
         bool always_gemm_only = !this->PruningEnabled(n_mesoclusters);
         bool partial_norms_computed = false;
@@ -385,10 +377,11 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
         std::vector<std::vector<SuperKMeansIterationStats>> mesocluster_fineclustering_stats(
             n_mesoclusters
         );
+        std::fill_n(this->cluster_sizes.get(), this->n_clusters, 0u);
         FineclusteringContext context{
             data_to_cluster,
             encoded_data_p,
-            immutable_data_norms.get(),
+            this->data_norms.get(),
             mesocluster_indices_flat.get(),
             mesocluster_offsets.data(),
             mesoclusters_sizes.data(),
@@ -396,15 +389,40 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
             fineclusters_offsets.data(),
             initial_partial_d,
             final_assignments.get(),
+            this->distances.get(),
+            this->cluster_sizes.get(),
             final_centroids.get(),
             mesocluster_fineclustering_stats.data()
         };
+        std::vector<size_t> mesocluster_order;
         for (size_t k = 0; k < n_mesoclusters; ++k) {
-            if (fine_clusters_nums[k] == 0) {
-                continue;
+            if (fine_clusters_nums[k] > 0) {
+                mesocluster_order.push_back(k);
             }
-            ClusterMesocluster(context, k);
         }
+        std::stable_sort(
+            mesocluster_order.begin(),
+            mesocluster_order.end(),
+            [&](size_t a, size_t b) { return mesoclusters_sizes[a] > mesoclusters_sizes[b]; }
+        );
+        SerialExecutor worker_executor;
+        const size_t max_fineclusters =
+            *std::max_element(fine_clusters_nums.begin(), fine_clusters_nums.end());
+        std::vector<std::unique_ptr<HierarchicalSuperKMeans>> workers(
+            std::min(this->GetExecutor().NumWorkers(), mesocluster_order.size())
+        );
+        for (auto& worker : workers) {
+            worker = MakeWorkerEngine(max_fineclusters, worker_executor);
+        }
+        std::atomic<size_t> next_mesocluster{0};
+        this->GetExecutor().ParallelFor(workers.size(), [&](size_t begin, size_t end, size_t) {
+            for (size_t w = begin; w < end; ++w) {
+                for (size_t i = next_mesocluster++; i < mesocluster_order.size();
+                     i = next_mesocluster++) {
+                    workers[w]->ClusterMesocluster(context, mesocluster_order[i]);
+                }
+            }
+        });
         for (const auto& stats : mesocluster_fineclustering_stats) {
             hierarchical_iteration_stats.fineclustering_iteration_stats.insert(
                 hierarchical_iteration_stats.fineclustering_iteration_stats.end(),
@@ -420,11 +438,6 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
             std::cout << "\n=== PHASE 3: REFINEMENT (fine-tuning all " << this->n_clusters
                       << " clusters) ===" << std::endl;
         }
-        this->n_samples = initialn_samples;
-
-        // Restore full data norms (fine-clustering overwrites the front entries)
-        memcpy(this->data_norms.get(), immutable_data_norms.get(), sizeof(float) * this->n_samples);
-
         // In the refinement phase, we use an even smaller partial d (around 8% of d) because the
         // clusters are already well-formed, and pruning rate is expected to be high.
         this->partial_d = this->quantizer->AlignPartialD(
@@ -733,9 +746,35 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
         const size_t* fineclusters_offsets;
         uint32_t initial_partial_d;
         uint32_t* final_assignments;
+        distance_t* final_distances;
+        uint32_t* final_cluster_sizes;
         centroid_value_t* final_centroids;
         std::vector<SuperKMeansIterationStats>* fineclustering_stats;
     };
+
+    std::unique_ptr<HierarchicalSuperKMeans> MakeWorkerEngine(
+        const size_t n_worker_clusters,
+        ParallelExecutor& worker_executor
+    ) const {
+        HierarchicalSuperKMeansConfig worker_config = hierarchical_config;
+        worker_config.executor = &worker_executor;
+        worker_config.data_already_rotated = true;
+        worker_config.verbose = false;
+        worker_config.suppress_warnings = true;
+        auto worker =
+            std::make_unique<HierarchicalSuperKMeans>(n_worker_clusters, this->d, worker_config);
+        worker->ConfigWorkerEngine(*this->quantizer);
+        worker->ConfigFineclusteringChunks();
+        return worker;
+    }
+
+    void ConfigFineclusteringChunks() {
+        n_chunk_points = std::max(
+            MINI_BATCH_SIZE, FINECLUSTERING_CHUNK_BYTES / (this->code_size * sizeof(vector_value_t))
+        );
+        tmp_chunk_codes =
+            AllocateBuffer<vector_value_t>(this->GetAllocator(), n_chunk_points * this->code_size);
+    }
 
     void ClusterMesocluster(const FineclusteringContext& context, const size_t k) {
         const size_t n_fineclusters = context.fine_clusters_nums[k];
@@ -746,40 +785,18 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
         EnsureBufferSize(this->data_norms, allocator, mesocluster_size);
         EnsureBufferSize(this->assignments, allocator, mesocluster_size);
         EnsureBufferSize(this->distances, allocator, mesocluster_size);
-        EnsureBufferSize(tmp_mesocluster_points, allocator, mesocluster_size * this->d);
         EnsureBufferSize(tmp_not_pruned_counts, allocator, mesocluster_size);
 
         this->partial_d = context.initial_partial_d;
         this->quantizer->InvalidateCaches();
-        this->n_samples = mesocluster_size;
-        CompactMesoclusterToBuffer(
-            mesocluster_size,
-            context.data_to_cluster,
-            context.data_norms,
-            tmp_mesocluster_points.get(),
-            mesocluster_indices
-        );
-        const float* mesocluster_data_to_cluster = tmp_mesocluster_points.get();
-
-        // Compact encoded data for this mesocluster
-        const vector_value_t* mesocluster_encoded_data_p;
-        if constexpr (q == Quantization::f32) {
-            mesocluster_encoded_data_p = mesocluster_data_to_cluster;
-        } else {
-            EnsureBufferSize(tmp_mesocluster_codes, allocator, mesocluster_size * this->code_size);
-            CompactEncodedMesoclusterToBuffer(
-                mesocluster_size,
-                context.encoded_data,
-                tmp_mesocluster_codes.get(),
-                mesocluster_indices
-            );
-            mesocluster_encoded_data_p = tmp_mesocluster_codes.get();
+        for (size_t j = 0; j < mesocluster_size; ++j) {
+            this->data_norms[j] = context.data_norms[mesocluster_indices[j]];
         }
 
         auto mesocluster_centroids_pdx_wrapper = this->GenerateCentroids(
-            mesocluster_data_to_cluster, mesocluster_size, n_fineclusters, false
+            context.data_to_cluster, mesocluster_size, n_fineclusters, false, mesocluster_indices
         );
-        // Copy centroids to prev_centroids for use in the first RunIteration
+        // Copy centroids to prev_centroids for use in the first RunFineclusteringIteration
         // (is_first_iter=true skips the swap, so prev_centroids must be populated)
         memcpy(
             this->prev_centroids.get(),
@@ -814,45 +831,18 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
         }
 
         bool fine_always_gemm_only = !this->PruningEnabled(n_fineclusters);
-        bool fine_partial_norms_computed = false;
         float fine_best_recall = 0.0f;
         size_t iters_without_improvement = 0;
         for (size_t fine_iter_idx = 0; fine_iter_idx < hierarchical_config.iters_fineclustering;
              ++fine_iter_idx) {
             bool use_gemm_only = (fine_iter_idx == 0) || fine_always_gemm_only;
-            if (!use_gemm_only && !fine_partial_norms_computed) {
-                this->quantizer->CacheDataPartialNorms(
-                    mesocluster_encoded_data_p, this->n_samples, this->d, this->partial_d
-                );
-                fine_partial_norms_computed = true;
-            }
             if (use_gemm_only) {
-                this->template RunIteration<true>(
-                    mesocluster_data_to_cluster,
-                    mesocluster_encoded_data_p,
-                    mesocluster_centroids_pdx_wrapper,
-                    tmp_not_pruned_counts.get(),
-                    nullptr, // queries
-                    0,       // n_queries
-                    this->n_samples,
-                    n_fineclusters,
-                    fine_iter_idx,
-                    fine_iter_idx == 0,
-                    context.fineclustering_stats[k]
+                RunFineclusteringIteration<false>(
+                    context, k, mesocluster_centroids_pdx_wrapper, fine_iter_idx, fine_iter_idx == 0
                 );
             } else {
-                this->template RunIteration<false>(
-                    mesocluster_data_to_cluster,
-                    mesocluster_encoded_data_p,
-                    mesocluster_centroids_pdx_wrapper,
-                    tmp_not_pruned_counts.get(),
-                    nullptr, // queries
-                    0,       // n_queries
-                    this->n_samples,
-                    n_fineclusters,
-                    fine_iter_idx,
-                    false,
-                    context.fineclustering_stats[k]
+                RunFineclusteringIteration<true>(
+                    context, k, mesocluster_centroids_pdx_wrapper, fine_iter_idx, false
                 );
             }
             if (hierarchical_config.early_termination &&
@@ -866,7 +856,10 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
         GetTrueAssignmentsFromIndirectionBuffer(
             mesocluster_indices,
             context.final_assignments,
+            context.final_distances,
+            context.final_cluster_sizes,
             this->assignments.get(),
+            this->distances.get(),
             mesocluster_size,
             context.fineclusters_offsets[k]
         );
@@ -885,52 +878,142 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
         }
     }
 
-    /*
-     * Compact data assigned to a mesocluster in mesocluster_buffer using precomputed indices
-     * Data is already rotated, so we just have to copy
-     * Additionally, we have to copy their norms in a sequential buffer to not recompute them
-     */
-    void CompactMesoclusterToBuffer(
-        const size_t mesocluster_size,
-        const float* SKM_RESTRICT data,
-        const float* SKM_RESTRICT source_norms,
-        float* SKM_RESTRICT mesocluster_buffer,
-        const size_t* SKM_RESTRICT mesocluster_indices
+    template <bool PRUNE>
+    void RunFineclusteringIteration(
+        const FineclusteringContext& context,
+        const size_t k,
+        layout_t& centroids_layout,
+        const size_t iter_idx,
+        const bool is_first_iter
     ) {
-        SKM_PROFILE_SCOPE("compact_mesocluster");
-        this->GetExecutor().ParallelFor(mesocluster_size, [&](size_t begin, size_t end, size_t) {
-            for (size_t j = begin; j < end; ++j) {
-                size_t i = mesocluster_indices[j];
-                this->data_norms[j] = source_norms[i];
-                memcpy(
-                    static_cast<void*>(mesocluster_buffer + j * this->d),
-                    static_cast<const void*>(data + i * this->d),
-                    sizeof(float) * this->d
-                );
-            }
-        });
+        const size_t n_points = context.mesoclusters_sizes[k];
+        const size_t n_clusters = context.fine_clusters_nums[k];
+        const size_t* mesocluster_indices =
+            context.mesocluster_indices + context.mesocluster_offsets[k];
+        if (!is_first_iter) {
+            std::swap(this->horizontal_centroids, this->prev_centroids);
+        }
+        this->quantizer->Encode(
+            this->prev_centroids.get(), this->quantized_centroids.get(), n_clusters, this->d
+        );
+        if constexpr (PRUNE) {
+            std::fill_n(tmp_not_pruned_counts.get(), n_points, size_t{0});
+            this->quantizer->CacheCentroidPartialNorms(
+                this->quantized_centroids.get(), n_clusters, this->d, this->partial_d
+            );
+        } else {
+            this->quantizer->ComputeNorms(
+                this->quantized_centroids.get(), n_clusters, this->d, this->centroid_norms.get()
+            );
+        }
+        this->ResetCentroids(n_clusters);
+        this->quantizer->ResetCentroidAccumulators(n_clusters, this->d);
+        AssignAndAccumulateChunks(
+            PRUNE, context, mesocluster_indices, n_points, n_clusters, centroids_layout
+        );
+
+        SuperKMeansIterationStats stats;
+        stats.iteration = iter_idx + 1;
+        stats.pruning = PRUNE;
+        if constexpr (PRUNE) {
+            bool partial_d_changed = false;
+            stats.partial_d = this->partial_d;
+            stats.not_pruned_pct = this->TunePartialD(
+                tmp_not_pruned_counts.get(), n_points, n_clusters, partial_d_changed
+            );
+        }
+        this->ConsolidateCentroids(n_points, n_clusters);
+        this->ComputeCost(n_points);
+        this->ComputeShift(n_clusters);
+        stats.objective = this->cost;
+        stats.shift = this->shift;
+        stats.split = this->n_split;
+        stats.recall = this->recall;
+        context.fineclustering_stats[k].push_back(stats);
     }
 
-    /*
-     * Compact encoded data assigned to a mesocluster into a contiguous buffer.
-     * Used for non-f32 quantizations where encoded data has code_size bytes per vector.
-     */
-    void CompactEncodedMesoclusterToBuffer(
-        const size_t mesocluster_size,
-        const vector_value_t* SKM_RESTRICT encoded_data,
-        vector_value_t* SKM_RESTRICT encoded_mesocluster_buffer,
-        const size_t* SKM_RESTRICT mesocluster_indices
+    void AssignAndAccumulateChunks(
+        const bool prune,
+        const FineclusteringContext& context,
+        const size_t* SKM_RESTRICT mesocluster_indices,
+        const size_t n_points,
+        const size_t n_clusters,
+        layout_t& centroids_layout
     ) {
-        SKM_PROFILE_SCOPE("compact_encoded_mesocluster");
-        const size_t cs = this->code_size;
-        this->GetExecutor().ParallelFor(mesocluster_size, [&](size_t begin, size_t end, size_t) {
-            for (size_t j = begin; j < end; ++j) {
-                size_t i = mesocluster_indices[j];
-                memcpy(
-                    encoded_mesocluster_buffer + j * cs,
-                    encoded_data + i * cs,
-                    sizeof(vector_value_t) * cs
+        const bool quantized_update = this->config.quantized_centroid_update;
+        const bool gather_points =
+            q != Quantization::f32 && (!quantized_update || (q == Quantization::rabitq && prune));
+        const float* chunk_points;
+        if constexpr (q == Quantization::f32) {
+            chunk_points = tmp_chunk_codes.get();
+        } else {
+            if (gather_points) {
+                EnsureBufferSize(tmp_chunk_points, this->GetAllocator(), n_chunk_points * this->d);
+            }
+            chunk_points = tmp_chunk_points.get();
+        }
+        for (size_t i = 0; i < n_points; i += n_chunk_points) {
+            const size_t n_chunk = std::min(n_chunk_points, n_points - i);
+            GatherMesoclusterChunk(context, mesocluster_indices + i, n_chunk, gather_points);
+            if (n_points > n_chunk_points) {
+                this->quantizer->InvalidateCaches();
+            }
+            if (prune) {
+                this->quantizer->CacheDataPartialNorms(
+                    tmp_chunk_codes.get(), n_chunk, this->d, this->partial_d
                 );
+            }
+            this->AssignPoints(
+                prune,
+                tmp_chunk_codes.get(),
+                chunk_points,
+                this->data_norms.get() + i,
+                this->quantized_centroids.get(),
+                this->prev_centroids.get(),
+                n_chunk,
+                n_clusters,
+                centroids_layout,
+                this->assignments.get() + i,
+                this->distances.get() + i,
+                prune ? tmp_not_pruned_counts.get() + i : nullptr
+            );
+            this->AccumulatePoints(
+                quantized_update,
+                tmp_chunk_codes.get(),
+                chunk_points,
+                this->assignments.get() + i,
+                n_chunk,
+                n_clusters,
+                this->horizontal_centroids.get(),
+                this->cluster_sizes.get()
+            );
+        }
+    }
+
+    void GatherMesoclusterChunk(
+        const FineclusteringContext& context,
+        const size_t* SKM_RESTRICT chunk_indices,
+        const size_t n_chunk,
+        const bool gather_points
+    ) {
+        SKM_PROFILE_SCOPE("gather_mesocluster_chunk");
+        const size_t code_size = this->code_size;
+        const size_t d = this->d;
+        this->GetExecutor().ParallelFor(n_chunk, [&](size_t begin, size_t end, size_t) {
+            for (size_t j = begin; j < end; ++j) {
+                const size_t i = chunk_indices[j];
+                memcpy(
+                    tmp_chunk_codes.get() + j * code_size,
+                    context.encoded_data + i * code_size,
+                    sizeof(vector_value_t) * code_size
+                );
+                if (gather_points) {
+                    memcpy(
+                        tmp_chunk_points.get() + j * d,
+                        context.data_to_cluster + i * d,
+                        sizeof(float) * d
+                    );
+                }
             }
         });
     }
@@ -979,9 +1062,8 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
                     static_cast<double>(n_clusters_remaining * mesocluster_sizes[i]) /
                     static_cast<double>(n_samples_remaining);
                 size_t allocated = static_cast<size_t>(std::lround(proportion));
-                allocated = std::min(
-                    allocated, n_clusters_remaining - n_nonempty_mesoclusters_remaining
-                );
+                allocated =
+                    std::min(allocated, n_clusters_remaining - n_nonempty_mesoclusters_remaining);
                 fine_clusters_nums[i] = std::max(allocated, size_t{1});
             }
             n_clusters_remaining -= fine_clusters_nums[i];
@@ -994,7 +1076,10 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
     void GetTrueAssignmentsFromIndirectionBuffer(
         const size_t* SKM_RESTRICT mesocluster_indices,
         uint32_t* SKM_RESTRICT output_assignments,
+        distance_t* SKM_RESTRICT output_distances,
+        uint32_t* SKM_RESTRICT output_cluster_sizes,
         const uint32_t* SKM_RESTRICT input_assignments,
+        const distance_t* SKM_RESTRICT input_distances,
         const size_t n_samples_in_mesocluster,
         const size_t cluster_id_offset
     ) {
@@ -1006,6 +1091,8 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
             // We need to add the offset to put the global cluster id in the final assignments
             uint32_t global_cluster_id = local_cluster_id + cluster_id_offset;
             output_assignments[original_idx] = global_cluster_id;
+            output_distances[original_idx] = input_distances[i];
+            output_cluster_sizes[global_cluster_id]++;
         }
     }
 
@@ -1079,10 +1166,10 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
     std::vector<uint32_t> mesoclusters_assignments;
     std::vector<uint32_t> mesoclusters_sizes;
     AllocatedBuffer<uint32_t> final_assignments;
-    AllocatedBuffer<float> immutable_data_norms;
     AllocatedBuffer<centroid_value_t> final_centroids;
-    AllocatedBuffer<float> tmp_mesocluster_points;
-    AllocatedBuffer<vector_value_t> tmp_mesocluster_codes;
+    size_t n_chunk_points = 0;
+    AllocatedBuffer<vector_value_t> tmp_chunk_codes;
+    AllocatedBuffer<float> tmp_chunk_points;
     AllocatedBuffer<size_t> tmp_not_pruned_counts;
     HierarchicalSuperKMeansConfig hierarchical_config;
     HierarchicalSuperKMeansIterationStats hierarchical_iteration_stats;

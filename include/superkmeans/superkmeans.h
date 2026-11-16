@@ -1052,6 +1052,16 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
                n_centroids > N_CLUSTERS_THRESHOLD_FOR_PRUNING && quantizer->SupportsPruning();
     }
 
+    void ConfigDimensionSplit() {
+        code_size = quantizer->CodeSize(d);
+        // Non-PDX quantizers must override vertical_d to full d
+        vertical_d = PDXLayout<q>::GetDimensionSplit(PDXDim(d)).vertical_d;
+        if (quantizer->SupportsPruning() && !quantizer->NeedsPDXLayout()) {
+            vertical_d = d;
+        }
+        partial_d = quantizer->InitialPartialD(vertical_d);
+    }
+
     void AllocateCentroidBuffers(const size_t n_centroids) {
         SKM_PROFILE_SCOPE("allocator");
         auto& allocator = GetAllocator();
@@ -1072,6 +1082,17 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
                     AllocateBuffer<vector_value_t>(allocator, n_centroids * PDXDim(vertical_d));
             }
         }
+    }
+
+    void ConfigWorkerEngine(const skmeans_quantizer_t<q>& fitted) {
+        x_batch_size = WORKER_X_BATCH_SIZE;
+        quantizer = fitted.CloneFitted();
+        quantizer->SetExecutor(&GetExecutor());
+        quantizer->SetAllocator(&GetAllocator());
+        quantizer->SetXBatchSize(x_batch_size);
+        ConfigDimensionSplit();
+        AllocateCentroidBuffers(n_clusters);
+        EnsureTmpDistancesBuffer();
     }
 
     TrainingData SetupTraining(const float* SKM_RESTRICT data, const size_t n) {
@@ -1107,16 +1128,9 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
 
         quantizer = CreateQuantizer();
         quantizer->Fit(training_data.points, n_samples, d);
-        code_size = quantizer->CodeSize(d);
+        ConfigDimensionSplit();
         state.code_size = code_size;
         state.n_encoded = n_samples;
-
-        // Compute partial_d: non-PDX quantizers must override vertical_d to full d
-        vertical_d = PDXLayout<q>::GetDimensionSplit(PDXDim(d)).vertical_d;
-        if (quantizer->SupportsPruning() && !quantizer->NeedsPDXLayout()) {
-            vertical_d = d;
-        }
-        partial_d = quantizer->InitialPartialD(vertical_d);
         if (config.verbose) {
             std::cout << "Front dimensions (d') = " << partial_d << std::endl;
             std::cout << "Trailing dimensions (d'') = " << d - vertical_d << std::endl;
@@ -1657,7 +1671,8 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
         const float* SKM_RESTRICT data,
         const size_t n_points,
         const size_t n_clusters,
-        const bool rotate = true
+        const bool rotate = true,
+        const size_t* point_ids = nullptr
     ) {
         {
             SKM_PROFILE_SCOPE("generating_centroids");
@@ -1666,7 +1681,7 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
             std::mt19937 rng(config.seed);
             auto indices = AllocateBuffer<size_t>(GetAllocator(), n_points);
             for (size_t i = 0; i < n_points; ++i) {
-                indices[i] = i;
+                indices[i] = point_ids ? point_ids[i] : i;
             }
             std::shuffle(indices.get(), indices.get() + n_points, rng);
             for (size_t i = 0; i < n_clusters; i += 1) {
