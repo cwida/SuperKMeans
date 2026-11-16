@@ -325,12 +325,19 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
 
         {
             SKM_PROFILE_SCOPE("allocator");
-            mesoclusters_sizes.assign(
-                this->cluster_sizes.get(), this->cluster_sizes.get() + n_mesoclusters
-            );
             mesoclusters_assignments.assign(
                 this->assignments.get(), this->assignments.get() + this->n_samples
             );
+            if (this->n_split == 0) {
+                mesoclusters_sizes.assign(
+                    this->cluster_sizes.get(), this->cluster_sizes.get() + n_mesoclusters
+                );
+            } else {
+                mesoclusters_sizes.assign(n_mesoclusters, 0);
+                for (const uint32_t label : mesoclusters_assignments) {
+                    mesoclusters_sizes[label]++;
+                }
+            }
         }
 
         // Build partitioned index for efficient mesocluster compaction
@@ -371,9 +378,8 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
         TicToc timer_fineclustering;
         timer_fineclustering.Tic();
 
-        size_t max_mesocluster_size = *std::max_element(
-            this->cluster_sizes.get(), this->cluster_sizes.get() + n_mesoclusters
-        );
+        size_t max_mesocluster_size =
+            *std::max_element(mesoclusters_sizes.begin(), mesoclusters_sizes.end());
         auto mesocluster_buffer =
             AllocateBuffer<float>(this->GetAllocator(), max_mesocluster_size * this->d);
         AllocatedBuffer<vector_value_t> encoded_mesocluster_buffer;
@@ -913,32 +919,31 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
 
         size_t n_clusters_remaining = n_clusters;
         size_t n_nonempty_mesoclusters_remaining = 0;
+        size_t last_nonempty_mesocluster = 0;
         for (size_t i = 0; i < n_mesoclusters; ++i) {
             if (mesocluster_sizes[i] > 0) {
                 n_nonempty_mesoclusters_remaining++;
+                last_nonempty_mesocluster = i;
             }
         }
 
         size_t n_samples_remaining = n_samples;
         for (size_t i = 0; i < n_mesoclusters; ++i) {
-            if (i < n_mesoclusters - 1) {
-                // Handle empty mesoclusters
-                if (mesocluster_sizes[i] == 0) {
-                    fine_clusters_nums[i] = 0;
-                } else {
-                    n_nonempty_mesoclusters_remaining--;
-                    double proportion =
-                        static_cast<double>(n_clusters_remaining * mesocluster_sizes[i]) /
-                        static_cast<double>(n_samples_remaining);
-                    size_t allocated = static_cast<size_t>(std::lround(proportion));
-                    allocated = std::min(
-                        allocated, n_clusters_remaining - n_nonempty_mesoclusters_remaining
-                    );
-                    fine_clusters_nums[i] = std::max(allocated, size_t{1});
-                }
-            } else {
-                // Last mesocluster gets all remaining clusters
+            if (mesocluster_sizes[i] == 0) {
+                fine_clusters_nums[i] = 0;
+            } else if (i == last_nonempty_mesocluster) {
+                // Last non-empty mesocluster gets all remaining clusters
                 fine_clusters_nums[i] = n_clusters_remaining;
+            } else {
+                n_nonempty_mesoclusters_remaining--;
+                double proportion =
+                    static_cast<double>(n_clusters_remaining * mesocluster_sizes[i]) /
+                    static_cast<double>(n_samples_remaining);
+                size_t allocated = static_cast<size_t>(std::lround(proportion));
+                allocated = std::min(
+                    allocated, n_clusters_remaining - n_nonempty_mesoclusters_remaining
+                );
+                fine_clusters_nums[i] = std::max(allocated, size_t{1});
             }
             n_clusters_remaining -= fine_clusters_nums[i];
             n_samples_remaining -= mesocluster_sizes[i];
