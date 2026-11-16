@@ -390,7 +390,13 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
         }
         auto assignments_indirection_buffer =
             AllocateBuffer<uint32_t>(this->GetAllocator(), max_mesocluster_size);
-        size_t fineclusters_offset = 0;
+        std::vector<size_t> fineclusters_offsets(n_mesoclusters, 0);
+        for (size_t k = 1; k < n_mesoclusters; ++k) {
+            fineclusters_offsets[k] = fineclusters_offsets[k - 1] + fine_clusters_nums[k - 1];
+        }
+        std::vector<std::vector<SuperKMeansIterationStats>> mesocluster_fineclustering_stats(
+            n_mesoclusters
+        );
         for (size_t k = 0; k < n_mesoclusters; ++k) {
             size_t n_fineclusters = fine_clusters_nums[k];
             if (n_fineclusters == 0) {
@@ -490,7 +496,7 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
                         n_fineclusters,
                         fine_iter_idx,
                         fine_iter_idx == 0,
-                        this->hierarchical_iteration_stats.fineclustering_iteration_stats
+                        mesocluster_fineclustering_stats[k]
                     );
                 } else {
                     this->template RunIteration<false>(
@@ -504,7 +510,7 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
                         n_fineclusters,
                         fine_iter_idx,
                         false,
-                        this->hierarchical_iteration_stats.fineclustering_iteration_stats
+                        mesocluster_fineclustering_stats[k]
                     );
                 }
                 if (this->hierarchical_config.early_termination &&
@@ -520,7 +526,7 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
                 final_assignments.get(),
                 this->assignments.get(),
                 mesocluster_size,
-                fineclusters_offset
+                fineclusters_offsets[k]
             );
 
             // We move the resulting centroids from this fineclustering to the final buffer of
@@ -528,12 +534,18 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
             {
                 SKM_PROFILE_SCOPE("copy_fine_centroids");
                 memcpy(
-                    static_cast<void*>(final_centroids.get() + fineclusters_offset * this->d),
+                    static_cast<void*>(final_centroids.get() + fineclusters_offsets[k] * this->d),
                     static_cast<void*>(this->horizontal_centroids.get()),
                     sizeof(centroid_value_t) * n_fineclusters * this->d
                 );
             }
-            fineclusters_offset += n_fineclusters;
+        }
+        for (const auto& stats : mesocluster_fineclustering_stats) {
+            hierarchical_iteration_stats.fineclustering_iteration_stats.insert(
+                hierarchical_iteration_stats.fineclustering_iteration_stats.end(),
+                stats.begin(),
+                stats.end()
+            );
         }
         timer_fineclustering.Toc();
 
