@@ -232,7 +232,7 @@ TEST_F(HierarchicalSuperKMeansTest, IterationStats_Populated) {
     // Fineclustering stats
     // With early_termination=false, we expect exactly n_mesoclusters * iters_fineclustering
     // iterations
-    size_t n_mesoclusters = skmeans::HierarchicalSuperKMeans<>::GetNMesoclusters(n_clusters);
+    size_t n_mesoclusters = skmeans::GetNMesoclusters(n_clusters);
     size_t expected_fineclustering_iters = n_mesoclusters * config.iters_fineclustering;
     EXPECT_EQ(
         hierarchical_stats.fineclustering_iteration_stats.size(), expected_fineclustering_iters
@@ -855,7 +855,7 @@ TEST_P(HierarchicalWCSSTest, MatchesGroundTruth_AndFineClusteringDecreases) {
 
     // Within each mesocluster's fineclustering block, WCSS should decrease
     const auto& fine_stats = hierarchical_stats.fineclustering_iteration_stats;
-    const size_t n_mesoclusters = skmeans::HierarchicalSuperKMeans<>::GetNMesoclusters(n_clusters);
+    const size_t n_mesoclusters = skmeans::GetNMesoclusters(n_clusters);
     const size_t iters_fine = ITERS_FINECLUSTERING;
     ASSERT_EQ(fine_stats.size(), n_mesoclusters * iters_fine)
         << "Expected " << n_mesoclusters * iters_fine << " fineclustering iterations";

@@ -27,6 +27,88 @@ struct HierarchicalSuperKMeansIterationStats {
     std::vector<SuperKMeansIterationStats> fineclustering_iteration_stats;
 };
 
+/**
+ * @brief Calculate the number of mesoclusters for a given number of clusters
+ *
+ * @param n_clusters Total number of clusters
+ * @return Number of mesoclusters
+ */
+inline size_t GetNMesoclusters(const size_t n_clusters) {
+    return static_cast<size_t>(std::round(std::sqrt(n_clusters)));
+}
+
+/**
+ * @brief Arrange fine clusters proportionally to mesocluster sizes
+ *
+ * Allocates the total number of clusters across mesoclusters proportionally
+ * to their sizes, ensuring balanced distribution.
+ *
+ * @param n_clusters Total number of fine clusters to distribute
+ * @param n_mesoclusters Number of mesoclusters
+ * @param n_samples Total number of samples
+ * @param mesocluster_sizes Sizes of each mesocluster
+ * @return Vector of fine cluster counts per mesocluster
+ */
+inline std::vector<size_t> ArrangeFineClusters(
+    size_t n_clusters,
+    size_t n_mesoclusters,
+    size_t n_samples,
+    const std::vector<uint32_t>& mesocluster_sizes
+) {
+    SKM_PROFILE_SCOPE("arrange_fine_clusters");
+    std::vector<size_t> fine_clusters_nums(n_mesoclusters);
+
+    size_t n_clusters_remaining = n_clusters;
+    size_t n_nonempty_mesoclusters_remaining = 0;
+    size_t last_nonempty_mesocluster = 0;
+    for (size_t i = 0; i < n_mesoclusters; ++i) {
+        if (mesocluster_sizes[i] > 0) {
+            n_nonempty_mesoclusters_remaining++;
+            last_nonempty_mesocluster = i;
+        }
+    }
+
+    size_t n_samples_remaining = n_samples;
+    for (size_t i = 0; i < n_mesoclusters; ++i) {
+        if (mesocluster_sizes[i] == 0) {
+            fine_clusters_nums[i] = 0;
+        } else if (i == last_nonempty_mesocluster) {
+            // Last non-empty mesocluster gets all remaining clusters
+            fine_clusters_nums[i] = n_clusters_remaining;
+        } else {
+            n_nonempty_mesoclusters_remaining--;
+            double proportion = static_cast<double>(n_clusters_remaining * mesocluster_sizes[i]) /
+                                static_cast<double>(n_samples_remaining);
+            size_t allocated = static_cast<size_t>(std::lround(proportion));
+            allocated =
+                std::min(allocated, n_clusters_remaining - n_nonempty_mesoclusters_remaining);
+            fine_clusters_nums[i] = std::max(allocated, size_t{1});
+        }
+        n_clusters_remaining -= fine_clusters_nums[i];
+        n_samples_remaining -= mesocluster_sizes[i];
+    }
+
+    return fine_clusters_nums;
+}
+
+inline std::vector<size_t> GroupPointsByMesocluster(
+    const uint32_t* SKM_RESTRICT labels,
+    const size_t n_points,
+    const std::vector<uint32_t>& mesoclusters_sizes,
+    size_t* SKM_RESTRICT mesocluster_indices
+) {
+    SKM_PROFILE_SCOPE("compact_indices");
+    std::vector<size_t> mesocluster_offsets(mesoclusters_sizes.size() + 1, 0);
+    for (size_t k = 0; k < mesoclusters_sizes.size(); ++k) {
+        mesocluster_offsets[k + 1] = mesocluster_offsets[k] + mesoclusters_sizes[k];
+    }
+    std::vector<size_t> next_to_write_index = mesocluster_offsets;
+    for (size_t i = 0; i < n_points; ++i) {
+        mesocluster_indices[next_to_write_index[labels[i]]++] = i;
+    }
+    return mesocluster_offsets;
+}
+
 template <Quantization q = Quantization::f32>
 class HierarchicalSuperKMeans : public SuperKMeans<q> {
     using typename SuperKMeans<q>::centroid_value_t;
@@ -246,13 +328,7 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
                     this->PDXDim(this->d)
                 );
                 this->QuantizedCentroidsToAuxiliaryHorizontal(n_mesoclusters);
-                centroids_pdx_wrapper = layout_t(
-                    this->pdxified_quantized_centroids.get(),
-                    *this->pruner,
-                    n_mesoclusters,
-                    this->PDXDim(this->d),
-                    this->partial_hor_quantized_centroids.get()
-                );
+                centroids_pdx_wrapper = this->MakeCentroidLayout(n_mesoclusters);
             }
         }
 
@@ -332,23 +408,14 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
             }
         }
 
-        // Build partitioned index for efficient mesocluster compaction
         auto mesocluster_indices_flat =
             AllocateBuffer<size_t>(this->GetAllocator(), this->n_samples);
-        std::vector<size_t> mesocluster_offsets;
-        mesocluster_offsets.resize(n_mesoclusters + 1);
-        {
-            SKM_PROFILE_SCOPE("compact_indices");
-            mesocluster_offsets[0] = 0;
-            for (size_t k = 0; k < n_mesoclusters; ++k) {
-                mesocluster_offsets[k + 1] = mesocluster_offsets[k] + mesoclusters_sizes[k];
-            }
-            std::vector<size_t> next_to_write_index = mesocluster_offsets;
-            for (size_t i = 0; i < this->n_samples; ++i) {
-                size_t cluster_id = mesoclusters_assignments[i];
-                mesocluster_indices_flat[next_to_write_index[cluster_id]++] = i;
-            }
-        }
+        const auto mesocluster_offsets = GroupPointsByMesocluster(
+            mesoclusters_assignments.data(),
+            this->n_samples,
+            mesoclusters_sizes,
+            mesocluster_indices_flat.get()
+        );
 
         //
         // FINE-CLUSTERING
@@ -599,16 +666,6 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
     }
 
     /**
-     * @brief Calculate the number of mesoclusters for a given number of clusters
-     *
-     * @param n_clusters Total number of clusters
-     * @return Number of mesoclusters
-     */
-    static size_t GetNMesoclusters(const size_t n_clusters) {
-        return static_cast<size_t>(std::round(std::sqrt(n_clusters)));
-    }
-
-    /**
      * @brief Computes the number of vectors to sample based on sampling_fraction.
      *
      * @param n Total number of vectors
@@ -820,13 +877,7 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
                     this->PDXDim(this->d)
                 );
                 this->QuantizedCentroidsToAuxiliaryHorizontal(n_fineclusters);
-                mesocluster_centroids_pdx_wrapper = layout_t(
-                    this->pdxified_quantized_centroids.get(),
-                    *this->pruner,
-                    n_fineclusters,
-                    this->PDXDim(this->d),
-                    this->partial_hor_quantized_centroids.get()
-                );
+                mesocluster_centroids_pdx_wrapper = this->MakeCentroidLayout(n_fineclusters);
             }
         }
 
@@ -1018,61 +1069,6 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
         });
     }
 
-    /**
-     * @brief Arrange fine clusters proportionally to mesocluster sizes
-     *
-     * Allocates the total number of clusters across mesoclusters proportionally
-     * to their sizes, ensuring balanced distribution.
-     *
-     * @param n_clusters Total number of fine clusters to distribute
-     * @param n_mesoclusters Number of mesoclusters
-     * @param n_samples Total number of samples
-     * @param mesocluster_sizes Sizes of each mesocluster
-     * @return Vector of fine cluster counts per mesocluster
-     */
-    std::vector<size_t> ArrangeFineClusters(
-        size_t n_clusters,
-        size_t n_mesoclusters,
-        size_t n_samples,
-        const std::vector<uint32_t>& mesocluster_sizes
-    ) {
-        SKM_PROFILE_SCOPE("arrange_fine_clusters");
-        std::vector<size_t> fine_clusters_nums(n_mesoclusters);
-
-        size_t n_clusters_remaining = n_clusters;
-        size_t n_nonempty_mesoclusters_remaining = 0;
-        size_t last_nonempty_mesocluster = 0;
-        for (size_t i = 0; i < n_mesoclusters; ++i) {
-            if (mesocluster_sizes[i] > 0) {
-                n_nonempty_mesoclusters_remaining++;
-                last_nonempty_mesocluster = i;
-            }
-        }
-
-        size_t n_samples_remaining = n_samples;
-        for (size_t i = 0; i < n_mesoclusters; ++i) {
-            if (mesocluster_sizes[i] == 0) {
-                fine_clusters_nums[i] = 0;
-            } else if (i == last_nonempty_mesocluster) {
-                // Last non-empty mesocluster gets all remaining clusters
-                fine_clusters_nums[i] = n_clusters_remaining;
-            } else {
-                n_nonempty_mesoclusters_remaining--;
-                double proportion =
-                    static_cast<double>(n_clusters_remaining * mesocluster_sizes[i]) /
-                    static_cast<double>(n_samples_remaining);
-                size_t allocated = static_cast<size_t>(std::lround(proportion));
-                allocated =
-                    std::min(allocated, n_clusters_remaining - n_nonempty_mesoclusters_remaining);
-                fine_clusters_nums[i] = std::max(allocated, size_t{1});
-            }
-            n_clusters_remaining -= fine_clusters_nums[i];
-            n_samples_remaining -= mesocluster_sizes[i];
-        }
-
-        return fine_clusters_nums;
-    }
-
     void GetTrueAssignmentsFromIndirectionBuffer(
         const size_t* SKM_RESTRICT mesocluster_indices,
         uint32_t* SKM_RESTRICT output_assignments,
@@ -1122,13 +1118,7 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
             }
             //! We wrap centroids and partial_horizontal_centroids in the PDXLayout wrapper
             //! Any updates to these objects is reflected in the PDXLayout
-            auto pdx_centroids = PDXLayout<q>(
-                this->centroids.get(),
-                *this->pruner,
-                n_clusters,
-                this->d,
-                this->partial_horizontal_centroids.get()
-            );
+            auto pdx_centroids = this->MakeCentroidLayout(n_clusters);
             this->CentroidsToAuxiliaryHorizontal(n_clusters);
             return pdx_centroids;
         } else {
@@ -1148,13 +1138,7 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
                     this->PDXDim(this->d)
                 );
                 this->QuantizedCentroidsToAuxiliaryHorizontal(n_clusters);
-                return layout_t(
-                    this->pdxified_quantized_centroids.get(),
-                    *this->pruner,
-                    n_clusters,
-                    this->PDXDim(this->d),
-                    this->partial_hor_quantized_centroids.get()
-                );
+                return this->MakeCentroidLayout(n_clusters);
             }
             // Non-PDX quantizers (e.g., RaBitQ) — return empty layout
             return layout_t{};

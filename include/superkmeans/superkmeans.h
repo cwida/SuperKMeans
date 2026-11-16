@@ -618,16 +618,7 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
                     quantized_centroids.get(), n_centroids, d, partial_d
                 );
 
-                layout_t pdx_wrapper;
-                if (quantizer->NeedsPDXLayout()) {
-                    pdx_wrapper = layout_t(
-                        pdxified_quantized_centroids.get(),
-                        *pruner,
-                        n_centroids,
-                        PDXDim(d),
-                        partial_hor_quantized_centroids.get()
-                    );
-                }
+                layout_t pdx_wrapper = MakeCentroidLayout(n_centroids);
 
                 const float* x_float = vectors;
                 AllocatedBuffer<float> rotated_vectors;
@@ -724,9 +715,7 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
             );
 
             // Consolidate ran at the end of the last RunIteration, so centroids are final.
-            auto pdx_centroids = PDXLayout<q>(
-                this->centroids.get(), *pruner, n_clusters, d, partial_horizontal_centroids.get()
-            );
+            auto pdx_centroids = MakeCentroidLayout(n_clusters);
 
             if (config.sampling_fraction == 1.0f) {
                 quantizer->CacheDataPartialNorms(data_p, n_vectors, d, partial_d);
@@ -1084,6 +1073,25 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
         }
     }
 
+    layout_t MakeCentroidLayout(const size_t n_centroids) {
+        if constexpr (q == Quantization::f32) {
+            return layout_t(
+                centroids.get(), *pruner, n_centroids, d, partial_horizontal_centroids.get()
+            );
+        } else {
+            if (quantizer->SupportsPruning() && quantizer->NeedsPDXLayout()) {
+                return layout_t(
+                    pdxified_quantized_centroids.get(),
+                    *pruner,
+                    n_centroids,
+                    PDXDim(d),
+                    partial_hor_quantized_centroids.get()
+                );
+            }
+            return layout_t{};
+        }
+    }
+
     void ConfigWorkerEngine(const skmeans_quantizer_t<q>& fitted) {
         x_batch_size = WORKER_X_BATCH_SIZE;
         quantizer = fitted.CloneFitted();
@@ -1172,13 +1180,7 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
                     PDXDim(d)
                 );
                 QuantizedCentroidsToAuxiliaryHorizontal(n_clusters);
-                training_data.centroids_pdx = layout_t(
-                    pdxified_quantized_centroids.get(),
-                    *pruner,
-                    n_clusters,
-                    PDXDim(d),
-                    partial_hor_quantized_centroids.get()
-                );
+                training_data.centroids_pdx = MakeCentroidLayout(n_clusters);
             }
         }
         return training_data;
@@ -1707,9 +1709,7 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
             //! Any updates to these objects is reflected in the PDXLayout
             //! partial_horizontal_centroids are not filled until ConsolidateCentroids is called()
             // after the first iteration
-            return PDXLayout<q>(
-                centroids.get(), *pruner, n_clusters, d, partial_horizontal_centroids.get()
-            );
+            return MakeCentroidLayout(n_clusters);
         }
         return layout_t{};
     }

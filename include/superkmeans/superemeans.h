@@ -71,8 +71,8 @@ class SuperEMeans : public SuperKMeans<q> {
 
   public:
     SuperEMeans(size_t n_clusters, size_t dimensionality, const SuperEMeansConfig& config)
-        : SuperKMeans<q>(n_clusters, dimensionality, config), batch_size(config.batch_size),
-          initial_step(config.initial_step), chunk_size(config.assignment_chunk_size) {
+        : SuperKMeans<q>(n_clusters, dimensionality, config), config_batch_size(config.batch_size),
+          config_initial_step(config.initial_step), chunk_size(config.assignment_chunk_size) {
         SKMEANS_ENSURE_POSITIVE(config.assignment_chunk_size);
         if (config.initial_step < 0.0f || config.initial_step > 1.0f) {
             throw std::invalid_argument("initial_step must be in [0, 1]");
@@ -91,37 +91,17 @@ class SuperEMeans : public SuperKMeans<q> {
         this->iteration_stats.clear();
         ParallelSection parallel_section(this->GetExecutor());
         auto training_data = this->SetupTraining(data, n);
-        const size_t n_points = this->n_samples;
-        if (batch_size == 0) {
-            batch_size = EMeansBatchSize(n_points, this->n_clusters, this->config.iters);
-        }
-        batch_size = std::min(batch_size, n_points);
-        if (initial_step == 0.0f) {
-            initial_step =
-                EMeansInitialStep(n_points, this->n_clusters, this->config.iters, batch_size);
-        }
-        if (this->config.verbose) {
-            std::cout << "Batch size = " << batch_size << ", initial step = " << initial_step
-                      << std::endl;
-        }
-        AllocateEMeansBuffers();
-
-        std::swap(this->horizontal_centroids, this->prev_centroids);
-        if (this->config.angular) {
-            this->PostprocessCentroids(this->n_clusters);
-            memcpy(
-                positions.get(),
-                this->horizontal_centroids.get(),
-                sizeof(centroid_value_t) * this->n_clusters * this->d
-            );
-        }
-        std::fill_n(usage.get(), this->n_clusters, EMEANS_INITIAL_USAGE);
-        revive_rng.seed(this->config.seed);
-
-        for (uint32_t epoch = 0; epoch < this->config.iters; ++epoch) {
-            RunEpoch(training_data, epoch);
-        }
-        FinalizeTraining(training_data);
+        problem = {
+            nullptr,
+            this->n_samples,
+            this->n_clusters,
+            this->config.iters,
+            this->assignments.get(),
+            this->distances.get(),
+            this->data_norms.get(),
+            &this->iteration_stats
+        };
+        RunEMeans(training_data);
         this->state.trained = true;
 
         auto output_centroids = this->GetOutputCentroids(this->config.unrotate_centroids);
@@ -136,44 +116,96 @@ class SuperEMeans : public SuperKMeans<q> {
         return Train(data, n);
     }
 
-  private:
+  protected:
+    struct EMeansProblem {
+        const size_t* point_ids = nullptr;
+        size_t n_points = 0;
+        size_t n_clusters = 0;
+        uint32_t n_epochs = 0;
+        uint32_t* labels = nullptr;
+        distance_t* distances = nullptr;
+        const float* norms = nullptr;
+        std::vector<SuperKMeansIterationStats>* stats = nullptr;
+    };
+
+    void RunEMeans(TrainingData& training_data) {
+        const size_t n_points = problem.n_points;
+        const size_t n_clusters = problem.n_clusters;
+        batch_size = config_batch_size > 0
+                         ? config_batch_size
+                         : EMeansBatchSize(n_points, n_clusters, problem.n_epochs);
+        batch_size = std::min(batch_size, n_points);
+        initial_step =
+            config_initial_step > 0.0f
+                ? config_initial_step
+                : EMeansInitialStep(n_points, n_clusters, problem.n_epochs, batch_size);
+        if (this->config.verbose) {
+            std::cout << "Batch size = " << batch_size << ", initial step = " << initial_step
+                      << std::endl;
+        }
+        AllocateEMeansBuffers();
+
+        std::swap(this->horizontal_centroids, this->prev_centroids);
+        if (this->config.angular) {
+            this->PostprocessCentroids(n_clusters);
+            memcpy(
+                positions.get(),
+                this->horizontal_centroids.get(),
+                sizeof(centroid_value_t) * n_clusters * this->d
+            );
+        }
+        std::fill_n(usage.get(), n_clusters, EMEANS_INITIAL_USAGE);
+        revive_rng.seed(this->config.seed);
+
+        for (uint32_t epoch = 0; epoch < problem.n_epochs; ++epoch) {
+            RunEpoch(training_data, epoch);
+        }
+        FinalizeTraining(training_data);
+    }
+
     void AllocateEMeansBuffers() {
         SKM_PROFILE_SCOPE("allocator");
         auto& allocator = this->GetAllocator();
+        const size_t n_clusters = problem.n_clusters;
         const size_t n_chunk = std::min(batch_size, chunk_size);
-        usage = AllocateBuffer<float>(allocator, this->n_clusters);
+        EnsureBufferSize(usage, allocator, n_clusters);
         if (this->config.angular) {
-            positions = AllocateBuffer<float>(allocator, this->n_clusters * this->d);
+            EnsureBufferSize(positions, allocator, n_clusters * this->d);
         }
-        permutation = AllocateBuffer<size_t>(allocator, this->n_samples);
-        tmp_chunk_codes = AllocateBuffer<vector_value_t>(allocator, n_chunk * this->code_size);
+        EnsureBufferSize(permutation, allocator, problem.n_points);
+        EnsureBufferSize(tmp_chunk_codes, allocator, n_chunk * this->code_size);
         if constexpr (q != Quantization::f32) {
             if (q == Quantization::rabitq || !this->config.quantized_centroid_update) {
-                tmp_chunk_points = AllocateBuffer<float>(allocator, n_chunk * this->d);
+                EnsureBufferSize(tmp_chunk_points, allocator, n_chunk * this->d);
             }
         }
-        tmp_chunk_norms = AllocateBuffer<float>(allocator, n_chunk);
-        tmp_chunk_labels = AllocateBuffer<uint32_t>(allocator, n_chunk);
-        tmp_chunk_distances = AllocateBuffer<distance_t>(allocator, n_chunk);
-        if (this->PruningEnabled(this->n_clusters)) {
-            tmp_not_pruned_counts = AllocateBuffer<size_t>(allocator, batch_size);
+        EnsureBufferSize(tmp_chunk_norms, allocator, n_chunk);
+        EnsureBufferSize(tmp_chunk_labels, allocator, n_chunk);
+        EnsureBufferSize(tmp_chunk_distances, allocator, n_chunk);
+        if (this->PruningEnabled(n_clusters)) {
+            EnsureBufferSize(tmp_not_pruned_counts, allocator, batch_size);
         }
-        tmp_donor_keys = AllocateBuffer<double>(allocator, this->n_clusters);
-        tmp_donors = AllocateBuffer<uint32_t>(allocator, this->n_clusters);
-        tmp_children = AllocateBuffer<uint32_t>(allocator, this->n_clusters);
+        EnsureBufferSize(tmp_donor_keys, allocator, n_clusters);
+        EnsureBufferSize(tmp_donors, allocator, n_clusters);
+        EnsureBufferSize(tmp_children, allocator, n_clusters);
     }
 
     void RunEpoch(TrainingData& training_data, const uint32_t epoch) {
-        const size_t n_points = this->n_samples;
+        const size_t n_points = problem.n_points;
+        const size_t n_clusters = problem.n_clusters;
         const size_t n_batches = (n_points + batch_size - 1) / batch_size;
-        const size_t n_steps = n_batches * this->config.iters;
-        std::iota(permutation.get(), permutation.get() + n_points, size_t{0});
+        const size_t n_steps = n_batches * problem.n_epochs;
+        if (problem.point_ids) {
+            std::copy_n(problem.point_ids, n_points, permutation.get());
+        } else {
+            std::iota(permutation.get(), permutation.get() + n_points, size_t{0});
+        }
         std::mt19937 shuffle_rng(static_cast<uint32_t>(
             static_cast<size_t>(this->config.seed) * EMEANS_EPOCH_SEED_MULTIPLIER + epoch
         ));
         std::shuffle(permutation.get(), permutation.get() + n_points, shuffle_rng);
 
-        const bool prune = epoch > 0 && this->PruningEnabled(this->n_clusters);
+        const bool prune = epoch > 0 && this->PruningEnabled(n_clusters);
         const uint32_t epoch_partial_d = this->partial_d;
         this->n_split = 0;
         double objective = 0.0;
@@ -187,7 +219,7 @@ class SuperEMeans : public SuperKMeans<q> {
                 not_pruned_pct +=
                     static_cast<double>(n_batch) *
                     this->TunePartialD(
-                        tmp_not_pruned_counts.get(), n_batch, this->n_clusters, partial_d_changed
+                        tmp_not_pruned_counts.get(), n_batch, n_clusters, partial_d_changed
                     );
             }
             const size_t step = epoch * n_batches + i;
@@ -196,9 +228,7 @@ class SuperEMeans : public SuperKMeans<q> {
                 ReviveUnused();
             }
             if (this->config.angular) {
-                this->NormalizePoints(
-                    positions.get(), this->horizontal_centroids.get(), this->n_clusters
-                );
+                this->NormalizePoints(positions.get(), this->horizontal_centroids.get(), n_clusters);
             }
         }
 
@@ -212,9 +242,9 @@ class SuperEMeans : public SuperKMeans<q> {
                 static_cast<float>(not_pruned_pct / static_cast<double>(n_points));
             stats.partial_d = epoch_partial_d;
         }
-        this->iteration_stats.push_back(stats);
+        problem.stats->push_back(stats);
         if (this->config.verbose) {
-            std::cout << "Epoch " << epoch + 1 << "/" << this->config.iters
+            std::cout << "Epoch " << epoch + 1 << "/" << problem.n_epochs
                       << " | Objective: " << objective << " | Split: " << this->n_split;
             if (prune) {
                 std::cout << " | Not Pruned %: " << stats.not_pruned_pct * 100.0f
@@ -233,7 +263,7 @@ class SuperEMeans : public SuperKMeans<q> {
         const bool prune
     ) {
         auto& quantizer = *this->quantizer;
-        const size_t n_clusters = this->n_clusters;
+        const size_t n_clusters = problem.n_clusters;
         const size_t d = this->d;
         const vector_value_t* centroid_codes;
         const float* chunk_points;
@@ -332,9 +362,9 @@ class SuperEMeans : public SuperKMeans<q> {
                     );
                 }
                 if (prune) {
-                    tmp_chunk_labels[i] = this->assignments[id];
+                    tmp_chunk_labels[i] = problem.labels[id];
                 } else {
-                    tmp_chunk_norms[i] = this->data_norms[id];
+                    tmp_chunk_norms[i] = problem.norms[id];
                 }
             }
         });
@@ -343,8 +373,8 @@ class SuperEMeans : public SuperKMeans<q> {
     double ScatterPoints(const size_t* ids, const size_t n_chunk) {
         double objective = 0.0;
         for (size_t i = 0; i < n_chunk; ++i) {
-            this->assignments[ids[i]] = tmp_chunk_labels[i];
-            this->distances[ids[i]] = tmp_chunk_distances[i];
+            problem.labels[ids[i]] = tmp_chunk_labels[i];
+            problem.distances[ids[i]] = tmp_chunk_distances[i];
             objective += static_cast<double>(tmp_chunk_distances[i]);
         }
         return objective;
@@ -363,7 +393,7 @@ class SuperEMeans : public SuperKMeans<q> {
         const float* SKM_RESTRICT means = this->prev_centroids.get();
         const uint32_t* SKM_RESTRICT counts = this->cluster_sizes.get();
         float* SKM_RESTRICT usage_p = usage.get();
-        this->GetExecutor().ParallelFor(this->n_clusters, [&](size_t begin, size_t end, size_t) {
+        this->GetExecutor().ParallelFor(problem.n_clusters, [&](size_t begin, size_t end, size_t) {
             for (size_t i = begin; i < end; ++i) {
                 const float retained = replace ? 0.0f : usage_p[i] * decay;
                 if (counts[i] == 0) {
@@ -391,7 +421,7 @@ class SuperEMeans : public SuperKMeans<q> {
 
     void ReviveUnused() {
         SKM_PROFILE_SCOPE("emeans_revive");
-        const size_t n_clusters = this->n_clusters;
+        const size_t n_clusters = problem.n_clusters;
         float* usage_p = usage.get();
         const double total_usage = std::accumulate(usage_p, usage_p + n_clusters, 0.0);
         const float threshold = static_cast<float>(
@@ -432,25 +462,57 @@ class SuperEMeans : public SuperKMeans<q> {
         this->n_split += n_splits;
     }
 
+    void AccumulateProblemPoints(const TrainingData& training_data, const bool quantized) {
+        if (!problem.point_ids) {
+            this->AccumulatePoints(
+                quantized,
+                training_data.codes,
+                training_data.points,
+                problem.labels,
+                problem.n_points,
+                problem.n_clusters,
+                this->prev_centroids.get(),
+                this->cluster_sizes.get()
+            );
+            return;
+        }
+        const size_t n_chunk_points = std::min(batch_size, chunk_size);
+        const bool gather_points = q != Quantization::f32 && !quantized;
+        const float* chunk_points;
+        if constexpr (q == Quantization::f32) {
+            chunk_points = tmp_chunk_codes.get();
+        } else {
+            if (gather_points) {
+                EnsureBufferSize(tmp_chunk_points, this->GetAllocator(), n_chunk_points * this->d);
+            }
+            chunk_points = tmp_chunk_points.get();
+        }
+        for (size_t i = 0; i < problem.n_points; i += n_chunk_points) {
+            const size_t n_chunk = std::min(n_chunk_points, problem.n_points - i);
+            GatherPoints(training_data, problem.point_ids + i, n_chunk, true, gather_points);
+            this->AccumulatePoints(
+                quantized,
+                tmp_chunk_codes.get(),
+                chunk_points,
+                tmp_chunk_labels.get(),
+                n_chunk,
+                problem.n_clusters,
+                this->prev_centroids.get(),
+                this->cluster_sizes.get()
+            );
+        }
+    }
+
     void FinalizeTraining(const TrainingData& training_data) {
         SKM_PROFILE_SCOPE("emeans_finalize");
-        const size_t n_clusters = this->n_clusters;
+        const size_t n_clusters = problem.n_clusters;
         const size_t d = this->d;
         const bool quantized =
             this->config.quantized_centroid_update && !this->config.full_precision_final_centroids;
         this->quantizer->ResetCentroidAccumulators(n_clusters, d);
         std::fill_n(this->prev_centroids.get(), n_clusters * d, 0.0f);
         std::fill_n(this->cluster_sizes.get(), n_clusters, 0u);
-        this->AccumulatePoints(
-            quantized,
-            training_data.codes,
-            training_data.points,
-            this->assignments.get(),
-            this->n_samples,
-            n_clusters,
-            this->prev_centroids.get(),
-            this->cluster_sizes.get()
-        );
+        AccumulateProblemPoints(training_data, quantized);
         this->FinalizeMeans(
             quantized, this->prev_centroids.get(), this->cluster_sizes.get(), n_clusters
         );
@@ -472,9 +534,12 @@ class SuperEMeans : public SuperKMeans<q> {
         this->quantizer->InvalidateCaches();
     }
 
-    size_t batch_size;
-    float initial_step;
+    const size_t config_batch_size;
+    const float config_initial_step;
+    size_t batch_size = 0;
+    float initial_step = 0.0f;
     const size_t chunk_size;
+    EMeansProblem problem;
     std::mt19937 revive_rng;
 
     AllocatedBuffer<float> usage;
