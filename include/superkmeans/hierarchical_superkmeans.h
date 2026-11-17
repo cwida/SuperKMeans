@@ -137,11 +137,9 @@ inline std::vector<size_t> OrderMesoclustersBySize(
             mesocluster_order.push_back(k);
         }
     }
-    std::stable_sort(
-        mesocluster_order.begin(),
-        mesocluster_order.end(),
-        [&](size_t a, size_t b) { return mesoclusters_sizes[a] > mesoclusters_sizes[b]; }
-    );
+    std::stable_sort(mesocluster_order.begin(), mesocluster_order.end(), [&](size_t a, size_t b) {
+        return mesoclusters_sizes[a] > mesoclusters_sizes[b];
+    });
     return mesocluster_order;
 }
 

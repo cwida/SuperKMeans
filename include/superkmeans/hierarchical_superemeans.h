@@ -147,10 +147,10 @@ class HierarchicalSuperEMeans : public SuperEMeans<q> {
         this->quantizer->InvalidateCaches();
         this->state.trained = true;
         if (this->config.verbose) {
-            std::cout << "Mesoclustering time: " << timer_mesoclustering.GetMilliseconds()
-                      << " ms" << std::endl;
-            std::cout << "Fineclustering time: " << timer_fineclustering.GetMilliseconds()
-                      << " ms" << std::endl;
+            std::cout << "Mesoclustering time: " << timer_mesoclustering.GetMilliseconds() << " ms"
+                      << std::endl;
+            std::cout << "Fineclustering time: " << timer_fineclustering.GetMilliseconds() << " ms"
+                      << std::endl;
         }
         return this->GetOutputCentroids(this->config.unrotate_centroids);
     }

@@ -135,10 +135,9 @@ class SuperEMeans : public SuperKMeans<q> {
                          ? config_batch_size
                          : EMeansBatchSize(n_points, n_clusters, problem.n_epochs);
         batch_size = std::min(batch_size, n_points);
-        initial_step =
-            config_initial_step > 0.0f
-                ? config_initial_step
-                : EMeansInitialStep(n_points, n_clusters, problem.n_epochs, batch_size);
+        initial_step = config_initial_step > 0.0f
+                           ? config_initial_step
+                           : EMeansInitialStep(n_points, n_clusters, problem.n_epochs, batch_size);
         if (this->config.verbose) {
             std::cout << "Batch size = " << batch_size << ", initial step = " << initial_step
                       << std::endl;
@@ -229,7 +228,9 @@ class SuperEMeans : public SuperKMeans<q> {
                 ReviveUnused();
             }
             if (this->config.angular) {
-                this->NormalizePoints(positions.get(), this->horizontal_centroids.get(), n_clusters);
+                this->NormalizePoints(
+                    positions.get(), this->horizontal_centroids.get(), n_clusters
+                );
             }
         }
 
