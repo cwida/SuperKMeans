@@ -175,7 +175,8 @@ class SuperEMeans : public SuperKMeans<q> {
         EnsureBufferSize(permutation, allocator, problem.n_points);
         EnsureBufferSize(tmp_chunk_codes, allocator, n_chunk * this->code_size);
         if constexpr (q != Quantization::f32) {
-            if (q == Quantization::rabitq || !this->config.quantized_centroid_update) {
+            if (!this->config.quantized_centroid_update ||
+                (q == Quantization::rabitq && this->PruningEnabled(n_clusters))) {
                 EnsureBufferSize(tmp_chunk_points, allocator, n_chunk * this->d);
             }
         }

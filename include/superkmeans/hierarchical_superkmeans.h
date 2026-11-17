@@ -109,6 +109,42 @@ inline std::vector<size_t> GroupPointsByMesocluster(
     return mesocluster_offsets;
 }
 
+template <Quantization q>
+struct FineclusteringContext {
+    const float* data_to_cluster;
+    const skmeans_value_t<q>* encoded_data;
+    const float* data_norms;
+    const size_t* mesocluster_indices;
+    const size_t* mesocluster_offsets;
+    const uint32_t* mesoclusters_sizes;
+    const size_t* fine_clusters_nums;
+    const size_t* fineclusters_offsets;
+    uint32_t initial_partial_d;
+    uint32_t* final_assignments;
+    skmeans_distance_t* final_distances;
+    uint32_t* final_cluster_sizes;
+    skmeans_centroid_value_t* final_centroids;
+    std::vector<SuperKMeansIterationStats>* fineclustering_stats;
+};
+
+inline std::vector<size_t> OrderMesoclustersBySize(
+    const std::vector<uint32_t>& mesoclusters_sizes,
+    const std::vector<size_t>& fine_clusters_nums
+) {
+    std::vector<size_t> mesocluster_order;
+    for (size_t k = 0; k < fine_clusters_nums.size(); ++k) {
+        if (fine_clusters_nums[k] > 0) {
+            mesocluster_order.push_back(k);
+        }
+    }
+    std::stable_sort(
+        mesocluster_order.begin(),
+        mesocluster_order.end(),
+        [&](size_t a, size_t b) { return mesoclusters_sizes[a] > mesoclusters_sizes[b]; }
+    );
+    return mesocluster_order;
+}
+
 template <Quantization q = Quantization::f32>
 class HierarchicalSuperKMeans : public SuperKMeans<q> {
     using typename SuperKMeans<q>::centroid_value_t;
@@ -445,7 +481,7 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
             n_mesoclusters
         );
         std::fill_n(this->cluster_sizes.get(), this->n_clusters, 0u);
-        FineclusteringContext context{
+        FineclusteringContext<q> context{
             data_to_cluster,
             encoded_data_p,
             this->data_norms.get(),
@@ -461,17 +497,8 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
             final_centroids.get(),
             mesocluster_fineclustering_stats.data()
         };
-        std::vector<size_t> mesocluster_order;
-        for (size_t k = 0; k < n_mesoclusters; ++k) {
-            if (fine_clusters_nums[k] > 0) {
-                mesocluster_order.push_back(k);
-            }
-        }
-        std::stable_sort(
-            mesocluster_order.begin(),
-            mesocluster_order.end(),
-            [&](size_t a, size_t b) { return mesoclusters_sizes[a] > mesoclusters_sizes[b]; }
-        );
+        const auto mesocluster_order =
+            OrderMesoclustersBySize(mesoclusters_sizes, fine_clusters_nums);
         SerialExecutor worker_executor;
         const size_t max_fineclusters =
             *std::max_element(fine_clusters_nums.begin(), fine_clusters_nums.end());
@@ -792,23 +819,6 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
         }
     }
 
-    struct FineclusteringContext {
-        const float* data_to_cluster;
-        const vector_value_t* encoded_data;
-        const float* data_norms;
-        const size_t* mesocluster_indices;
-        const size_t* mesocluster_offsets;
-        const uint32_t* mesoclusters_sizes;
-        const size_t* fine_clusters_nums;
-        const size_t* fineclusters_offsets;
-        uint32_t initial_partial_d;
-        uint32_t* final_assignments;
-        distance_t* final_distances;
-        uint32_t* final_cluster_sizes;
-        centroid_value_t* final_centroids;
-        std::vector<SuperKMeansIterationStats>* fineclustering_stats;
-    };
-
     std::unique_ptr<HierarchicalSuperKMeans> MakeWorkerEngine(
         const size_t n_worker_clusters,
         ParallelExecutor& worker_executor
@@ -833,7 +843,7 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
             AllocateBuffer<vector_value_t>(this->GetAllocator(), n_chunk_points * this->code_size);
     }
 
-    void ClusterMesocluster(const FineclusteringContext& context, const size_t k) {
+    void ClusterMesocluster(const FineclusteringContext<q>& context, const size_t k) {
         const size_t n_fineclusters = context.fine_clusters_nums[k];
         const size_t mesocluster_size = context.mesoclusters_sizes[k];
         const size_t* mesocluster_indices =
@@ -931,7 +941,7 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
 
     template <bool PRUNE>
     void RunFineclusteringIteration(
-        const FineclusteringContext& context,
+        const FineclusteringContext<q>& context,
         const size_t k,
         layout_t& centroids_layout,
         const size_t iter_idx,
@@ -985,7 +995,7 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
 
     void AssignAndAccumulateChunks(
         const bool prune,
-        const FineclusteringContext& context,
+        const FineclusteringContext<q>& context,
         const size_t* SKM_RESTRICT mesocluster_indices,
         const size_t n_points,
         const size_t n_clusters,
@@ -1042,7 +1052,7 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
     }
 
     void GatherMesoclusterChunk(
-        const FineclusteringContext& context,
+        const FineclusteringContext<q>& context,
         const size_t* SKM_RESTRICT chunk_indices,
         const size_t n_chunk,
         const bool gather_points
