@@ -86,6 +86,11 @@ int main(int argc, char* argv[]) {
 
 Check our [examples](./examples/) for fully working examples in Python and C++.
 
+## Clustering Variants
+- **Lloyd's**: Classical k-means, accelerated by pruning. Check [our example](/examples/simple_clustering.cpp). 
+- **Hierarchical**: A coarse k-means to create $\sqrt{k}$ meso clusters. Then, within each meso cluster, we run k-means again to create fine clusters that will serve as the final centroids. This creates more balanced clusters and scales to billions of points. Both phases are accelerated by pruning. Check [our example](/examples/hierarchical_clustering.cpp). 
+- [**e-means**](https://e-means.github.io/): Reduces k-means iterations from 10 to 2, accelerated by pruning. Check [our example](/examples/emeans_clustering.py). 
+
 ## Quantized Clustering
 SuperKMeans supports **clustering quantized vectors**, substantially accelerating clustering and barely affecting clustering quality. We support 8-bit scalar quantization, [LVQ](https://arxiv.org/pdf/2304.04759), and [RabitQ](https://github.com/VectorDB-NTU/RaBitQ-Library). You give us `float32` vectors and we handle the rest:
 
@@ -105,7 +110,7 @@ assignments = kmeans.quantized_assign(data, centroids)
 
 
 
-Check our fully working examples in [Python](./examples/quantized_clustering.py) or [C++](./examples/quantized_clustering.cpp).
+Check our fully working examples in [Python](./examples/quantized_clustering.py) or [C++](./examples/quantized_clustering.cpp). Note that all clustering variants support quantized clustering.
 
 ## Documentation
 Check [our wiki](https://github.com/cwida/SuperKMeans/wiki/Documentation) for advanced usage and API reference.
