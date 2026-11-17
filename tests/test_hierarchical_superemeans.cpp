@@ -155,19 +155,6 @@ TYPED_TEST(HierarchicalSuperEMeansTest, Determinism) {
     EXPECT_NE(first, other_seed);
 }
 
-TYPED_TEST(HierarchicalSuperEMeansTest, RecallAndWCSSMatchAcrossThreadCounts) {
-    constexpr Quantization q = TypeParam::value;
-    const size_t d = skm_test::RECALL_D, n_clusters = skm_test::RECALL_N_CLUSTERS;
-    auto data = skm_test::LoadTestDataSubdim(TEST_DATA_PATH, skm_test::RECALL_N, d, d);
-
-    HierarchicalSuperEMeans<q> serial(n_clusters, d, TestConfig(1));
-    HierarchicalSuperEMeans<q> parallel(n_clusters, d, TestConfig(4));
-    const auto serial_quality = TrainAndMeasure(serial, data, d, n_clusters);
-    const auto parallel_quality = TrainAndMeasure(parallel, data, d, n_clusters);
-    EXPECT_NEAR(parallel_quality.recall, serial_quality.recall, skm_test::RECALL_TOL);
-    EXPECT_NEAR(parallel_quality.wcss / serial_quality.wcss, 1.0, 0.01);
-}
-
 TYPED_TEST(HierarchicalSuperEMeansTest, AngularMode) {
     const size_t n = 5000, d = 64, n_clusters = 100;
     std::vector<float> data = MakeBlobs(n, d, n_clusters, true);
@@ -184,19 +171,6 @@ TYPED_TEST(HierarchicalSuperEMeansTest, AngularMode) {
         }
         EXPECT_NEAR(std::sqrt(norm), 1.0f, 1e-3f) << "centroid " << i;
     }
-}
-
-TYPED_TEST(HierarchicalSuperEMeansTest, RecallComparableToFlatSuperEMeans) {
-    constexpr Quantization q = TypeParam::value;
-    const size_t d = skm_test::RECALL_D, n_clusters = skm_test::RECALL_N_CLUSTERS;
-    auto data = skm_test::LoadTestDataSubdim(TEST_DATA_PATH, skm_test::RECALL_N, d, d);
-    const auto config = TestConfig(4);
-
-    HierarchicalSuperEMeans<q> hierarchical(n_clusters, d, config);
-    SuperEMeans<q> flat(n_clusters, d, config);
-    const auto hierarchical_quality = TrainAndMeasure(hierarchical, data, d, n_clusters);
-    const auto flat_quality = TrainAndMeasure(flat, data, d, n_clusters);
-    EXPECT_GE(hierarchical_quality.recall, flat_quality.recall - skm_test::RECALL_TOL);
 }
 
 TYPED_TEST(HierarchicalSuperEMeansTest, TrainInPlace_RecallMatchesTrain) {

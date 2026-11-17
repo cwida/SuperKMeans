@@ -64,6 +64,7 @@ inline float EMeansScheduledStep(
 
 template <Quantization q = Quantization::f32>
 class SuperEMeans : public SuperKMeans<q> {
+  protected:
     using typename SuperKMeans<q>::centroid_value_t;
     using typename SuperKMeans<q>::vector_value_t;
     using typename SuperKMeans<q>::distance_t;
