@@ -1,5 +1,7 @@
-<h1 align="center">
-  Super K-Means
+<p align="center">
+        <img src="./benchmarks/results/plots/superkmeans-logo.png" alt="SuperKMeans: A super-fast clustering library for high-dimensional vector embeddings">
+</p>
+
 <div align="center">
     <a href="https://arxiv.org/pdf/2603.20009"><img src="https://img.shields.io/badge/Paper%20I-SuperKMeans-red" alt="Paper" /></a>
     <a href="https://arxiv.org/pdf/2608.14648"><img src="https://img.shields.io/badge/Paper%20II-Quantized%20Clustering-red" alt="Paper" /></a>
@@ -8,10 +10,9 @@
     <a href="https://github.com/cwida/SuperKMeans/blob/main/LICENSE"><img src="https://img.shields.io/github/license/cwida/SuperKMeans?cacheSeconds=3600" alt="License" /></a>
     <a href="https://github.com/cwida/SuperKMeans/stargazers"><img src="https://img.shields.io/github/stars/cwida/SuperKMeans" alt="GitHub stars" /></a>
 </div>
-</h1>
-<h3 align="center">
+<!-- <h3 align="center">
   A super-fast clustering library for high-dimensional vector embeddings
-</h3>
+</h3> -->
 
 <p align="center">
         <img src="./benchmarks/results/plots/github_1.png" height=260 alt="SuperKMeans vs FAISS and Scikit Learn" style="{max-height: 250px}">

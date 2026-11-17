@@ -105,6 +105,7 @@ venv
 benchmarks/results/topk_distances_*.json
 !benchmarks/results/plots/github_*.png
 !benchmarks/results/plots/comparison_*.png
+!benchmarks/results/plots/superkmeans-logo.png
 *.eps
 
 _deps
