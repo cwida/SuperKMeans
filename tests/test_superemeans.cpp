@@ -36,7 +36,7 @@ SuperEMeansConfig TestConfig(const uint32_t epochs, const bool pruning) {
     config.iters = epochs;
     config.seed = skm_test::RECALL_SEED;
     config.n_threads = 1;
-    config.use_blas_only = !pruning;
+    config.pruning = pruning;
     return config;
 }
 
@@ -273,9 +273,9 @@ TYPED_TEST(SuperEMeansTest, SLOW_PruningEpochs) {
     pruned.Train(data.data(), n);
     const auto& stats = pruned.GetIterationStats();
     ASSERT_EQ(stats.size(), n_epochs);
-    EXPECT_TRUE(stats[0].is_gemm_only);
+    EXPECT_FALSE(stats[0].pruning);
     for (size_t i = 1; i < n_epochs; ++i) {
-        EXPECT_FALSE(stats[i].is_gemm_only) << "epoch " << i + 1;
+        EXPECT_TRUE(stats[i].pruning) << "epoch " << i + 1;
         EXPECT_GT(stats[i].not_pruned_pct, 0.0f) << "epoch " << i + 1;
         EXPECT_LT(stats[i].not_pruned_pct, 1.0f) << "epoch " << i + 1;
         EXPECT_GT(stats[i].partial_d, 0u) << "epoch " << i + 1;
@@ -284,7 +284,7 @@ TYPED_TEST(SuperEMeansTest, SLOW_PruningEpochs) {
     SuperEMeans<q> gemm_only(n_clusters, d, TestConfig(n_epochs, false));
     gemm_only.Train(data.data(), n);
     for (const auto& epoch_stats : gemm_only.GetIterationStats()) {
-        EXPECT_TRUE(epoch_stats.is_gemm_only);
+        EXPECT_FALSE(epoch_stats.pruning);
     }
 }
 

@@ -13,7 +13,7 @@
 
 int main(int argc, char* argv[]) {
     std::string dataset = (argc > 1) ? std::string(argv[1]) : std::string("yahoo");
-    bool blas_only = !(argc > 2 && std::string(argv[2]) == "pruning");
+    const bool pruning = bench_utils::ParsePruning(argc, argv, 2);
 
     auto it = bench_utils::DATASET_PARAMS.find(dataset);
     if (it == bench_utils::DATASET_PARAMS.end()) {
@@ -60,7 +60,7 @@ int main(int argc, char* argv[]) {
     config.unrotate_centroids = true;
     config.early_termination = false;
     config.sampling_fraction = sampling_fraction;
-    config.use_blas_only = blas_only;
+    config.pruning = pruning;
 
     auto is_angular = std::find(
         bench_utils::ANGULAR_DATASETS.begin(), bench_utils::ANGULAR_DATASETS.end(), dataset

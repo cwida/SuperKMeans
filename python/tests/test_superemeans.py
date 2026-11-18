@@ -37,8 +37,8 @@ class TestSuperEMeans:
         assert not em.hierarchical_
         stats = em.iteration_stats
         assert len(stats) == epochs
-        assert stats[0].is_gemm_only
-        assert not any(s.is_gemm_only for s in stats[1:])
+        assert not stats[0].pruning
+        assert all(s.pruning for s in stats[1:])
 
     def test_batch_size_and_step_follow_laws_or_overrides(self):
         n, d, k = 5000, 128, 300

@@ -76,8 +76,6 @@ int main(int argc, char* argv[]) {
         config.unrotate_centroids = true;
         config.early_termination = false;
         config.sampling_fraction = 1.0f;
-        config.use_blas_only = false;
-
         // Hierarchical SuperKMeans specific parameters
         config.iters_mesoclustering = iters_meso;
         config.iters_fineclustering = iters_fine;
@@ -133,7 +131,7 @@ int main(int argc, char* argv[]) {
         config_map["sampling_fraction"] = std::to_string(config.sampling_fraction);
         config_map["n_threads"] = std::to_string(config.n_threads);
         config_map["seed"] = std::to_string(config.seed);
-        config_map["use_blas_only"] = config.use_blas_only ? "true" : "false";
+        config_map["pruning"] = config.pruning ? "true" : "false";
         config_map["tol"] = std::to_string(config.tol);
         config_map["recall_tol"] = std::to_string(config.recall_tol);
         config_map["early_termination"] = config.early_termination ? "true" : "false";

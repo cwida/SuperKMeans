@@ -71,8 +71,8 @@ class SuperKMeans:
         Number of CPU threads to use. 0 means use all available.
     seed : int, optional (default=42)
         Random seed for reproducibility.
-    use_blas_only : bool, optional (default=False)
-        Use GEMM-only computation without pruning.
+    pruning : bool, optional (default=True)
+        Prune centroids when d >= 128 and k > 256. False runs exact GEMM.
     tol : float, optional (default=1e-4)
         Tolerance for shift-based early termination.
     recall_tol : float, optional (default=0.0050)
@@ -119,7 +119,7 @@ class SuperKMeans:
         max_points_per_cluster: int = 256,
         n_threads: int = 0,
         seed: int = 42,
-        use_blas_only: bool = False,
+        pruning: bool = True,
         # Quantization parameters
         full_precision_final_centroids: bool = False,
         # Convergence parameters
@@ -161,7 +161,7 @@ class SuperKMeans:
             'max_points_per_cluster': max_points_per_cluster,
             'n_threads': n_threads,
             'seed': seed,
-            'use_blas_only': use_blas_only,
+            'pruning': pruning,
             'full_precision_final_centroids': full_precision_final_centroids,
             'tol': tol,
             'recall_tol': recall_tol,
@@ -275,7 +275,7 @@ class SuperKMeans:
         config.max_points_per_cluster = self._config_params['max_points_per_cluster']
         config.n_threads = self._config_params['n_threads']
         config.seed = self._config_params['seed']
-        config.use_blas_only = self._config_params['use_blas_only']
+        config.pruning = self._config_params['pruning']
         config.tol = self._config_params['tol']
         config.recall_tol = self._config_params['recall_tol']
         config.early_termination = self._config_params['early_termination']
@@ -603,8 +603,8 @@ class SuperEMeans(SuperKMeans):
         Number of CPU threads to use. 0 means use all available.
     seed : int, optional (default=42)
         Random seed for reproducibility.
-    use_blas_only : bool, optional (default=False)
-        Use GEMM-only computation without pruning.
+    pruning : bool, optional (default=True)
+        Prune centroids when d >= 128 and k > 256. False runs exact GEMM.
     full_precision_final_centroids : bool, optional (default=False)
         Compute the final centroids from the raw float data (quantized schemes only).
     verbose : bool, optional (default=False)
@@ -635,7 +635,7 @@ class SuperEMeans(SuperKMeans):
         initial_step: Optional[float] = None,
         n_threads: int = 0,
         seed: int = 42,
-        use_blas_only: bool = False,
+        pruning: bool = True,
         full_precision_final_centroids: bool = False,
         verbose: bool = False,
         angular: bool = False,
@@ -649,7 +649,7 @@ class SuperEMeans(SuperKMeans):
             iters=epochs,
             n_threads=n_threads,
             seed=seed,
-            use_blas_only=use_blas_only,
+            pruning=pruning,
             full_precision_final_centroids=full_precision_final_centroids,
             verbose=verbose,
             angular=angular,

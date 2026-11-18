@@ -58,7 +58,6 @@ int main() {
     skmeans::HierarchicalSuperKMeansConfig config;
     config.verbose = true;
     config.sampling_fraction = 1.0;
-    config.use_blas_only = false;
     config.iters_mesoclustering = 3;
     config.iters_fineclustering = 5;
     config.iters_refinement = 0;
@@ -129,7 +128,7 @@ int main() {
         config_map["iters_mesoclustering"] = std::to_string(config.iters_mesoclustering);
         config_map["iters_fineclustering"] = std::to_string(config.iters_fineclustering);
         config_map["iters_refinement"] = std::to_string(config.iters_refinement);
-        config_map["use_blas_only"] = config.use_blas_only ? "true" : "false";
+        config_map["pruning"] = config.pruning ? "true" : "false";
         config_map["verbose"] = config.verbose ? "true" : "false";
         config_map["training_time"] = std::to_string(construction_time_ms);
         config_map["assignment_time"] = std::to_string(assignment_time_ms);

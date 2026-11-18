@@ -439,7 +439,7 @@ TYPED_TEST(QuantizedIntegrationTest, SLOW_PruningConverges) {
 
     SuperKMeansConfig config;
     config.iters = 5;
-    config.use_blas_only = false;
+    config.pruning = true;
 
     auto kmeans = SuperKMeans<TypeParam::value>(n_clusters, d, config);
     auto centroids = kmeans.Train(data.data(), n);
@@ -447,8 +447,8 @@ TYPED_TEST(QuantizedIntegrationTest, SLOW_PruningConverges) {
 
     auto stats = kmeans.GetIterationStats();
     ASSERT_GE(stats.size(), 2u);
-    EXPECT_TRUE(stats[0].is_gemm_only);
-    EXPECT_FALSE(stats[1].is_gemm_only);
+    EXPECT_FALSE(stats[0].pruning);
+    EXPECT_TRUE(stats[1].pruning);
     EXPECT_LT(stats.back().objective, stats.front().objective);
 }
 
@@ -481,7 +481,7 @@ TYPED_TEST(QuantizedIntegrationTest, SLOW_AssignTrainingPointsReuseMatchesQuanti
     SuperKMeansConfig config;
     config.iters = 10;
     config.sampling_fraction = 1.0f;
-    config.use_blas_only = false;
+    config.pruning = true;
 
     auto kmeans = SuperKMeans<TypeParam::value>(n_clusters, d, config);
     auto centroids = kmeans.Train(data.data(), n);

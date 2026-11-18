@@ -155,7 +155,7 @@ class SuperEMeans : public SuperKMeans<q> {
         tmp_chunk_norms = AllocateBuffer<float>(allocator, n_chunk);
         tmp_chunk_labels = AllocateBuffer<uint32_t>(allocator, n_chunk);
         tmp_chunk_distances = AllocateBuffer<distance_t>(allocator, n_chunk);
-        if (this->PruningEnabled()) {
+        if (this->PruningEnabled(this->n_clusters)) {
             tmp_not_pruned_counts = AllocateBuffer<size_t>(allocator, batch_size);
         }
         tmp_donor_keys = AllocateBuffer<double>(allocator, this->n_clusters);
@@ -173,7 +173,7 @@ class SuperEMeans : public SuperKMeans<q> {
         ));
         std::shuffle(permutation.get(), permutation.get() + n_points, shuffle_rng);
 
-        const bool prune = epoch > 0 && this->PruningEnabled();
+        const bool prune = epoch > 0 && this->PruningEnabled(this->n_clusters);
         const uint32_t epoch_partial_d = this->partial_d;
         this->n_split = 0;
         double objective = 0.0;
@@ -206,7 +206,7 @@ class SuperEMeans : public SuperKMeans<q> {
         stats.iteration = epoch + 1;
         stats.objective = static_cast<float>(objective);
         stats.split = this->n_split;
-        stats.is_gemm_only = !prune;
+        stats.pruning = prune;
         if (prune) {
             stats.not_pruned_pct =
                 static_cast<float>(not_pruned_pct / static_cast<double>(n_points));
@@ -220,7 +220,7 @@ class SuperEMeans : public SuperKMeans<q> {
                 std::cout << " | Not Pruned %: " << stats.not_pruned_pct * 100.0f
                           << " | d': " << epoch_partial_d << " -> " << this->partial_d;
             } else {
-                std::cout << " [BLAS-only]";
+                std::cout << " [no pruning]";
             }
             std::cout << std::endl;
         }

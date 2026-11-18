@@ -39,6 +39,18 @@ inline size_t GetDefaultNClusters(size_t n) {
     return std::max<size_t>(1u, static_cast<size_t>(std::sqrt(static_cast<double>(n)) * 4.0));
 }
 
+inline bool ParsePruning(int argc, char* argv[], int i) {
+    if (argc <= i) {
+        return true;
+    }
+    const std::string arg = argv[i];
+    if (arg != "true" && arg != "false") {
+        std::cerr << "pruning must be 'true' or 'false', got '" << arg << "'\n";
+        std::exit(1);
+    }
+    return arg == "true";
+}
+
 // Path constants for benchmark data
 inline const std::string BENCHMARKS_ROOT = std::string(CMAKE_SOURCE_DIR) + "/benchmarks";
 inline const std::string DATA_DIR = BENCHMARKS_ROOT + "/data";

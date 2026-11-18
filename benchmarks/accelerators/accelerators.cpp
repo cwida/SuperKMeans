@@ -106,7 +106,7 @@ static std::unordered_map<std::string, std::string> BuildConfigDict(
     c["sampling_fraction"] = std::to_string(cfg.sampling_fraction);
     c["n_threads"] = std::to_string(cfg.n_threads);
     c["seed"] = std::to_string(cfg.seed);
-    c["use_blas_only"] = cfg.use_blas_only ? "true" : "false";
+    c["pruning"] = cfg.pruning ? "true" : "false";
     c["tol"] = std::to_string(cfg.tol);
     c["early_termination"] = cfg.early_termination ? "true" : "false";
     c["quantized_centroid_update"] = cfg.quantized_centroid_update ? "true" : "false";
@@ -126,7 +126,7 @@ void RunPipeline(
     const std::string& quantizer_name,
     bool quantized_centroid_update,
     bool full_precision_final_centroids,
-    bool use_blas_only
+    bool pruning
 ) {
     using SKM = skmeans::SuperKMeans<Q>;
 
@@ -157,7 +157,7 @@ void RunPipeline(
               << std::endl;
     std::cout << "quantized_centroid_update=" << quantized_centroid_update
               << " full_precision_final_centroids=" << full_precision_final_centroids
-              << " use_blas_only=" << use_blas_only << std::endl;
+              << " pruning=" << pruning << std::endl;
     std::cout << "n_clusters=" << n_clusters << " n_iters=" << n_iters << " threads=" << THREADS
               << std::endl;
 
@@ -347,7 +347,7 @@ void RunPipeline(
             } else {
                 update_label = " / no-quant-update";
             }
-            std::string path_label = cfg.use_blas_only ? " / blas-only" : " / pruning";
+            std::string path_label = cfg.pruning ? " / pruning" : " / no-pruning";
             run_label = dim_label + " / " + quant_label + update_label + path_label;
         }
 
@@ -438,7 +438,7 @@ void RunPipeline(
         config.early_termination = false;
         config.sampling_fraction = 1.0f;
         config.tol = 1e-3f;
-        config.use_blas_only = use_blas_only;
+        config.pruning = pruning;
         config.quantized_centroid_update = quantized_centroid_update;
         config.full_precision_final_centroids = full_precision_final_centroids;
 
@@ -469,7 +469,7 @@ void RunPipeline(
         // Full-d assign helper (reused across rows)
         skmeans::SuperKMeansConfig assign_config;
         assign_config.n_threads = THREADS;
-        assign_config.use_blas_only = true;
+        assign_config.pruning = false;
         auto kmeans_fulld = SKM_f32(n_clusters, d, assign_config);
 
         if (is_raw) {
@@ -540,7 +540,7 @@ void RunPipeline(
                     skmeans::SuperKMeansConfig refit_cfg;
                     refit_cfg.iters = 1;
                     refit_cfg.n_threads = THREADS;
-                    refit_cfg.use_blas_only = true;
+                    refit_cfg.pruning = false;
                     refit_cfg.verbose = false;
                     refit_cfg.data_already_rotated =
                         true; // skip rotation so quantizer fits unrotated data
@@ -705,7 +705,7 @@ template <skmeans::Quantization Q>
 void RunHierarchicalPipeline(
     const std::string& dataset,
     const std::string& quantizer_name,
-    bool use_blas_only
+    bool pruning
 ) {
     using HSKM = skmeans::HierarchicalSuperKMeans<Q>;
 
@@ -730,7 +730,7 @@ void RunHierarchicalPipeline(
 
     std::cout << "=== Hierarchical Accelerators Benchmark ===" << std::endl;
     std::cout << "Dataset: " << dataset << " (n=" << n << ", d=" << d << ")" << std::endl;
-    std::cout << "Quantizer: " << quantizer_name << " use_blas_only=" << use_blas_only << std::endl;
+    std::cout << "Quantizer: " << quantizer_name << " pruning=" << pruning << std::endl;
     std::cout << "n_clusters=" << n_clusters << " threads=" << THREADS << std::endl;
 
     std::vector<float> data(n * d);
@@ -771,7 +771,7 @@ void RunHierarchicalPipeline(
     config.early_termination = false;
     config.sampling_fraction = 1.0f;
     config.tol = 1e-3f;
-    config.use_blas_only = use_blas_only;
+    config.pruning = pruning;
     if (has_quantizer) {
         config.quantized_centroid_update = true;
     }
@@ -893,7 +893,7 @@ void RunHierarchicalPipeline(
     }
 
     std::string run_label =
-        "raw / " + quantizer_name + " / hsk" + (use_blas_only ? " / blas-only" : " / pruning");
+        "raw / " + quantizer_name + " / hsk" + (pruning ? " / pruning" : " / no-pruning");
 
     bench_utils::WriteResultsToCsvV2(
         experiment_name,
@@ -929,7 +929,7 @@ int main(int argc, char* argv[]) {
                   << " <dataset> <pca|jlt|mat|raw|hsk> <f32|sq8|rabitq|lvq4>"
                   << " <quantized_centroid_update=true|false>"
                   << " <full_precision_final_centroids=true|false>"
-                  << " <use_blas_only=true|false>" << std::endl;
+                  << " <pruning=true|false>" << std::endl;
         return 1;
     }
 
@@ -938,7 +938,7 @@ int main(int argc, char* argv[]) {
     const std::string quantizer = argv[3];
     const bool quantized_centroid_update = ParseBool(argv[4]);
     const bool full_precision_final_centroids = ParseBool(argv[5]);
-    const bool use_blas_only = ParseBool(argv[6]);
+    const bool pruning = bench_utils::ParsePruning(argc, argv, 6);
 
     // Validate dim_reduction (also accept "hsk" as a sentinel for the
     // hierarchical pipeline — raw input, no projection).
@@ -951,15 +951,13 @@ int main(int argc, char* argv[]) {
 
     if (dim_reduction == "hsk") {
         if (quantizer == "f32") {
-            RunHierarchicalPipeline<skmeans::Quantization::f32>(dataset, quantizer, use_blas_only);
+            RunHierarchicalPipeline<skmeans::Quantization::f32>(dataset, quantizer, pruning);
         } else if (quantizer == "sq8") {
-            RunHierarchicalPipeline<skmeans::Quantization::sq8>(dataset, quantizer, use_blas_only);
+            RunHierarchicalPipeline<skmeans::Quantization::sq8>(dataset, quantizer, pruning);
         } else if (quantizer == "rabitq") {
-            RunHierarchicalPipeline<skmeans::Quantization::rabitq>(
-                dataset, quantizer, use_blas_only
-            );
+            RunHierarchicalPipeline<skmeans::Quantization::rabitq>(dataset, quantizer, pruning);
         } else if (quantizer == "lvq4") {
-            RunHierarchicalPipeline<skmeans::Quantization::lvq4>(dataset, quantizer, use_blas_only);
+            RunHierarchicalPipeline<skmeans::Quantization::lvq4>(dataset, quantizer, pruning);
         } else {
             std::cerr << "Invalid quantizer: " << quantizer
                       << " (expected: f32, sq8, rabitq, lvq4)\n";
@@ -976,7 +974,7 @@ int main(int argc, char* argv[]) {
             quantizer,
             quantized_centroid_update,
             full_precision_final_centroids,
-            use_blas_only
+            pruning
         );
     };
     if (quantizer == "f32") {

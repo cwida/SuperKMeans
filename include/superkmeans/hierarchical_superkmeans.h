@@ -273,10 +273,7 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
             );
         }
 
-        bool always_gemm_only = this->d < DIMENSION_THRESHOLD_FOR_PRUNING ||
-                                this->hierarchical_config.use_blas_only ||
-                                n_mesoclusters <= N_CLUSTERS_THRESHOLD_FOR_PRUNING ||
-                                !this->quantizer->SupportsPruning();
+        bool always_gemm_only = !this->PruningEnabled(n_mesoclusters);
         bool partial_norms_computed = false;
         float best_recall = 0.0f;
         size_t iters_without_improvement = 0;
@@ -460,10 +457,7 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
                 }
             }
 
-            bool fine_always_gemm_only = this->d < DIMENSION_THRESHOLD_FOR_PRUNING ||
-                                         this->hierarchical_config.use_blas_only ||
-                                         n_fineclusters <= N_CLUSTERS_THRESHOLD_FOR_PRUNING ||
-                                         !this->quantizer->SupportsPruning();
+            bool fine_always_gemm_only = !this->PruningEnabled(n_fineclusters);
             bool fine_partial_norms_computed = false;
             float fine_best_recall = 0.0f;
             iters_without_improvement = 0;
@@ -585,9 +579,7 @@ class HierarchicalSuperKMeans : public SuperKMeans<q> {
         timer_refinement.Tic();
 
         // Refinement iterations
-        bool refinement_always_gemm_only = this->d < DIMENSION_THRESHOLD_FOR_PRUNING ||
-                                           this->n_clusters <= N_CLUSTERS_THRESHOLD_FOR_PRUNING ||
-                                           !this->quantizer->SupportsPruning();
+        bool refinement_always_gemm_only = !this->PruningEnabled(this->n_clusters);
         bool refinement_partial_norms_computed = false;
         for (size_t refinement_iter_idx = 0;
              refinement_iter_idx < this->hierarchical_config.iters_refinement;

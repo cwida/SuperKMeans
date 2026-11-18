@@ -183,15 +183,15 @@ TEST_P(WCSSTest, MonotonicallyDecreases_AndMatchesGroundTruth) {
         EXPECT_TRUE(std::isfinite(centroids[i])) << "Centroid value not finite at index " << i;
     }
 
-    // Verify is_gemm_only flag is correct
+    // Verify pruning flag is correct
     // When d < DIMENSION_THRESHOLD_FOR_PRUNING or n_clusters <= N_CLUSTERS_THRESHOLD_FOR_PRUNING,
-    // all iterations after the first should use GEMM-only (no pruning)
-    bool should_use_gemm_only = (d < skmeans::DIMENSION_THRESHOLD_FOR_PRUNING) ||
-                                (n_clusters <= skmeans::N_CLUSTERS_THRESHOLD_FOR_PRUNING);
-    if (should_use_gemm_only && stats.size() > 1) {
+    // all iterations after the first should run without pruning
+    bool should_skip_pruning = (d < skmeans::DIMENSION_THRESHOLD_FOR_PRUNING) ||
+                               (n_clusters <= skmeans::N_CLUSTERS_THRESHOLD_FOR_PRUNING);
+    if (should_skip_pruning && stats.size() > 1) {
         for (size_t i = 1; i < stats.size(); ++i) {
-            EXPECT_TRUE(stats[i].is_gemm_only)
-                << "Expected is_gemm_only=true for iteration " << (i + 1) << " (d=" << d << " < "
+            EXPECT_FALSE(stats[i].pruning)
+                << "Expected pruning=false for iteration " << (i + 1) << " (d=" << d << " < "
                 << skmeans::DIMENSION_THRESHOLD_FOR_PRUNING << " or k=" << n_clusters
                 << " <= " << skmeans::N_CLUSTERS_THRESHOLD_FOR_PRUNING << ")";
         }
@@ -199,11 +199,11 @@ TEST_P(WCSSTest, MonotonicallyDecreases_AndMatchesGroundTruth) {
 }
 
 /**
- * @brief Test that WCSS with BLAS-only mode (no pruning) monotonically decreases
+ * @brief Test that WCSS without pruning monotonically decreases
  * and matches expected ground truth values (within 1% tolerance).
  *
  */
-TEST_P(WCSSTest, BlasOnly_MonotonicallyDecreases_AndMatchesGroundTruth) {
+TEST_P(WCSSTest, NoPruning_MonotonicallyDecreases_AndMatchesGroundTruth) {
     auto [n_clusters, d] = GetParam();
 
     // Only run this test for specific dimensions; otherwise test is too long
@@ -233,7 +233,7 @@ TEST_P(WCSSTest, BlasOnly_MonotonicallyDecreases_AndMatchesGroundTruth) {
     config.adjustment_factor_for_partial_d = 0.20f;
     config.angular = false;
     config.n_threads = 1;
-    config.use_blas_only = true;
+    config.pruning = false;
     config.max_points_per_cluster = 99999;
 
     auto kmeans = skmeans::SuperKMeans(n_clusters, d, config);
@@ -246,8 +246,8 @@ TEST_P(WCSSTest, BlasOnly_MonotonicallyDecreases_AndMatchesGroundTruth) {
         float curr_wcss = stats[i].objective;
         float tolerance = prev_wcss * 1e-2f;
         EXPECT_LE(curr_wcss, prev_wcss + tolerance)
-            << "WCSS increased at iteration " << (i + 1) << " [BLAS-only mode]: " << prev_wcss
-            << " -> " << curr_wcss << " (n_clusters=" << n_clusters << ", d=" << d << ")";
+            << "WCSS increased at iteration " << (i + 1) << " [no pruning]: " << prev_wcss << " -> "
+            << curr_wcss << " (n_clusters=" << n_clusters << ", d=" << d << ")";
     }
 
     auto key = std::make_pair(n_clusters, d);
@@ -258,13 +258,13 @@ TEST_P(WCSSTest, BlasOnly_MonotonicallyDecreases_AndMatchesGroundTruth) {
     float final_wcss = stats.back().objective;
     float wcss_upper_bound = expected_wcss * (1.0f + TOLERANCE);
     EXPECT_LE(final_wcss, wcss_upper_bound)
-        << "WCSS too high [BLAS-only mode] (k=" << n_clusters << ", d=" << d << "): " << final_wcss
+        << "WCSS too high [no pruning] (k=" << n_clusters << ", d=" << d << "): " << final_wcss
         << " > " << wcss_upper_bound << " (expected ~" << expected_wcss << ")";
 
     // WCSS shouldn't be drastically lower
     float wcss_lower_bound = expected_wcss * 0.5f;
     EXPECT_GE(final_wcss, wcss_lower_bound)
-        << "WCSS suspiciously low [BLAS-only mode] (k=" << n_clusters << ", d=" << d
+        << "WCSS suspiciously low [no pruning] (k=" << n_clusters << ", d=" << d
         << "): " << final_wcss << " < " << wcss_lower_bound << " (expected ~" << expected_wcss
         << ")";
 
@@ -284,13 +284,12 @@ TEST_P(WCSSTest, BlasOnly_MonotonicallyDecreases_AndMatchesGroundTruth) {
         EXPECT_TRUE(std::isfinite(centroids[i])) << "Centroid value not finite at index " << i;
     }
 
-    // Verify that all iterations after the first use GEMM-only when use_blas_only=true
-    // (First iteration doesn't set is_gemm_only)
+    // Verify that no iteration prunes when pruning=false
     if (stats.size() > 1) {
         for (size_t i = 1; i < stats.size(); ++i) {
-            EXPECT_TRUE(stats[i].is_gemm_only)
-                << "Expected is_gemm_only=true for iteration " << (i + 1)
-                << " when use_blas_only=true (k=" << n_clusters << ", d=" << d << ")";
+            EXPECT_FALSE(stats[i].pruning)
+                << "Expected pruning=false for iteration " << (i + 1)
+                << " when config.pruning=false (k=" << n_clusters << ", d=" << d << ")";
         }
     }
 }

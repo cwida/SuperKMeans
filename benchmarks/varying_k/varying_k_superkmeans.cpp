@@ -75,7 +75,6 @@ int main(int argc, char* argv[]) {
         config.unrotate_centroids = true;
         config.early_termination = false;
         config.sampling_fraction = sampling_fraction;
-        config.use_blas_only = false;
         auto is_angular = std::find(
             bench_utils::ANGULAR_DATASETS.begin(), bench_utils::ANGULAR_DATASETS.end(), dataset
         );
@@ -109,7 +108,7 @@ int main(int argc, char* argv[]) {
         config_map["sampling_fraction"] = std::to_string(config.sampling_fraction);
         config_map["n_threads"] = std::to_string(config.n_threads);
         config_map["seed"] = std::to_string(config.seed);
-        config_map["use_blas_only"] = config.use_blas_only ? "true" : "false";
+        config_map["pruning"] = config.pruning ? "true" : "false";
         config_map["tol"] = std::to_string(config.tol);
         config_map["recall_tol"] = std::to_string(config.recall_tol);
         config_map["early_termination"] = config.early_termination ? "true" : "false";

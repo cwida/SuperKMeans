@@ -144,7 +144,7 @@ Runs clustering with Super K-Means using different iterations (from 1 to 10), wi
 ```
 
 ### Accelerators
-Runs an exhaustive parameter sweep over the accelerators of Super K-Means: dimensionality reduction (`pca`, `jlt`, `mat`), quantization (`sq8`, `lvq4`, `rabitq`), quantized centroid updates, full-precision final centroids, and pruning vs. BLAS-only assignment. It also covers the hierarchical pipeline (`hsk`). This is used to study the runtime/recall trade-off of the accelerators and their combinations. The number of clusters is fixed to $k= 4*\sqrt{N}$.
+Runs an exhaustive parameter sweep over the accelerators of Super K-Means: dimensionality reduction (`pca`, `jlt`, `mat`), quantization (`sq8`, `lvq4`, `rabitq`), quantized centroid updates, full-precision final centroids, and pruning vs. no-pruning assignment. It also covers the hierarchical pipeline (`hsk`). This is used to study the runtime/recall trade-off of the accelerators and their combinations. The number of clusters is fixed to $k= 4*\sqrt{N}$.
 
 **Output**: One CSV file per pipeline in `./benchmarks/results/default/accelerators_<dim_reduction>_<quantizer>.csv` (e.g. `accelerators_raw_sq8.csv`, `accelerators_pca_f32.csv`), reporting construction time in milliseconds and the `recall` that the centroids would yield when used for vector search tasks, alongside the pipeline configuration.
 
@@ -165,5 +165,7 @@ The script builds `accelerators.out` for you, so there is no need to `make` it b
 
 ```sh
 make ad_hoc_superkmeans.out
-./ad_hoc_superkmeans.out <dataset_id>
+./ad_hoc_superkmeans.out <dataset_id> <pruning>
 ```
+
+- `pruning`: [Optional] `true` or `false`. Default: `true`.

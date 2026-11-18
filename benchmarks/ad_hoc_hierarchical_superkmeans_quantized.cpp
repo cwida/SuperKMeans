@@ -11,7 +11,7 @@
 #include "superkmeans/hierarchical_superkmeans.h"
 
 template <skmeans::Quantization Q>
-void RunBenchmark(const std::string& dataset, bool blas_only) {
+void RunBenchmark(const std::string& dataset, bool pruning) {
     using HSKM = skmeans::HierarchicalSuperKMeans<Q>;
     const std::string quantizer_name = skmeans::QuantizationName(Q);
 
@@ -32,7 +32,7 @@ void RunBenchmark(const std::string& dataset, bool blas_only) {
     const std::string algorithm = "hierarchical_superkmeans_" + quantizer_name;
     std::cout << "=== Running algorithm: " << algorithm << " ===" << std::endl;
     std::cout << "Dataset: " << dataset << " (n=" << n << ", d=" << d << ")\n";
-    std::cout << "n_clusters=" << n_clusters << " blas_only=" << blas_only << "\n";
+    std::cout << "n_clusters=" << n_clusters << " pruning=" << pruning << "\n";
 
     std::vector<float> data(n * d);
     std::vector<float> queries(n_queries * d);
@@ -61,7 +61,7 @@ void RunBenchmark(const std::string& dataset, bool blas_only) {
     config.early_termination = false;
     config.sampling_fraction = 1.0f;
     config.tol = 1e-3f;
-    config.use_blas_only = blas_only;
+    config.pruning = pruning;
     config.quantized_centroid_update = true;
     config.full_precision_final_centroids = false;
     // Hierarchical-specific
@@ -69,8 +69,8 @@ void RunBenchmark(const std::string& dataset, bool blas_only) {
     config.iters_fineclustering = 5;
     config.iters_refinement = 0;
 
-    if (blas_only) {
-        std::cout << "BLAS-only mode (no pruning)" << std::endl;
+    if (!pruning) {
+        std::cout << "No pruning" << std::endl;
     }
 
     auto is_angular = std::find(
@@ -172,23 +172,21 @@ void RunBenchmark(const std::string& dataset, bool blas_only) {
 
 int main(int argc, char* argv[]) {
     if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <dataset> <sq8|lvq4|rabitq> [pruning]\n";
+        std::cerr << "Usage: " << argv[0] << " <dataset> <sq8|lvq4|rabitq> [pruning=true|false]\n";
         return 1;
     }
 
     const std::string dataset = argv[1];
     const std::string quantizer = argv[2];
 
-    bool blas_only = true;
-    if (argc > 3)
-        blas_only = std::string(argv[3]) != "pruning";
+    const bool pruning = bench_utils::ParsePruning(argc, argv, 3);
 
     if (quantizer == "sq8") {
-        RunBenchmark<skmeans::Quantization::sq8>(dataset, blas_only);
+        RunBenchmark<skmeans::Quantization::sq8>(dataset, pruning);
     } else if (quantizer == "lvq4") {
-        RunBenchmark<skmeans::Quantization::lvq4>(dataset, blas_only);
+        RunBenchmark<skmeans::Quantization::lvq4>(dataset, pruning);
     } else if (quantizer == "rabitq") {
-        RunBenchmark<skmeans::Quantization::rabitq>(dataset, blas_only);
+        RunBenchmark<skmeans::Quantization::rabitq>(dataset, pruning);
     } else {
         std::cerr << "Invalid quantizer: " << quantizer << " (expected: sq8, lvq4, rabitq)\n";
         return 1;

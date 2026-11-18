@@ -17,7 +17,7 @@
 int main(int argc, char* argv[]) {
     const std::string algorithm = "superkmeans";
     std::string dataset = (argc > 1) ? std::string(argv[1]) : std::string("yahoo");
-    bool blas_only = !(argc > 2 && std::string(argv[2]) == "pruning");
+    const bool pruning = bench_utils::ParsePruning(argc, argv, 2);
     bool in_place = (argc > 3 && std::string(argv[3]) == "inplace");
 
     auto it = bench_utils::DATASET_PARAMS.find(dataset);
@@ -79,7 +79,7 @@ int main(int argc, char* argv[]) {
     config.unrotate_centroids = true;
     config.early_termination = false;
     config.sampling_fraction = sampling_fraction;
-    config.use_blas_only = blas_only;
+    config.pruning = pruning;
     config.tol = 1e-3f;
 
     auto is_angular = std::find(
