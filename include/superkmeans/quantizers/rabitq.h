@@ -101,6 +101,16 @@ class RaBitQQuantizer : public IQuantizer<Quantization::rabitq> {
         fitted_ = true;
     }
 
+    std::unique_ptr<RaBitQQuantizer> CloneFitted() const {
+        auto clone = std::make_unique<RaBitQQuantizer>();
+        clone->d_ = d_;
+        clone->binary_bytes_ = binary_bytes_;
+        clone->code_size_ = code_size_;
+        clone->centroid_ = centroid_;
+        clone->fitted_ = fitted_;
+        return clone;
+    }
+
     void Encode(const float* in, quantized_t* out, size_t n, size_t d) const override {
         SKM_PROFILE_SCOPE("RQ::Encode");
         uint8_t* codes = reinterpret_cast<uint8_t*>(out);

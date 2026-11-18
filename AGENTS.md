@@ -253,6 +253,29 @@ and quantizer caches key on pointer/size, not content: every chunk calls `Invali
 when pruning, `CacheDataPartialNorms` (without them f32 crashes, lvq4/rabitq silently lose
 recall). `FinalizeTraining` leaves the state `AssignTrainingPoints` expects.
 
+### Hierarchical fine-clustering: worker engines
+
+Mesoclusters are fine-clustered in parallel, one per worker: a single `ParallelFor(n_workers)` in
+which each worker pulls the next mesocluster (largest first) from an atomic counter. A quantizer
+can't serve concurrent searches (mutable caches, sq8/lvq4 GEMM scratch, sq8 writes its PDX layout),
+so each worker is a full `HierarchicalSuperKMeans` built by `MakeWorkerEngine`:
+- `ConfigWorkerEngine` (base): `CloneFitted()` of the outer engine's fitted quantizer, one shared
+  stateless `SerialExecutor`, `data_already_rotated` (workers never rotate), centroid buffers sized
+  to the largest fine k, `x_batch_size = WORKER_X_BATCH_SIZE` (bounds sq8/lvq4 scratch).
+- Workers write only disjoint outer outputs: centroid rows at the mesocluster's prefix-sum offset,
+  labels/distances at its points' ids, `cluster_sizes` of its own clusters, one stats slot per
+  mesocluster. The bound allocator must be thread-safe.
+- No compaction: each fine Lloyd iteration (`RunFineclusteringIteration`) gathers the mesocluster
+  by id in chunks of `max(MINI_BATCH_SIZE, FINECLUSTERING_CHUNK_BYTES / code bytes)` points
+  (~1 MiB of codes: measured best for every quantizer; RaBitQ rebuilds its LUTs per search call,
+  so it needs large chunks), floats only when the update or RaBitQ pruning reads them. Per-worker
+  memory is a chunk plus n_i-sized labels/distances/norms, so it doesn't grow with the mesocluster.
+  Chunks call `InvalidateCaches()` unless the mesocluster fits in one.
+- `RunFineclusteringIteration` mirrors `RunIteration` (minus recall/verbose): a change to the Lloyd
+  iteration in `superkmeans.h` must be mirrored there.
+- The profiler drops overlapping same-name scopes from concurrent workers; time the fine phase with
+  `TicToc` (hierarchical verbose prints it).
+
 ### Executor binding
 
 `SuperKMeans` (protected), `IQuantizer` and `ADSamplingPruner` inherit `ExecutorHolder`: a

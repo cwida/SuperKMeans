@@ -28,6 +28,8 @@ class IQuantizer : public ExecutorHolder, public AllocatorHolder {
 
     virtual ~IQuantizer() = default;
 
+    void SetXBatchSize(const size_t x_batch) { x_batch_size = x_batch; }
+
     /**
      * @brief Compute quantization parameters from float data.
      *
@@ -70,7 +72,7 @@ class IQuantizer : public ExecutorHolder, public AllocatorHolder {
      * @param norms_y Pre-computed float norms for y (length n_y)
      * @param out_knn Output: nearest reference index per query (length n_x)
      * @param out_distances Output: L2 squared distance to nearest (length n_x)
-     * @param tmp_buf Scratch space: X_BATCH_SIZE * Y_BATCH_SIZE floats, or at least
+     * @param tmp_buf Scratch space: x_batch_size * Y_BATCH_SIZE floats, or at least
      * BatchComputer::ScratchSize of the bound executor when larger (f32: one tile per worker)
      */
     virtual void FindNearestNeighbor(
@@ -272,7 +274,7 @@ class IQuantizer : public ExecutorHolder, public AllocatorHolder {
      * @param pdx_centroids PDXLayout holding the PDXified centroid data
      * @param partial_d Number of dimensions covered by partial GEMM
      * @param out_not_pruned_counts Output: count of non-pruned vectors per query (length n_x)
-     * @param tmp_buf Scratch space: X_BATCH_SIZE * Y_BATCH_SIZE floats, or at least
+     * @param tmp_buf Scratch space: x_batch_size * Y_BATCH_SIZE floats, or at least
      * BatchComputer::ScratchSize of the bound executor when larger (f32: one tile per worker)
      */
     virtual void FindNearestNeighborWithPruning(
@@ -305,6 +307,9 @@ class IQuantizer : public ExecutorHolder, public AllocatorHolder {
         (void) tmp_buf;
         assert(false && "FindNearestNeighborWithPruning not supported by this quantizer");
     }
+
+  protected:
+    size_t x_batch_size = X_BATCH_SIZE;
 };
 
 } // namespace skmeans

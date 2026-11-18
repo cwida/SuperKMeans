@@ -86,11 +86,15 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
         params = ComputeScalarQuantizationParams(
             GetExecutor(), embeddings, total_elements, static_cast<float>(MAX_VALUE)
         );
-        if (!tmp_dots_buf) {
-            tmp_dots_buf = AllocateBuffer<uint32_t>(GetAllocator(), X_BATCH_SIZE * Y_BATCH_SIZE);
-        }
         centroids_nk_packed_buf.resize(nk_dots_packed_size_u8(Y_BATCH_SIZE, d));
         fitted = true;
+    }
+
+    std::unique_ptr<SQ8Quantizer> CloneFitted() const {
+        auto clone = std::make_unique<SQ8Quantizer>();
+        clone->params = params;
+        clone->fitted = fitted;
+        return clone;
     }
 
     void Encode(
@@ -204,9 +208,10 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
         ParallelExecutor& executor = GetExecutor();
         const float inv_scale_sq = params.inv_quantization_scale * params.inv_quantization_scale;
         std::fill_n(out_distances, n_x, std::numeric_limits<float>::max());
+        EnsureBufferSize(tmp_dots_buf, GetAllocator(), x_batch_size * Y_BATCH_SIZE);
 
-        for (size_t i = 0; i < n_x; i += X_BATCH_SIZE) {
-            const size_t batch_n_x = std::min(X_BATCH_SIZE, n_x - i);
+        for (size_t i = 0; i < n_x; i += x_batch_size) {
+            const size_t batch_n_x = std::min(x_batch_size, n_x - i);
 
             for (size_t j = 0; j < n_y; j += Y_BATCH_SIZE) {
                 const size_t batch_n_y = std::min(Y_BATCH_SIZE, n_y - j);
@@ -304,9 +309,10 @@ class SQ8Quantizer : public IQuantizer<Quantization::sq8> {
 
         // Buffers for batched dot products (uint32_t)
         std::fill_n(out_distances, n_x, std::numeric_limits<float>::max());
+        EnsureBufferSize(tmp_dots_buf, GetAllocator(), x_batch_size * Y_BATCH_SIZE);
 
-        for (size_t i = 0; i < n_x; i += X_BATCH_SIZE) {
-            const size_t batch_n_x = std::min(X_BATCH_SIZE, n_x - i);
+        for (size_t i = 0; i < n_x; i += x_batch_size) {
+            const size_t batch_n_x = std::min(x_batch_size, n_x - i);
 
             for (size_t j = 0; j < n_y; j += Y_BATCH_SIZE) {
                 const size_t batch_n_y = std::min(Y_BATCH_SIZE, n_y - j);

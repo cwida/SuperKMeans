@@ -1052,6 +1052,49 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
                n_centroids > N_CLUSTERS_THRESHOLD_FOR_PRUNING && quantizer->SupportsPruning();
     }
 
+    void ConfigDimensionSplit() {
+        code_size = quantizer->CodeSize(d);
+        // Non-PDX quantizers must override vertical_d to full d
+        vertical_d = PDXLayout<q>::GetDimensionSplit(PDXDim(d)).vertical_d;
+        if (quantizer->SupportsPruning() && !quantizer->NeedsPDXLayout()) {
+            vertical_d = d;
+        }
+        partial_d = quantizer->InitialPartialD(vertical_d);
+    }
+
+    void AllocateCentroidBuffers(const size_t n_centroids) {
+        SKM_PROFILE_SCOPE("allocator");
+        auto& allocator = GetAllocator();
+        centroids = AllocateBuffer<centroid_value_t>(allocator, n_centroids * d);
+        horizontal_centroids = AllocateBuffer<centroid_value_t>(allocator, n_centroids * d);
+        prev_centroids = AllocateBuffer<centroid_value_t>(allocator, n_centroids * d);
+        cluster_sizes = AllocateBuffer<uint32_t>(allocator, n_centroids);
+        centroid_norms = AllocateBuffer<float>(allocator, n_centroids);
+        quantized_centroids = AllocateBuffer<vector_value_t>(allocator, n_centroids * code_size);
+        if constexpr (q == Quantization::f32) {
+            partial_horizontal_centroids =
+                AllocateBuffer<centroid_value_t>(allocator, n_centroids * vertical_d);
+        } else {
+            if (quantizer->SupportsPruning() && quantizer->NeedsPDXLayout()) {
+                pdxified_quantized_centroids =
+                    AllocateBuffer<vector_value_t>(allocator, n_centroids * PDXDim(d));
+                partial_hor_quantized_centroids =
+                    AllocateBuffer<vector_value_t>(allocator, n_centroids * PDXDim(vertical_d));
+            }
+        }
+    }
+
+    void ConfigWorkerEngine(const skmeans_quantizer_t<q>& fitted) {
+        x_batch_size = WORKER_X_BATCH_SIZE;
+        quantizer = fitted.CloneFitted();
+        quantizer->SetExecutor(&GetExecutor());
+        quantizer->SetAllocator(&GetAllocator());
+        quantizer->SetXBatchSize(x_batch_size);
+        ConfigDimensionSplit();
+        AllocateCentroidBuffers(n_clusters);
+        EnsureTmpDistancesBuffer();
+    }
+
     TrainingData SetupTraining(const float* SKM_RESTRICT data, const size_t n) {
         TrainingData training_data;
         n_samples = GetNVectorsToSample(n, n_clusters);
@@ -1066,22 +1109,12 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
         }
         {
             SKM_PROFILE_SCOPE("allocator");
-            centroids = AllocateBuffer<centroid_value_t>(GetAllocator(), n_clusters * d);
-            horizontal_centroids = AllocateBuffer<centroid_value_t>(GetAllocator(), n_clusters * d);
-            prev_centroids = AllocateBuffer<centroid_value_t>(GetAllocator(), n_clusters * d);
-            cluster_sizes = AllocateBuffer<uint32_t>(GetAllocator(), n_clusters);
             assignments = AllocateBuffer<uint32_t>(GetAllocator(), n);
             distances = AllocateBuffer<distance_t>(GetAllocator(), n);
             data_norms = AllocateBuffer<float>(GetAllocator(), n_samples);
-            centroid_norms = AllocateBuffer<float>(GetAllocator(), n_clusters);
         }
         EnsureTmpDistancesBuffer();
-        vertical_d = PDXLayout<q>::GetDimensionSplit(PDXDim(d)).vertical_d;
-        partial_horizontal_centroids =
-            AllocateBuffer<centroid_value_t>(GetAllocator(), n_clusters * vertical_d);
 
-        training_data.centroids_pdx =
-            GenerateCentroids(data, n_samples, n_clusters, !config.data_already_rotated);
         if (config.verbose) {
             std::cout << "Sampling data..." << std::endl;
         }
@@ -1093,28 +1126,25 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
             data, training_data.owned_points.get(), n, n_samples, !config.data_already_rotated
         );
 
+        quantizer = CreateQuantizer();
+        quantizer->Fit(training_data.points, n_samples, d);
+        ConfigDimensionSplit();
+        state.code_size = code_size;
+        state.n_encoded = n_samples;
+        if (config.verbose) {
+            std::cout << "Front dimensions (d') = " << partial_d << std::endl;
+            std::cout << "Trailing dimensions (d'') = " << d - vertical_d << std::endl;
+        }
+
+        AllocateCentroidBuffers(n_clusters);
+        training_data.centroids_pdx =
+            GenerateCentroids(data, n_samples, n_clusters, !config.data_already_rotated);
         RotateOrCopy(
             horizontal_centroids.get(),
             prev_centroids.get(),
             n_clusters,
             !config.data_already_rotated
         );
-
-        quantizer = CreateQuantizer();
-        quantizer->Fit(training_data.points, n_samples, d);
-        code_size = quantizer->CodeSize(d);
-        state.code_size = code_size;
-        state.n_encoded = n_samples;
-
-        // Compute partial_d: non-PDX quantizers must override vertical_d to full d
-        if (quantizer->SupportsPruning() && !quantizer->NeedsPDXLayout()) {
-            vertical_d = d;
-        }
-        partial_d = quantizer->InitialPartialD(vertical_d);
-        if (config.verbose) {
-            std::cout << "Front dimensions (d') = " << partial_d << std::endl;
-            std::cout << "Trailing dimensions (d'') = " << d - vertical_d << std::endl;
-        }
 
         // Data encoding
         if constexpr (q == Quantization::f32) {
@@ -1126,8 +1156,6 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
         }
 
         // Encode initial centroids (for f32 this is a memcpy, for u8 it quantizes)
-        quantized_centroids =
-            AllocateBuffer<vector_value_t>(GetAllocator(), n_clusters * code_size);
         quantizer->Encode(prev_centroids.get(), quantized_centroids.get(), n_clusters, d);
 
         // Compute full norms via quantizer
@@ -1137,10 +1165,6 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
         // Setup quantized PDX layout for pruning (f32 PDX is set up in GenerateCentroids)
         if constexpr (q != Quantization::f32) {
             if (quantizer->SupportsPruning() && quantizer->NeedsPDXLayout()) {
-                pdxified_quantized_centroids =
-                    AllocateBuffer<vector_value_t>(GetAllocator(), n_clusters * PDXDim(d));
-                partial_hor_quantized_centroids =
-                    AllocateBuffer<vector_value_t>(GetAllocator(), n_clusters * PDXDim(vertical_d));
                 PDXLayout<q>::template PDXify<false>(
                     quantized_centroids.get(),
                     pdxified_quantized_centroids.get(),
@@ -1647,7 +1671,8 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
         const float* SKM_RESTRICT data,
         const size_t n_points,
         const size_t n_clusters,
-        const bool rotate = true
+        const bool rotate = true,
+        const size_t* point_ids = nullptr
     ) {
         {
             SKM_PROFILE_SCOPE("generating_centroids");
@@ -1656,7 +1681,7 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
             std::mt19937 rng(config.seed);
             auto indices = AllocateBuffer<size_t>(GetAllocator(), n_points);
             for (size_t i = 0; i < n_points; ++i) {
-                indices[i] = i;
+                indices[i] = point_ids ? point_ids[i] : i;
             }
             std::shuffle(indices.get(), indices.get() + n_points, rng);
             for (size_t i = 0; i < n_clusters; i += 1) {
@@ -1721,9 +1746,9 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
     void EnsureTmpDistancesBuffer() {
         size_t needed =
             BatchComputer<DistanceFunction::l2, Quantization::f32>::ScratchSize(GetExecutor());
-        if constexpr (q != Quantization::f32) {
-            // The quantizers' assignment tiles are X_BATCH_SIZE x Y_BATCH_SIZE
-            needed = std::max(needed, X_BATCH_SIZE * Y_BATCH_SIZE);
+        if constexpr (q == Quantization::sq8 || q == Quantization::lvq4) {
+            // The sq8/lvq4 assignment tiles are x_batch_size x Y_BATCH_SIZE
+            needed = std::max(needed, x_batch_size * Y_BATCH_SIZE);
         }
         if (needed > tmp_distances_buffer_size) {
             tmp_distances_buffer = AllocateBuffer<distance_t>(GetAllocator(), needed);
@@ -1735,6 +1760,7 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
         auto created = std::make_unique<skmeans_quantizer_t<q>>();
         created->SetExecutor(&GetExecutor());
         created->SetAllocator(&GetAllocator());
+        created->SetXBatchSize(x_batch_size);
         return created;
     }
 
@@ -2073,6 +2099,7 @@ class SuperKMeans : protected ExecutorHolder, protected AllocatorHolder {
     size_t n_samples = 0;
     size_t n_train = 0;
     uint32_t partial_d = 0; // d'
+    size_t x_batch_size = X_BATCH_SIZE;
 
     // Iteration state
     SuperKMeansState state;
