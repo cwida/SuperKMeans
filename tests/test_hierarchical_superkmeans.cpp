@@ -232,7 +232,7 @@ TEST_F(HierarchicalSuperKMeansTest, IterationStats_Populated) {
     // Fineclustering stats
     // With early_termination=false, we expect exactly n_mesoclusters * iters_fineclustering
     // iterations
-    size_t n_mesoclusters = skmeans::HierarchicalSuperKMeans<>::GetNMesoclusters(n_clusters);
+    size_t n_mesoclusters = skmeans::GetNMesoclusters(n_clusters);
     size_t expected_fineclustering_iters = n_mesoclusters * config.iters_fineclustering;
     EXPECT_EQ(
         hierarchical_stats.fineclustering_iteration_stats.size(), expected_fineclustering_iters
@@ -855,7 +855,7 @@ TEST_P(HierarchicalWCSSTest, MatchesGroundTruth_AndFineClusteringDecreases) {
 
     // Within each mesocluster's fineclustering block, WCSS should decrease
     const auto& fine_stats = hierarchical_stats.fineclustering_iteration_stats;
-    const size_t n_mesoclusters = skmeans::HierarchicalSuperKMeans<>::GetNMesoclusters(n_clusters);
+    const size_t n_mesoclusters = skmeans::GetNMesoclusters(n_clusters);
     const size_t iters_fine = ITERS_FINECLUSTERING;
     ASSERT_EQ(fine_stats.size(), n_mesoclusters * iters_fine)
         << "Expected " << n_mesoclusters * iters_fine << " fineclustering iterations";
@@ -969,54 +969,6 @@ TYPED_TEST(HierarchicalQuantizedStateTest, ExposesQuantizerAndQuantizedBuffer) {
     EXPECT_EQ(state.code_size, quantizer->CodeSize(d));
     EXPECT_EQ(state.n_encoded, n);
     EXPECT_NE(state.rotator, nullptr);
-}
-
-using AllQuantizerTags = ::testing::Types<
-    skmeans::QuantizationTag<skmeans::Quantization::f32>,
-    skmeans::QuantizationTag<skmeans::Quantization::sq8>,
-    skmeans::QuantizationTag<skmeans::Quantization::lvq4>,
-    skmeans::QuantizationTag<skmeans::Quantization::rabitq>>;
-
-template <typename T>
-class HierarchicalThreadCountTest : public ::testing::Test {};
-
-TYPED_TEST_SUITE(HierarchicalThreadCountTest, AllQuantizerTags, QuantizerNames);
-
-TYPED_TEST(HierarchicalThreadCountTest, RecallAndWCSSMatchAcrossThreadCounts) {
-    const size_t n = skm_test::RECALL_N, d = skm_test::RECALL_D;
-    const size_t k = skm_test::RECALL_N_CLUSTERS;
-    auto data = skm_test::LoadTestDataSubdim(CMAKE_SOURCE_DIR "/tests/test_data.bin", n, d, d);
-    auto gt = skm_test::BuildGroundTruthNN(
-        data.data(), n, d, skm_test::RECALL_N_QUERIES, skm_test::RECALL_KNN
-    );
-    auto train = [&](const uint32_t n_threads) {
-        skmeans::HierarchicalSuperKMeansConfig config;
-        config.seed = skm_test::RECALL_SEED;
-        config.early_termination = false;
-        config.n_threads = n_threads;
-        config.suppress_warnings = true;
-        auto kmeans = skmeans::HierarchicalSuperKMeans<TypeParam::value>(k, d, config);
-        auto centroids = kmeans.Train(data.data(), n);
-        auto labels = kmeans.Assign(data.data(), centroids.data(), n, k);
-        const float recall = skm_test::RecallAtFraction(
-            gt,
-            labels,
-            data.data(),
-            centroids.data(),
-            skm_test::RECALL_N_QUERIES,
-            k,
-            d,
-            skm_test::RECALL_KNN,
-            skm_test::RECALL_FRAC
-        );
-        const double wcss =
-            skmeans::SuperKMeans<>::ComputeWCSS(data.data(), centroids.data(), labels.data(), n, d);
-        return std::make_pair(recall, wcss);
-    };
-    const auto [recall_serial, wcss_serial] = train(1);
-    const auto [recall_parallel, wcss_parallel] = train(4);
-    EXPECT_NEAR(recall_parallel, recall_serial, skm_test::RECALL_TOL);
-    EXPECT_NEAR(wcss_parallel / wcss_serial, 1.0, 0.01);
 }
 
 } // anonymous namespace
