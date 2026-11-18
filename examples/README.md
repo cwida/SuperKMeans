@@ -49,6 +49,19 @@ Faster clustering and low memory footprint while preserving quality. Choose `sq8
 - [Optional] `k`: Number of clusters to create
 
 
+## Python: e-means example
+
+[e-means](https://arxiv.org/abs/2611.09501): mini-batch k-means with EMA centroid updates, 2 epochs over the data, accelerated with our pruning.
+
+**File:** [`emeans_clustering.py`](./emeans_clustering.py)    
+**Needs:** `pip install scikit-learn numpy`   
+**Run (assuming `pwd` is `./examples`):** `python ./emeans_clustering.py <n> <d> <k>`   
+**Parameters**:   
+- [Optional] `n`: Number of vectors to cluster 
+- [Optional] `d`: Dimensionality of vectors
+- [Optional] `k`: Number of clusters to create
+
+
 ## Python: Reading .hdf5 example
 
 **File:** [`hdf5_clustering.py`](./hdf5_clustering.py)    

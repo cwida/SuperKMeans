@@ -49,6 +49,13 @@ inline bool IsPowerOf2(const uint32_t x) {
     return x > 0 && (x & (x - 1)) == 0;
 }
 
+inline size_t RoundToPowerOfTwo(const double value) {
+    if (value <= 1.0) {
+        return 1;
+    }
+    return size_t{1} << static_cast<size_t>(std::lround(std::log2(value)));
+}
+
 // ============================================================================
 // Testing Utilities
 // The following functions are brute-force reference implementations used

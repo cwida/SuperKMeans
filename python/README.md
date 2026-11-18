@@ -51,6 +51,21 @@ centroids = kmeans.train(data)
 assignments = kmeans.quantized_assign(data, centroids)
 ```
 
+### e-means clustering
+
+[e-means](https://arxiv.org/abs/2611.09501) (mini-batch k-means with EMA centroid updates) reaches
+k-means quality in 2 epochs over the data, accelerated with SuperKMeans' pruning:
+
+```python
+from superkmeans import SuperEMeans
+
+emeans = SuperEMeans(n_clusters=k, dimensionality=d)  # also takes quantizer="sq8", etc.
+centroids = emeans.train(data)
+
+# Reuse the training state for a fast (pruned) assignment of the training points
+assignments = emeans.assign_training_points(data, centroids)
+```
+
 ## API Reference
 
 ### SuperKMeans Class
@@ -195,6 +210,37 @@ approx = kmeans.quantized_data.astype(np.float32) * p["inv_scale"] + p["base"]
 original = kmeans.unrotate(approx)
 ```
 
+### SuperEMeans Class
+
+e-means on the SuperKMeans machinery: mini-batches with EMA centroid updates, a cosine step schedule
+and dead-cluster revival. The first epoch is GEMM-only, and later epochs prune, seeded by the previous
+epoch's labels. Flat only (no hierarchical mode).
+
+#### Constructor Parameters
+
+- `n_clusters` (int): Number of clusters
+- `dimensionality` (int): Number of dimensions
+- `quantizer` (str, default="f32"): `"f32"`, `"sq8"`, `"lvq4"`, or `"rabitq"`
+- `epochs` (int, default=2): Number of passes over the data
+- `batch_size` (int, default=None): Mini-batch size. None uses the e-means batch-size law
+- `initial_step` (float, default=None): Initial EMA step in (0, 1]. None uses the e-means step-size law
+- `n_threads`, `seed`, `use_blas_only`, `full_precision_final_centroids`, `verbose`, `angular`,
+  `unrotate_centroids`: as in `SuperKMeans`
+
+#### Methods
+
+- `train(data, overwrite_input=False)`: Returns `(n_clusters, d)` centroids. No `queries`
+  (e-means runs a fixed number of epochs, with no early termination)
+- `assign`, `quantized_assign`, `assign_training_points`, `rotate`, `unrotate`: as in `SuperKMeans`
+
+#### Properties
+
+- `batch_size_` (int): Mini-batch size used in training (None before training)
+- `initial_step_` (float): Initial EMA step used in training (None before training)
+- `iteration_stats`: One `SuperKMeansIterationStats` per epoch
+- `is_trained_`, `quantizer_`, `state`, `quantization_params`, `quantized_data`,
+  `sampled_indices`: as in `SuperKMeans`
+
 ### SuperKMeansState Class
 
 Read-only record of how training was carried out.
@@ -233,6 +279,7 @@ Per-phase statistics for hierarchical clustering.
 See the `examples/` directory for complete examples:
 - `simple_clustering.py [n] [d] [k]`
 - `quantized_clustering.py [quantizer] [n] [d] [k]`
+- `emeans_clustering.py [n] [d] [k]`
 
 ## Testing
 
